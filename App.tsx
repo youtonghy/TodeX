@@ -14,6 +14,8 @@ import {
 import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator, type NativeStackScreenProps } from '@react-navigation/native-stack';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { enableScreens } from 'react-native-screens';
 
 import {
   ConnectionSettings,
@@ -73,6 +75,7 @@ type TimelineEntry = {
 type PersistedSettings = Omit<ConnectionSettings, 'authToken'>;
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
+enableScreens(true);
 
 const SETTINGS_STORAGE_KEY = 'todex.mobile.settings.v1';
 const WORKSPACES_STORAGE_KEY = 'todex.mobile.workspaces.v1';
@@ -755,87 +758,86 @@ export default function App() {
   }
 
   return (
-    <NavigationContainer>
-      <StatusBar style="dark" />
-      <Stack.Navigator
-        initialRouteName="Workspaces"
-        screenOptions={{
-          headerStyle: { backgroundColor: '#ffffff' },
-          headerShadowVisible: true,
-          headerTitleStyle: styles.headerTitle,
-          headerTintColor: '#17202a',
-          contentStyle: styles.screenBackground,
-          gestureEnabled: true,
-          animation: 'slide_from_right',
-        }}
-      >
-        <Stack.Screen name="Workspaces" options={{ title: '工作区' }}>
-          {(props) => (
-            <WorkspaceListScreen
-              {...props}
-              workspaces={workspaces}
-              conversations={conversations}
-              settings={settings}
-              connectionState={connectionState}
-              createWorkspace={createWorkspace}
-              selectWorkspace={selectWorkspace}
-            />
-          )}
-        </Stack.Screen>
-        <Stack.Screen name="Conversations">
-          {(props) => (
-            <ConversationListScreen
-              {...props}
-              workspaces={workspaces}
-              conversations={conversations}
-              timeline={timeline}
-              createConversation={createConversation}
-              selectWorkspace={selectWorkspace}
-              selectConversation={selectConversation}
-            />
-          )}
-        </Stack.Screen>
-        <Stack.Screen name="Chat">
-          {(props) => (
-            <ChatScreen
-              {...props}
-              workspaces={workspaces}
-              conversations={conversations}
-              timeline={timeline}
-              pendingRequests={pendingRequests}
-              pendingApprovalCount={pendingApprovalCount}
-              selectedRequest={selectedRequest}
-              chatDraft={chatDraft}
-              lastError={lastError}
-              setChatDraft={setChatDraft}
-              submitChat={submitChat}
-              sendApprovalResponse={sendApprovalResponse}
-              selectConversation={selectConversation}
-              runWorkspaceCommand={runWorkspaceCommand}
-              removeWorkspace={removeWorkspace}
-            />
-          )}
-        </Stack.Screen>
-        <Stack.Screen name="Settings" options={{ title: '设置' }}>
-          {(props) => (
-            <SettingsScreen
-              {...props}
-              settings={settings}
-              setSettings={setSettings}
-              serverVersion={serverVersion}
-              activeWorkspace={activeWorkspace}
-              pendingRequestCount={pendingRequests.length}
-              turnId={turnId}
-              connectionState={connectionState}
-              lastError={lastError}
-              connect={connect}
-              closeSocket={closeSocket}
-              refreshServerVersion={refreshServerVersion}
-            />
-          )}
-        </Stack.Screen>
-      </Stack.Navigator>
-    </NavigationContainer>
+    <SafeAreaProvider>
+      <NavigationContainer>
+        <StatusBar style="dark" />
+        <Stack.Navigator
+          initialRouteName="Workspaces"
+          screenOptions={{
+            headerStyle: { backgroundColor: '#ffffff' },
+            headerTitleStyle: styles.headerTitle,
+            headerTintColor: '#17202a',
+            contentStyle: styles.screenBackground,
+          }}
+        >
+          <Stack.Screen name="Workspaces" options={{ title: '工作区' }}>
+            {(props) => (
+              <WorkspaceListScreen
+                {...props}
+                workspaces={workspaces}
+                conversations={conversations}
+                settings={settings}
+                connectionState={connectionState}
+                createWorkspace={createWorkspace}
+                selectWorkspace={selectWorkspace}
+              />
+            )}
+          </Stack.Screen>
+          <Stack.Screen name="Conversations">
+            {(props) => (
+              <ConversationListScreen
+                {...props}
+                workspaces={workspaces}
+                conversations={conversations}
+                timeline={timeline}
+                createConversation={createConversation}
+                selectWorkspace={selectWorkspace}
+                selectConversation={selectConversation}
+              />
+            )}
+          </Stack.Screen>
+          <Stack.Screen name="Chat">
+            {(props) => (
+              <ChatScreen
+                {...props}
+                workspaces={workspaces}
+                conversations={conversations}
+                timeline={timeline}
+                pendingRequests={pendingRequests}
+                pendingApprovalCount={pendingApprovalCount}
+                selectedRequest={selectedRequest}
+                chatDraft={chatDraft}
+                lastError={lastError}
+                setChatDraft={setChatDraft}
+                submitChat={submitChat}
+                sendApprovalResponse={sendApprovalResponse}
+                selectConversation={selectConversation}
+                runWorkspaceCommand={runWorkspaceCommand}
+                removeWorkspace={removeWorkspace}
+              />
+            )}
+          </Stack.Screen>
+          <Stack.Screen name="Settings" options={{ title: '设置' }}>
+            {(props) => (
+              <SettingsScreen
+                {...props}
+                settings={settings}
+                setSettings={setSettings}
+                serverVersion={serverVersion}
+                activeWorkspace={activeWorkspace}
+                pendingRequestCount={pendingRequests.length}
+                turnId={turnId}
+                connectionState={connectionState}
+                lastError={lastError}
+                connect={connect}
+                closeSocket={closeSocket}
+                refreshServerVersion={refreshServerVersion}
+              />
+            )}
+          </Stack.Screen>
+        </Stack.Navigator>
+      </NavigationContainer>
+    </SafeAreaProvider>
   );
 }
 
