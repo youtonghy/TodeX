@@ -1,4 +1,4 @@
-export type AppTab = 'workspaces' | 'chat' | 'tasks' | 'commands' | 'settings';
+export type AppTab = 'chat' | 'settings';
 
 export type ConnectionSettings = {
   serverUrl: string;

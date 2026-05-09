@@ -14,8 +14,6 @@ import { StatusBar } from 'expo-status-bar';
 
 import {
   AppTab,
-  COMMAND_PRESETS,
-  CommandContext,
   ConnectionSettings,
   PendingRequest,
   ServerEvent,
@@ -24,17 +22,13 @@ import {
   buildHttpUrl,
   buildWebSocketUrl,
   classifyPendingRequest,
-  createMessage,
   createRequestId,
   displayNameFromPath,
   eventId,
   eventPayloadData,
-  findCommandPreset,
   inferApprovalResponseType,
   isApprovalLikeRequest,
   normalizeServerUrl,
-  presetsByGroup,
-  requestIdFromEvent,
   shortJson,
   summarizeEventType,
 } from './src/lib/todex';
@@ -47,6 +41,15 @@ type ServerVersion = {
   workspace_root: string;
 };
 
+type ConversationRecord = {
+  id: string;
+  workspaceId: string;
+  title: string;
+  threadId: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
 type TimelineEntry = {
   id: string;
   kind: 'incoming' | 'outgoing' | 'system';
@@ -54,14 +57,17 @@ type TimelineEntry = {
   subtitle: string;
   raw: string;
   at: number;
+  workspaceId?: string;
+  conversationId?: string;
 };
 
 type PersistedSettings = Omit<ConnectionSettings, 'authToken'>;
 
 const SETTINGS_STORAGE_KEY = 'todex.mobile.settings.v1';
 const WORKSPACES_STORAGE_KEY = 'todex.mobile.workspaces.v1';
+const CONVERSATIONS_STORAGE_KEY = 'todex.mobile.conversations.v1';
 const TOKEN_STORAGE_KEY = 'todex.mobile.token.v1';
-const MAX_TIMELINE_ITEMS = 220;
+const MAX_TIMELINE_ITEMS = 260;
 const MAX_EVENTS = 220;
 
 const defaultSettings: ConnectionSettings = {
@@ -101,14 +107,36 @@ function nowLabel(timestamp: number): string {
   return new Date(timestamp).toLocaleTimeString([], {
     hour: '2-digit',
     minute: '2-digit',
-    second: '2-digit',
   });
 }
 
-function classifyEvent(event: ServerEvent): TimelineEntry {
+function textFromLocalTurnPayload(payload: Record<string, unknown>): string {
+  const input = payload.input;
+  if (!Array.isArray(input)) {
+    return shortJson(payload).slice(0, 240);
+  }
+
+  const text = input
+    .map((item) => {
+      if (item && typeof item === 'object' && 'text' in item) {
+        return String((item as { text?: unknown }).text ?? '');
+      }
+      return '';
+    })
+    .filter(Boolean)
+    .join('\n');
+
+  return text || shortJson(payload).slice(0, 240);
+}
+
+function classifyEvent(
+  event: ServerEvent,
+  workspaceId: string,
+  conversationId: string,
+): TimelineEntry {
   const data = eventPayloadData(event);
   const title = summarizeEventType(event.type);
-  const subtitle = shortJson(data).slice(0, 180);
+  const subtitle = shortJson(data).slice(0, 420);
   return {
     id: eventId(event),
     kind: 'incoming',
@@ -116,10 +144,17 @@ function classifyEvent(event: ServerEvent): TimelineEntry {
     subtitle,
     raw: shortJson(event),
     at: Date.now(),
+    workspaceId,
+    conversationId,
   };
 }
 
-function makeSystemEntry(title: string, subtitle = ''): TimelineEntry {
+function makeSystemEntry(
+  title: string,
+  subtitle = '',
+  workspaceId = '',
+  conversationId = '',
+): TimelineEntry {
   return {
     id: createRequestId('sys'),
     kind: 'system',
@@ -127,29 +162,55 @@ function makeSystemEntry(title: string, subtitle = ''): TimelineEntry {
     subtitle,
     raw: '',
     at: Date.now(),
+    workspaceId,
+    conversationId,
   };
 }
 
-function makeOutgoingEntry(message: { id: string; type: string; payload: Record<string, unknown> }): TimelineEntry {
+function makeOutgoingEntry(
+  message: { id: string; type: string; payload: Record<string, unknown> },
+  workspaceId: string,
+  conversationId: string,
+): TimelineEntry {
   return {
     id: message.id,
-    kind: 'outgoing',
-    title: `sent ${message.type}`,
-    subtitle: shortJson(message.payload).slice(0, 180),
+    kind: message.type === 'codex.local.turn' ? 'outgoing' : 'system',
+    title: message.type === 'codex.local.turn' ? 'You' : `sent ${message.type}`,
+    subtitle:
+      message.type === 'codex.local.turn'
+        ? textFromLocalTurnPayload(message.payload)
+        : shortJson(message.payload).slice(0, 220),
     raw: shortJson(message),
     at: Date.now(),
+    workspaceId,
+    conversationId,
+  };
+}
+
+function createDefaultConversation(workspace: WorkspaceRecord, fallbackThreadId: string): ConversationRecord {
+  const createdAt = workspace.createdAt || Date.now();
+  return {
+    id: createRequestId('conversation'),
+    workspaceId: workspace.id,
+    title: '默认对话',
+    threadId: workspace.threadId || fallbackThreadId,
+    createdAt,
+    updatedAt: workspace.updatedAt || createdAt,
   };
 }
 
 export default function App() {
   const socketRef = useRef<WebSocket | null>(null);
-  const hydratedRef = useRef(false);
+  const activeWorkspaceRef = useRef('');
+  const activeConversationRef = useRef('');
 
   const [hydrated, setHydrated] = useState(false);
-  const [activeTab, setActiveTab] = useState<AppTab>('workspaces');
+  const [activeTab, setActiveTab] = useState<AppTab>('chat');
   const [settings, setSettings] = useState<ConnectionSettings>(defaultSettings);
   const [workspaces, setWorkspaces] = useState<WorkspaceRecord[]>([]);
+  const [conversations, setConversations] = useState<ConversationRecord[]>([]);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState('');
+  const [activeConversationId, setActiveConversationId] = useState('');
   const [connectionState, setConnectionState] = useState<'idle' | 'connecting' | 'open' | 'closed' | 'error'>('idle');
   const [lastError, setLastError] = useState('');
   const [serverVersion, setServerVersion] = useState<ServerVersion | null>(null);
@@ -157,21 +218,28 @@ export default function App() {
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
   const [selectedRequestId, setSelectedRequestId] = useState('');
   const [chatDraft, setChatDraft] = useState('');
-  const [commandPromptDraft, setCommandPromptDraft] = useState('Write a message for Codex.');
   const [workspaceNameDraft, setWorkspaceNameDraft] = useState('');
   const [workspacePathDraft, setWorkspacePathDraft] = useState('');
-  const [commandType, setCommandType] = useState(COMMAND_PRESETS[0].type);
-  const [commandRequestId, setCommandRequestId] = useState(createRequestId('cmd'));
-  const [commandPayloadText, setCommandPayloadText] = useState('{}');
-  const [threadId, setThreadId] = useState(defaultSettings.defaultThreadId);
   const [turnId, setTurnId] = useState('');
+
+  const closeSocket = useCallback(() => {
+    if (socketRef.current) {
+      try {
+        socketRef.current.close();
+      } catch {
+        // ignore
+      }
+      socketRef.current = null;
+    }
+  }, []);
 
   useEffect(() => {
     let alive = true;
     (async () => {
-      const [storedSettings, storedWorkspaces, storedToken] = await Promise.all([
+      const [storedSettings, storedWorkspaces, storedConversations, storedToken] = await Promise.all([
         loadJson<PersistedSettings | null>(SETTINGS_STORAGE_KEY, null),
         loadJson<WorkspaceRecord[]>(WORKSPACES_STORAGE_KEY, []),
+        loadJson<ConversationRecord[]>(CONVERSATIONS_STORAGE_KEY, []),
         loadSecret(TOKEN_STORAGE_KEY),
       ]);
 
@@ -179,19 +247,37 @@ export default function App() {
         return;
       }
 
-      setSettings(fromPersistedSettings(storedSettings, storedToken));
+      const nextSettings = fromPersistedSettings(storedSettings, storedToken);
+      const existingWorkspaceIds = new Set(storedWorkspaces.map((workspace) => workspace.id));
+      const normalizedConversations =
+        storedConversations.length > 0
+          ? storedConversations.filter((conversation) => existingWorkspaceIds.has(conversation.workspaceId))
+          : storedWorkspaces.map((workspace) => createDefaultConversation(workspace, nextSettings.defaultThreadId));
+      const firstWorkspaceId = storedWorkspaces[0]?.id ?? '';
+      const firstConversationId =
+        normalizedConversations.find((conversation) => conversation.workspaceId === firstWorkspaceId)?.id ?? '';
+
+      setSettings(nextSettings);
       setWorkspaces(storedWorkspaces);
-      setActiveWorkspaceId(storedWorkspaces[0]?.id ?? '');
+      setConversations(normalizedConversations);
+      setActiveWorkspaceId(firstWorkspaceId);
+      setActiveConversationId(firstConversationId);
       setHydrated(true);
-      hydratedRef.current = true;
     })();
 
     return () => {
       alive = false;
       closeSocket();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [closeSocket]);
+
+  useEffect(() => {
+    activeWorkspaceRef.current = activeWorkspaceId;
+  }, [activeWorkspaceId]);
+
+  useEffect(() => {
+    activeConversationRef.current = activeConversationId;
+  }, [activeConversationId]);
 
   useEffect(() => {
     if (!hydrated) {
@@ -209,6 +295,13 @@ export default function App() {
   }, [hydrated, workspaces]);
 
   useEffect(() => {
+    if (!hydrated) {
+      return;
+    }
+    void saveJson(CONVERSATIONS_STORAGE_KEY, conversations);
+  }, [conversations, hydrated]);
+
+  useEffect(() => {
     if (!activeWorkspaceId && workspaces.length > 0) {
       setActiveWorkspaceId(workspaces[0].id);
     }
@@ -216,17 +309,28 @@ export default function App() {
 
   useEffect(() => {
     if (!activeWorkspaceId) {
+      setActiveConversationId('');
       return;
     }
-    const active = workspaces.find((item) => item.id === activeWorkspaceId);
-    if (active) {
-      setChatDraft('');
+    const available = conversations.filter((conversation) => conversation.workspaceId === activeWorkspaceId);
+    if (available.length > 0 && !available.some((conversation) => conversation.id === activeConversationId)) {
+      setActiveConversationId(available[0].id);
     }
-  }, [activeWorkspaceId, workspaces]);
+  }, [activeConversationId, activeWorkspaceId, conversations]);
 
   const activeWorkspace = useMemo(
     () => workspaces.find((item) => item.id === activeWorkspaceId) ?? null,
     [activeWorkspaceId, workspaces],
+  );
+
+  const workspaceConversations = useMemo(
+    () => conversations.filter((conversation) => conversation.workspaceId === activeWorkspaceId),
+    [activeWorkspaceId, conversations],
+  );
+
+  const activeConversation = useMemo(
+    () => workspaceConversations.find((conversation) => conversation.id === activeConversationId) ?? null,
+    [activeConversationId, workspaceConversations],
   );
 
   const pendingRequests = useMemo<PendingRequest[]>(() => {
@@ -266,48 +370,29 @@ export default function App() {
     [pendingRequests, selectedRequestId],
   );
 
-  const commandContext = useMemo<CommandContext>(
-    () => ({
-      settings,
-      workspace: activeWorkspace,
-      threadId: activeWorkspace?.threadId || settings.defaultThreadId,
-      turnId,
-      prompt: commandPromptDraft,
-      selectedRequest,
-    }),
-    [activeWorkspace, commandPromptDraft, selectedRequest, settings, turnId],
-  );
-
-  const groupedPresets = useMemo(() => presetsByGroup(), []);
-
   const appendTimeline = useCallback((entry: TimelineEntry) => {
     setTimeline((current) => [entry, ...current].slice(0, MAX_TIMELINE_ITEMS));
   }, []);
 
-  const appendEvent = useCallback((event: ServerEvent) => {
-    setEvents((current) => [event, ...current].slice(0, MAX_EVENTS));
-    appendTimeline(classifyEvent(event));
-    const data = eventPayloadData(event);
-    const maybeTurnId = data.turnId ?? data.turn_id;
-    if (typeof maybeTurnId === 'string' && maybeTurnId) {
-      setTurnId(maybeTurnId);
-    }
-  }, [appendTimeline]);
-
-  const pushSystem = useCallback((title: string, subtitle = '') => {
-    appendTimeline(makeSystemEntry(title, subtitle));
-  }, [appendTimeline]);
-
-  const closeSocket = useCallback(() => {
-    if (socketRef.current) {
-      try {
-        socketRef.current.close();
-      } catch {
-        // ignore
+  const appendEvent = useCallback(
+    (event: ServerEvent) => {
+      setEvents((current) => [event, ...current].slice(0, MAX_EVENTS));
+      appendTimeline(classifyEvent(event, activeWorkspaceRef.current, activeConversationRef.current));
+      const data = eventPayloadData(event);
+      const maybeTurnId = data.turnId ?? data.turn_id;
+      if (typeof maybeTurnId === 'string' && maybeTurnId) {
+        setTurnId(maybeTurnId);
       }
-      socketRef.current = null;
-    }
-  }, []);
+    },
+    [appendTimeline],
+  );
+
+  const pushSystem = useCallback(
+    (title: string, subtitle = '') => {
+      appendTimeline(makeSystemEntry(title, subtitle, activeWorkspaceRef.current, activeConversationRef.current));
+    },
+    [appendTimeline],
+  );
 
   const refreshServerVersion = useCallback(async () => {
     try {
@@ -341,7 +426,7 @@ export default function App() {
 
       socket.onopen = () => {
         setConnectionState('open');
-        pushSystem('connected', wsUrl);
+        pushSystem('已连接', wsUrl);
         void refreshServerVersion();
       };
 
@@ -361,7 +446,7 @@ export default function App() {
 
       socket.onclose = () => {
         setConnectionState((current) => (current === 'open' ? 'closed' : current));
-        pushSystem('disconnected', wsUrl);
+        pushSystem('已断开', wsUrl);
       };
     } catch (error) {
       setConnectionState('error');
@@ -373,46 +458,22 @@ export default function App() {
     (type: string, payload: Record<string, unknown>, requestId = createRequestId('msg')) => {
       const socket = socketRef.current;
       if (!socket || socket.readyState !== WebSocket.OPEN) {
-        setLastError('Connect to the backend first.');
+        setLastError('请先在设置里连接后端。');
         return false;
       }
 
       const message = { id: requestId, type, payload };
       socket.send(JSON.stringify(message));
-      appendTimeline(makeOutgoingEntry(message));
+      appendTimeline(makeOutgoingEntry(message, activeWorkspaceRef.current, activeConversationRef.current));
       return true;
     },
     [appendTimeline],
   );
 
-  const loadPreset = useCallback(
-    (type: string) => {
-      const preset = findCommandPreset(type);
-      if (!preset) {
-        return;
-      }
-      const payload = preset.build(commandContext);
-      setCommandType(type);
-      setCommandRequestId(createRequestId('cmd'));
-      setCommandPayloadText(JSON.stringify(payload, null, 2));
-      setActiveTab('commands');
-    },
-    [commandContext],
-  );
-
-  useEffect(() => {
-    const preset = findCommandPreset(commandType);
-    if (!preset) {
-      return;
-    }
-    const payload = preset.build(commandContext);
-    setCommandPayloadText(JSON.stringify(payload, null, 2));
-  }, [commandContext, commandType]);
-
   const addWorkspace = useCallback(() => {
     const path = workspacePathDraft.trim();
     if (!path) {
-      Alert.alert('Missing path', 'Enter a workspace directory.');
+      Alert.alert('缺少目录', '请输入要管理的目录路径。');
       return;
     }
 
@@ -433,14 +494,15 @@ export default function App() {
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
+    const nextConversation = createDefaultConversation(nextWorkspace, settings.defaultThreadId);
 
     setWorkspaces((current) => [nextWorkspace, ...current]);
+    setConversations((current) => [nextConversation, ...current]);
     setActiveWorkspaceId(id);
+    setActiveConversationId(nextConversation.id);
     setWorkspaceNameDraft('');
     setWorkspacePathDraft('');
-    setThreadId(nextWorkspace.threadId);
-    pushSystem('workspace added', nextWorkspace.path);
-    setActiveTab('chat');
+    pushSystem('已添加目录', nextWorkspace.path);
   }, [
     pushSystem,
     settings.approvalPolicy,
@@ -460,19 +522,48 @@ export default function App() {
     );
   }, []);
 
-  const selectWorkspace = useCallback(
-    (id: string) => {
-      const workspace = workspaces.find((item) => item.id === id);
-      if (!workspace) {
-        return;
+  const selectWorkspace = useCallback((id: string) => {
+    const workspace = workspaces.find((item) => item.id === id);
+    if (!workspace) {
+      return;
+    }
+    const conversation = conversations.find((item) => item.workspaceId === id);
+    setActiveWorkspaceId(id);
+    setActiveConversationId(conversation?.id ?? '');
+    setLastError('');
+  }, [conversations, workspaces]);
+
+  const createConversation = useCallback(() => {
+    if (!activeWorkspace) {
+      Alert.alert('未选择目录', '请先选择一个目录。');
+      return;
+    }
+
+    const index = workspaceConversations.length + 1;
+    const next: ConversationRecord = {
+      id: createRequestId('conversation'),
+      workspaceId: activeWorkspace.id,
+      title: `对话 ${index}`,
+      threadId: `thread_${Date.now().toString(36)}`,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    setConversations((current) => [next, ...current]);
+    setActiveConversationId(next.id);
+    setTurnId('');
+  }, [activeWorkspace, workspaceConversations.length]);
+
+  const removeWorkspace = useCallback(
+    (workspaceId: string) => {
+      setWorkspaces((current) => current.filter((workspace) => workspace.id !== workspaceId));
+      setConversations((current) => current.filter((conversation) => conversation.workspaceId !== workspaceId));
+      if (activeWorkspaceId === workspaceId) {
+        const next = workspaces.find((workspace) => workspace.id !== workspaceId);
+        setActiveWorkspaceId(next?.id ?? '');
+        setActiveConversationId(conversations.find((conversation) => conversation.workspaceId === next?.id)?.id ?? '');
       }
-      setActiveWorkspaceId(id);
-      setThreadId(workspace.threadId || settings.defaultThreadId);
-      setLastError('');
-      setActiveTab('chat');
-      pushSystem('workspace selected', workspace.name);
     },
-    [pushSystem, settings.defaultThreadId, workspaces],
+    [activeWorkspaceId, conversations, workspaces],
   );
 
   const sendWorkspaceCommand = useCallback(
@@ -489,15 +580,15 @@ export default function App() {
 
   const sendLocalTurn = useCallback(
     (text: string) => {
-      if (!activeWorkspace) {
-        Alert.alert('No workspace selected', 'Create or select a workspace first.');
+      if (!activeWorkspace || !activeConversation) {
+        Alert.alert('未选择对话', '请先选择目录和历史对话。');
         return;
       }
 
       const payload = {
         codexSessionId: activeWorkspace.sessionId,
         tenantId: activeWorkspace.tenantId,
-        threadId: threadId || activeWorkspace.threadId || settings.defaultThreadId,
+        threadId: activeConversation.threadId,
         input: [{ type: 'text', text }],
         collaborationMode: {
           mode: 'default',
@@ -509,16 +600,27 @@ export default function App() {
       };
 
       if (sendProtocolMessage('codex.local.turn', payload)) {
-        updateWorkspace(activeWorkspace.id, { threadId: payload.threadId as string });
+        updateWorkspace(activeWorkspace.id, { threadId: activeConversation.threadId });
+        setConversations((current) =>
+          current.map((conversation) =>
+            conversation.id === activeConversation.id
+              ? {
+                  ...conversation,
+                  title: conversation.title === '默认对话' ? text.slice(0, 18) || conversation.title : conversation.title,
+                  updatedAt: Date.now(),
+                }
+              : conversation,
+          ),
+        );
       }
     },
-    [activeWorkspace, sendProtocolMessage, settings.defaultModel, settings.defaultThreadId, threadId, updateWorkspace],
+    [activeConversation, activeWorkspace, sendProtocolMessage, settings.defaultModel, updateWorkspace],
   );
 
   const sendApprovalResponse = useCallback(
     (accepted: boolean, request: PendingRequest) => {
       if (!activeWorkspace) {
-        Alert.alert('No workspace selected', 'Create or select a workspace first.');
+        Alert.alert('未选择目录', '请先选择一个目录。');
         return;
       }
       sendProtocolMessage('codex.local.approval.respond', {
@@ -542,15 +644,9 @@ export default function App() {
 
       const [command, ...rest] = trimmed.slice(1).trim().split(/\s+/);
       const lower = command.toLowerCase();
-      const tail = rest.join(' ').trim();
 
       if (!activeWorkspace) {
-        Alert.alert('No workspace selected', 'Create or select a workspace first.');
-        return;
-      }
-
-      if (lower === 'help') {
-        setActiveTab('commands');
+        Alert.alert('未选择目录', '请先选择一个目录。');
         return;
       }
 
@@ -559,7 +655,7 @@ export default function App() {
         const requestId = rest[1] || selectedRequest?.requestId || '';
         const target = pendingRequests.find((request) => request.requestId === requestId) ?? selectedRequest;
         if (!target) {
-          Alert.alert('No pending request', 'There is no approval or prompt to respond to.');
+          Alert.alert('没有待处理请求', '当前没有可回复的审批或问题。');
           return;
         }
         sendApprovalResponse(!deny, target);
@@ -603,14 +699,9 @@ export default function App() {
         return;
       }
 
-      if (lower === 'snapshot') {
-        sendWorkspaceCommand(activeWorkspace, 'codex.local.snapshot', { maxBytes: 65_536 });
-        return;
-      }
-
       if (lower === 'interrupt') {
         sendWorkspaceCommand(activeWorkspace, 'codex.local.interrupt', {
-          threadId: threadId || activeWorkspace.threadId || settings.defaultThreadId,
+          threadId: activeConversation?.threadId || activeWorkspace.threadId || settings.defaultThreadId,
           turnId: turnId || '',
         });
         return;
@@ -619,6 +710,7 @@ export default function App() {
       sendLocalTurn(trimmed);
     },
     [
+      activeConversation,
       activeWorkspace,
       pendingRequests,
       selectedRequest,
@@ -626,7 +718,6 @@ export default function App() {
       sendLocalTurn,
       sendWorkspaceCommand,
       settings.defaultThreadId,
-      threadId,
       turnId,
     ],
   );
@@ -640,446 +731,278 @@ export default function App() {
     sendSlashCommand(text);
   }, [chatDraft, sendSlashCommand]);
 
-  const sendCommandEditorMessage = useCallback(() => {
-    let payload: Record<string, unknown>;
-    try {
-      payload = JSON.parse(commandPayloadText) as Record<string, unknown>;
-    } catch {
-      Alert.alert('Invalid JSON', 'The command payload must be valid JSON.');
-      return;
+  const conversationMessages = useMemo(() => {
+    if (!activeConversationId) {
+      return [];
     }
-
-    if (!sendProtocolMessage(commandType, payload, commandRequestId)) {
-      return;
-    }
-
-    setCommandRequestId(createRequestId('cmd'));
-  }, [commandPayloadText, commandRequestId, commandType, sendProtocolMessage]);
+    return timeline
+      .filter((entry) => entry.conversationId === activeConversationId)
+      .slice()
+      .reverse();
+  }, [activeConversationId, timeline]);
 
   const pendingApprovalCount = pendingRequests.filter((request) => isApprovalLikeRequest(request.requestType)).length;
-  const cloudTaskEvents = useMemo(
-    () => events.filter((event) => event.type.startsWith('codex.cloudTask.')),
-    [events],
-  );
 
-  const renderTopBanner = () => (
-    <View style={styles.banner}>
-      <View style={styles.bannerRow}>
-        <View style={styles.bannerLeft}>
-          <Text style={styles.product}>TodeX Mobile</Text>
-          <Text style={styles.bannerText} numberOfLines={1}>
-            {activeWorkspace ? activeWorkspace.name : 'No workspace selected'}
-          </Text>
-        </View>
-        <View style={[styles.badge, connectionState === 'open' ? styles.badgeOpen : styles.badgeMuted]}>
-          <Text style={styles.badgeText}>{connectionState}</Text>
-        </View>
+  const renderTopBar = () => (
+    <View style={styles.topBar}>
+      <View style={styles.topTitleGroup}>
+        <Text style={styles.product}>TodeX</Text>
+        <Text style={styles.topSubtitle} numberOfLines={1}>
+          {activeTab === 'chat'
+            ? activeWorkspace?.path ?? '选择目录开始对话'
+            : settings.serverUrl}
+        </Text>
       </View>
-      {lastError ? <Text style={styles.errorText}>{lastError}</Text> : null}
-      <View style={styles.metaRow}>
-        <Text style={styles.metaText} numberOfLines={1}>
-          {settings.serverUrl}
-        </Text>
-        <Text style={styles.metaText} numberOfLines={1}>
-          {serverVersion ? `${serverVersion.name} ${serverVersion.version}` : 'version unknown'}
-        </Text>
+      <View style={[styles.statusPill, connectionState === 'open' ? styles.statusOpen : styles.statusMuted]}>
+        <Text style={styles.statusText}>{connectionState}</Text>
       </View>
     </View>
   );
 
-  const renderWorkspaceTab = () => (
-    <ScrollView contentContainerStyle={styles.tabContent}>
-      <Panel title="Add workspace">
-        <Field
-          label="Name"
-          value={workspaceNameDraft}
-          onChangeText={setWorkspaceNameDraft}
-          placeholder="Optional display name"
-        />
-        <Field
-          label="Directory"
-          value={workspacePathDraft}
-          onChangeText={setWorkspacePathDraft}
-          placeholder={settings.defaultWorkspacePath}
-        />
-        <Row>
-          <ActionButton title="Add" onPress={addWorkspace} />
-          <ActionButton
-            title="Use default"
-            onPress={() => setWorkspacePathDraft(settings.defaultWorkspacePath)}
-            tone="ghost"
+  const renderDirectoryList = () => (
+    <ScrollView contentContainerStyle={styles.pageContent}>
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>目录</Text>
+        <View style={styles.formBlock}>
+          <Field
+            label="目录名称"
+            value={workspaceNameDraft}
+            onChangeText={setWorkspaceNameDraft}
+            placeholder="可选"
           />
-        </Row>
-      </Panel>
+          <Field
+            label="目录路径"
+            value={workspacePathDraft}
+            onChangeText={setWorkspacePathDraft}
+            placeholder={settings.defaultWorkspacePath}
+          />
+          <Row>
+            <ActionButton title="添加目录" onPress={addWorkspace} />
+            <ActionButton
+              title="填入默认路径"
+              onPress={() => setWorkspacePathDraft(settings.defaultWorkspacePath)}
+              tone="ghost"
+            />
+          </Row>
+        </View>
+      </View>
 
-      <Panel title={`Workspaces (${workspaces.length})`}>
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>已管理目录</Text>
         {workspaces.length === 0 ? (
-          <EmptyState text="Add a directory to start a local session." />
+          <EmptyState text="还没有目录。添加一个目录后，它会成为对话分类。" />
         ) : (
-          workspaces.map((workspace) => (
-            <View key={workspace.id} style={[styles.listItem, workspace.id === activeWorkspaceId && styles.listItemActive]}>
-              <View style={styles.listItemHeader}>
-                <Text style={styles.itemTitle} numberOfLines={1}>
-                  {workspace.name}
-                </Text>
-                <Text style={styles.itemTag}>{workspace.id.slice(-6)}</Text>
-              </View>
-              <Text style={styles.itemBody} numberOfLines={2}>
-                {workspace.path}
-              </Text>
-              <Text style={styles.itemBody} numberOfLines={1}>
-                session {workspace.sessionId} · thread {workspace.threadId}
-              </Text>
-              <View style={styles.wrapRow}>
-                <MiniButton title="Select" onPress={() => selectWorkspace(workspace.id)} />
-                <MiniButton title="Start" onPress={() => sendWorkspaceCommand(workspace, 'codex.local.start', {
-                  cwd: workspace.path,
-                  model: workspace.model,
-                  approvalPolicy: workspace.approvalPolicy,
-                  sandboxMode: workspace.sandboxMode,
-                  configOverrides: {},
-                })} />
-                <MiniButton title="Status" onPress={() => sendWorkspaceCommand(workspace, 'codex.local.status')} />
-                <MiniButton title="Attach" onPress={() => sendWorkspaceCommand(workspace, 'codex.local.attach', { afterCursor: null, replayLimit: 200 })} />
-                <MiniButton title="Stop" onPress={() => sendWorkspaceCommand(workspace, 'codex.local.stop', { force: false })} />
-                <MiniButton
-                  title="Delete"
-                  onPress={() =>
-                    setWorkspaces((current) => {
-                      const next = current.filter((item) => item.id !== workspace.id);
-                      if (activeWorkspaceId === workspace.id) {
-                        setActiveWorkspaceId(next[0]?.id ?? '');
-                        if (next[0]) {
-                          setThreadId(next[0].threadId);
-                        }
-                      }
-                      return next;
-                    })
-                  }
-                />
-              </View>
-            </View>
-          ))
-        )}
-      </Panel>
-    </ScrollView>
-  );
-
-  const renderChatTab = () => (
-    <ScrollView contentContainerStyle={styles.tabContent}>
-      <Panel title="Session">
-        <Field
-          label="Thread"
-          value={threadId}
-          onChangeText={setThreadId}
-          placeholder={settings.defaultThreadId}
-        />
-        <Field
-          label="Turn"
-          value={turnId}
-          onChangeText={() => undefined}
-          placeholder="Use command actions to update turn id"
-          editable={false}
-        />
-        <Row>
-          <ActionButton title="Start" onPress={() => sendSlashCommand('/start')} />
-          <ActionButton title="Status" onPress={() => sendSlashCommand('/status')} tone="ghost" />
-          <ActionButton title="Attach" onPress={() => sendSlashCommand('/attach')} tone="ghost" />
-          <ActionButton title="Replay" onPress={() => sendSlashCommand('/replay')} tone="ghost" />
-          <ActionButton title="Interrupt" onPress={() => sendSlashCommand('/interrupt')} tone="ghost" />
-        </Row>
-      </Panel>
-
-      <Panel title={`Pending requests (${pendingRequests.length})`}>
-        {pendingRequests.length === 0 ? (
-          <EmptyState text="Approval and question requests will appear here." />
-        ) : (
-          pendingRequests.map((request) => (
-            <Pressable
-              key={request.requestId}
-              onPress={() => setSelectedRequestId(request.requestId)}
-              style={[
-                styles.listItem,
-                request.requestId === selectedRequestId && styles.listItemActive,
-              ]}
-            >
-              <View style={styles.listItemHeader}>
-                <Text style={styles.itemTitle} numberOfLines={1}>
-                  {request.title}
-                </Text>
-                <Text style={styles.itemTag}>{request.requestType.split('.').slice(-2, -1)[0] ?? 'req'}</Text>
-              </View>
-              <Text style={styles.itemBody} numberOfLines={2}>
-                {request.requestType}
-              </Text>
-              <Text style={styles.itemBody} numberOfLines={1}>
-                {request.requestId}
-              </Text>
-              <View style={styles.wrapRow}>
-                {isApprovalLikeRequest(request.requestType) ? (
-                  <>
-                    <MiniButton title="Accept" onPress={() => sendApprovalResponse(true, request)} />
-                    <MiniButton title="Deny" onPress={() => sendApprovalResponse(false, request)} />
-                  </>
-                ) : (
-                  <MiniButton
-                    title="Load command"
-                    onPress={() => loadPreset('codex.local.approval.respond')}
-                  />
-                )}
-              </View>
-            </Pressable>
-          ))
-        )}
-      </Panel>
-
-      <Panel title="Composer">
-        <Field
-          label="Message or slash command"
-          value={chatDraft}
-          onChangeText={setChatDraft}
-          placeholder="/permission accept 123 or write a message"
-          multiline
-        />
-        <Row>
-          <ActionButton title="Send" onPress={submitChat} />
-          <ActionButton title="Command list" onPress={() => setActiveTab('commands')} tone="ghost" />
-        </Row>
-      </Panel>
-
-      <Panel title="Timeline">
-        {timeline.length === 0 ? (
-          <EmptyState text="Outgoing requests and server events will be shown here." />
-        ) : (
-          timeline.map((entry) => (
-            <View key={entry.id} style={styles.timelineItem}>
-              <View style={styles.listItemHeader}>
-                <Text style={styles.itemTitle} numberOfLines={1}>
-                  {entry.title}
-                </Text>
-                <Text style={styles.itemTag}>{nowLabel(entry.at)}</Text>
-              </View>
-              {entry.subtitle ? (
-                <Text style={styles.itemBody} numberOfLines={3}>
-                  {entry.subtitle}
-                </Text>
-              ) : null}
-              <Text style={styles.itemMeta} numberOfLines={2}>
-                {entry.kind}
-              </Text>
-            </View>
-          ))
-        )}
-      </Panel>
-    </ScrollView>
-  );
-
-  const renderTasksTab = () => (
-    <ScrollView contentContainerStyle={styles.tabContent}>
-      <Panel title={`Cloud tasks (${cloudTaskEvents.length})`}>
-        {cloudTaskEvents.length === 0 ? (
-          <EmptyState text="Cloud task events will appear here once the backend emits them." />
-        ) : (
-          cloudTaskEvents.map((event) => {
-            const data = eventPayloadData(event);
-            const taskId = String(
-              data.taskId ?? data.task_id ?? data.requestId ?? data.request_id ?? eventId(event),
-            );
+          workspaces.map((workspace) => {
+            const count = conversations.filter((conversation) => conversation.workspaceId === workspace.id).length;
             return (
-              <View key={eventId(event)} style={styles.listItem}>
-                <View style={styles.listItemHeader}>
+              <Pressable
+                key={workspace.id}
+                onPress={() => selectWorkspace(workspace.id)}
+                style={[styles.directoryItem, workspace.id === activeWorkspaceId && styles.directoryItemActive]}
+              >
+                <View style={styles.itemHeader}>
                   <Text style={styles.itemTitle} numberOfLines={1}>
-                    {taskId}
+                    {workspace.name}
                   </Text>
-                  <Text style={styles.itemTag}>{event.type.split('.').slice(-1)[0]}</Text>
+                  <Text style={styles.itemTag}>{count} 个对话</Text>
                 </View>
                 <Text style={styles.itemBody} numberOfLines={2}>
-                  {event.type}
+                  {workspace.path}
                 </Text>
-                <Text style={styles.itemBody} numberOfLines={3}>
-                  {shortJson(data)}
-                </Text>
-              </View>
+              </Pressable>
             );
           })
         )}
-      </Panel>
+      </View>
     </ScrollView>
   );
 
-  const renderCommandsTab = () => (
-    <ScrollView contentContainerStyle={styles.tabContent}>
-      <Panel title="Raw command editor">
-        <Field
-          label="Type"
-          value={commandType}
-          onChangeText={setCommandType}
-          placeholder="codex.local.turn"
-        />
-        <Field
-          label="Request id"
-          value={commandRequestId}
-          onChangeText={setCommandRequestId}
-          placeholder="msg-..."
-        />
-        <Field
-          label="Payload"
-          value={commandPayloadText}
-          onChangeText={setCommandPayloadText}
-          placeholder="{ }"
-          multiline
-        />
-        <Field
-          label="Prompt"
-          value={commandPromptDraft}
-          onChangeText={setCommandPromptDraft}
-          placeholder="Used by command templates"
-        />
-        <Row>
-          <ActionButton title="Send" onPress={sendCommandEditorMessage} />
-          <ActionButton
-            title="Reset"
-            onPress={() => loadPreset(commandType)}
-            tone="ghost"
-          />
-        </Row>
-      </Panel>
+  const renderDirectoryManager = () => {
+    if (!activeWorkspace) {
+      return renderDirectoryList();
+    }
 
-      {Object.entries(groupedPresets).map(([group, presets]) => (
-        <Panel key={group} title={group}>
-          {presets.map((preset) => (
+    return (
+      <View style={styles.chatShell}>
+        <View style={styles.workspaceHeader}>
+          <Pressable onPress={() => setActiveWorkspaceId('')} style={styles.backButton}>
+            <Text style={styles.backButtonText}>目录</Text>
+          </Pressable>
+          <View style={styles.workspaceTitleGroup}>
+            <Text style={styles.workspaceTitle} numberOfLines={1}>
+              {activeWorkspace.name}
+            </Text>
+            <Text style={styles.workspacePath} numberOfLines={1}>
+              {activeWorkspace.path}
+            </Text>
+          </View>
+        </View>
+
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.conversationRail}>
+          <Pressable onPress={createConversation} style={styles.newConversationButton}>
+            <Text style={styles.newConversationText}>新对话</Text>
+          </Pressable>
+          {workspaceConversations.map((conversation) => (
             <Pressable
-              key={preset.type}
-              onPress={() => loadPreset(preset.type)}
-              style={styles.listItem}
+              key={conversation.id}
+              onPress={() => setActiveConversationId(conversation.id)}
+              style={[
+                styles.conversationChip,
+                conversation.id === activeConversationId && styles.conversationChipActive,
+              ]}
             >
-              <View style={styles.listItemHeader}>
-                <Text style={styles.itemTitle} numberOfLines={1}>
-                  {preset.label}
-                </Text>
-                <Text style={styles.itemTag}>load</Text>
-              </View>
-              <Text style={styles.itemBody} numberOfLines={2}>
-                {preset.description}
-              </Text>
-              <Text style={styles.itemMeta} numberOfLines={1}>
-                {preset.type}
+              <Text
+                style={[
+                  styles.conversationChipText,
+                  conversation.id === activeConversationId && styles.conversationChipTextActive,
+                ]}
+                numberOfLines={1}
+              >
+                {conversation.title}
               </Text>
             </Pressable>
           ))}
-        </Panel>
-      ))}
-    </ScrollView>
-  );
+        </ScrollView>
 
-  const renderSettingsTab = () => (
-    <ScrollView contentContainerStyle={styles.tabContent}>
-      <Panel title="Connection">
-        <Field
-          label="Server URL"
-          value={settings.serverUrl}
-          onChangeText={(value) => setSettings((current) => ({ ...current, serverUrl: normalizeServerUrl(value) }))}
-          placeholder="http://127.0.0.1:7345"
-        />
-        <Field
-          label="Auth token"
-          value={settings.authToken}
-          onChangeText={(value) => setSettings((current) => ({ ...current, authToken: value }))}
-          placeholder="Bearer token"
-          secureTextEntry
-        />
-        <Field
-          label="Tenant id"
-          value={settings.tenantId}
-          onChangeText={(value) => setSettings((current) => ({ ...current, tenantId: value }))}
-          placeholder="local"
-        />
-        <Row>
-          <ActionButton title="Connect" onPress={connect} />
-          <ActionButton title="Refresh version" onPress={refreshServerVersion} tone="ghost" />
-          <ActionButton title="Disconnect" onPress={closeSocket} tone="ghost" />
-        </Row>
-      </Panel>
+        <View style={styles.workspaceActions}>
+          <MiniButton title="启动" onPress={() => sendSlashCommand('/start')} />
+          <MiniButton title="状态" onPress={() => sendSlashCommand('/status')} />
+          <MiniButton title="附加" onPress={() => sendSlashCommand('/attach')} />
+          <MiniButton title="停止" onPress={() => sendSlashCommand('/stop')} />
+          <MiniButton title="移除目录" onPress={() => removeWorkspace(activeWorkspace.id)} />
+        </View>
 
-      <Panel title="Defaults">
-        <Field
-          label="Default workspace path"
-          value={settings.defaultWorkspacePath}
-          onChangeText={(value) => setSettings((current) => ({ ...current, defaultWorkspacePath: value }))}
-          placeholder="/home/dev/projects"
-        />
-        <Field
-          label="Default thread id"
-          value={settings.defaultThreadId}
-          onChangeText={(value) => setSettings((current) => ({ ...current, defaultThreadId: value }))}
-          placeholder="thread_1"
-        />
-        <Field
-          label="Default model"
-          value={settings.defaultModel}
-          onChangeText={(value) => setSettings((current) => ({ ...current, defaultModel: value }))}
-          placeholder="gpt-5.5"
-        />
-        <Field
-          label="Approval policy"
-          value={settings.approvalPolicy}
-          onChangeText={(value) => setSettings((current) => ({ ...current, approvalPolicy: value }))}
-          placeholder="on-request"
-        />
-        <Field
-          label="Sandbox mode"
-          value={settings.sandboxMode}
-          onChangeText={(value) => setSettings((current) => ({ ...current, sandboxMode: value }))}
-          placeholder="workspace-write"
-        />
-      </Panel>
+        {pendingRequests.length > 0 ? (
+          <View style={styles.pendingStrip}>
+            <Text style={styles.pendingText} numberOfLines={1}>
+              {pendingApprovalCount || pendingRequests.length} 个待处理请求
+            </Text>
+            {selectedRequest ? (
+              <>
+                <MiniButton title="同意" onPress={() => sendApprovalResponse(true, selectedRequest)} />
+                <MiniButton title="拒绝" onPress={() => sendApprovalResponse(false, selectedRequest)} />
+              </>
+            ) : null}
+          </View>
+        ) : null}
 
-      <Panel title="Diagnostics">
-        <Text style={styles.itemBody} numberOfLines={1}>
-          version: {serverVersion ? `${serverVersion.name} ${serverVersion.version}` : 'unknown'}
-        </Text>
-        <Text style={styles.itemBody} numberOfLines={1}>
-          data dir: {serverVersion?.data_dir ?? 'unknown'}
-        </Text>
-        <Text style={styles.itemBody} numberOfLines={1}>
-          workspace root: {serverVersion?.workspace_root ?? 'unknown'}
-        </Text>
-        <Text style={styles.itemBody} numberOfLines={1}>
-          active workspace: {activeWorkspace?.path ?? 'none'}
-        </Text>
-        <Text style={styles.itemBody} numberOfLines={1}>
-          pending approvals: {pendingApprovalCount}
-        </Text>
-        <Text style={styles.itemBody} numberOfLines={1}>
-          current turn: {turnId || 'unknown'}
-        </Text>
-      </Panel>
-    </ScrollView>
-  );
+        <ScrollView contentContainerStyle={styles.messageList}>
+          {conversationMessages.length === 0 ? (
+            <EmptyState text="选择历史对话或新建对话后，在底部输入消息。" />
+          ) : (
+            conversationMessages.map((entry) => <MessageBubble key={entry.id} entry={entry} />)
+          )}
+        </ScrollView>
 
-  const renderContent = () => {
-    switch (activeTab) {
-      case 'workspaces':
-        return renderWorkspaceTab();
-      case 'chat':
-        return renderChatTab();
-      case 'tasks':
-        return renderTasksTab();
-      case 'commands':
-        return renderCommandsTab();
-      case 'settings':
-        return renderSettingsTab();
-      default:
-        return null;
-    }
+        <View style={styles.composer}>
+          <TextInput
+            value={chatDraft}
+            onChangeText={setChatDraft}
+            placeholder="输入消息，或使用 /start /status /attach"
+            placeholderTextColor="#7a8391"
+            style={styles.composerInput}
+            multiline
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <Pressable onPress={submitChat} style={styles.sendButton}>
+            <Text style={styles.sendButtonText}>发送</Text>
+          </Pressable>
+        </View>
+      </View>
+    );
   };
+
+  const renderSettings = () => (
+    <ScrollView contentContainerStyle={styles.pageContent}>
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>连接</Text>
+        <View style={styles.formBlock}>
+          <Field
+            label="Server URL"
+            value={settings.serverUrl}
+            onChangeText={(value) => setSettings((current) => ({ ...current, serverUrl: value }))}
+            onBlur={() => setSettings((current) => ({ ...current, serverUrl: normalizeServerUrl(current.serverUrl) }))}
+            placeholder="http://127.0.0.1:7345"
+          />
+          <Field
+            label="Auth token"
+            value={settings.authToken}
+            onChangeText={(value) => setSettings((current) => ({ ...current, authToken: value }))}
+            placeholder="Bearer token"
+            secureTextEntry
+          />
+          <Field
+            label="Tenant id"
+            value={settings.tenantId}
+            onChangeText={(value) => setSettings((current) => ({ ...current, tenantId: value }))}
+            placeholder="local"
+          />
+          <Row>
+            <ActionButton title="连接" onPress={connect} />
+            <ActionButton title="刷新版本" onPress={refreshServerVersion} tone="ghost" />
+            <ActionButton title="断开" onPress={closeSocket} tone="ghost" />
+          </Row>
+          {lastError ? <Text style={styles.errorText}>{lastError}</Text> : null}
+        </View>
+      </View>
+
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>默认参数</Text>
+        <View style={styles.formBlock}>
+          <Field
+            label="默认目录路径"
+            value={settings.defaultWorkspacePath}
+            onChangeText={(value) => setSettings((current) => ({ ...current, defaultWorkspacePath: value }))}
+            placeholder="/home/dev/projects"
+          />
+          <Field
+            label="默认 Thread"
+            value={settings.defaultThreadId}
+            onChangeText={(value) => setSettings((current) => ({ ...current, defaultThreadId: value }))}
+            placeholder="thread_1"
+          />
+          <Field
+            label="默认模型"
+            value={settings.defaultModel}
+            onChangeText={(value) => setSettings((current) => ({ ...current, defaultModel: value }))}
+            placeholder="gpt-5.5"
+          />
+          <Field
+            label="Approval policy"
+            value={settings.approvalPolicy}
+            onChangeText={(value) => setSettings((current) => ({ ...current, approvalPolicy: value }))}
+            placeholder="on-request"
+          />
+          <Field
+            label="Sandbox mode"
+            value={settings.sandboxMode}
+            onChangeText={(value) => setSettings((current) => ({ ...current, sandboxMode: value }))}
+            placeholder="workspace-write"
+          />
+        </View>
+      </View>
+
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>运行状态</Text>
+        <View style={styles.diagnostics}>
+          <Diagnostic label="版本" value={serverVersion ? `${serverVersion.name} ${serverVersion.version}` : 'unknown'} />
+          <Diagnostic label="数据目录" value={serverVersion?.data_dir ?? 'unknown'} />
+          <Diagnostic label="工作区根目录" value={serverVersion?.workspace_root ?? 'unknown'} />
+          <Diagnostic label="当前目录" value={activeWorkspace?.path ?? 'none'} />
+          <Diagnostic label="待处理请求" value={String(pendingRequests.length)} />
+          <Diagnostic label="当前 Turn" value={turnId || 'unknown'} />
+        </View>
+      </View>
+    </ScrollView>
+  );
 
   if (!hydrated) {
     return (
       <View style={styles.loadingScreen}>
         <StatusBar style="light" />
-        <Text style={styles.loadingTitle}>TodeX Mobile</Text>
-        <Text style={styles.loadingText}>Loading settings and workspaces…</Text>
+        <Text style={styles.loadingTitle}>TodeX</Text>
+        <Text style={styles.loadingText}>正在加载设置和目录...</Text>
       </View>
     );
   }
@@ -1089,17 +1012,14 @@ export default function App() {
       style={styles.root}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      <StatusBar style="light" />
-      {renderTopBanner()}
-      <View style={styles.content}>{renderContent()}</View>
+      <StatusBar style="dark" />
+      {renderTopBar()}
+      <View style={styles.content}>{activeTab === 'chat' ? renderDirectoryManager() : renderSettings()}</View>
       <View style={styles.bottomNav}>
         {(
           [
-            ['workspaces', 'Workspaces'],
-            ['chat', 'Chat'],
-            ['tasks', 'Tasks'],
-            ['commands', 'Commands'],
-            ['settings', 'Settings'],
+            ['chat', '对话'],
+            ['settings', '设置'],
           ] as Array<[AppTab, string]>
         ).map(([tab, label]) => (
           <Pressable
@@ -1115,11 +1035,22 @@ export default function App() {
   );
 }
 
-function Panel({ title, children }: { title: string; children: ReactNode }) {
+function MessageBubble({ entry }: { entry: TimelineEntry }) {
+  const outgoing = entry.kind === 'outgoing';
+  const system = entry.kind === 'system';
   return (
-    <View style={styles.panel}>
-      <Text style={styles.panelTitle}>{title}</Text>
-      <View style={styles.panelBody}>{children}</View>
+    <View style={[styles.bubbleRow, outgoing && styles.bubbleRowOutgoing]}>
+      <View style={[styles.bubble, outgoing && styles.bubbleOutgoing, system && styles.bubbleSystem]}>
+        <View style={styles.bubbleMetaRow}>
+          <Text style={[styles.bubbleTitle, outgoing && styles.bubbleTitleOutgoing]} numberOfLines={1}>
+            {entry.title}
+          </Text>
+          <Text style={[styles.bubbleTime, outgoing && styles.bubbleTimeOutgoing]}>{nowLabel(entry.at)}</Text>
+        </View>
+        {entry.subtitle ? (
+          <Text style={[styles.bubbleText, outgoing && styles.bubbleTextOutgoing]}>{entry.subtitle}</Text>
+        ) : null}
+      </View>
     </View>
   );
 }
@@ -1161,10 +1092,22 @@ function MiniButton({ title, onPress }: { title: string; onPress: () => void }) 
   );
 }
 
+function Diagnostic({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.diagnosticRow}>
+      <Text style={styles.diagnosticLabel}>{label}</Text>
+      <Text style={styles.diagnosticValue} numberOfLines={1}>
+        {value}
+      </Text>
+    </View>
+  );
+}
+
 function Field({
   label,
   value,
   onChangeText,
+  onBlur,
   placeholder,
   multiline = false,
   editable = true,
@@ -1173,6 +1116,7 @@ function Field({
   label: string;
   value: string;
   onChangeText: (value: string) => void;
+  onBlur?: () => void;
   placeholder?: string;
   multiline?: boolean;
   editable?: boolean;
@@ -1184,8 +1128,9 @@ function Field({
       <TextInput
         value={value}
         onChangeText={onChangeText}
+        onBlur={onBlur}
         placeholder={placeholder}
-        placeholderTextColor="#6f7f9d"
+        placeholderTextColor="#8a93a1"
         style={[styles.input, multiline && styles.inputMultiline, !editable && styles.inputDisabled]}
         multiline={multiline}
         editable={editable}
@@ -1201,130 +1146,112 @@ function Field({
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: '#08111f',
+    backgroundColor: '#f4f6f8',
   },
   loadingScreen: {
     flex: 1,
-    backgroundColor: '#08111f',
+    backgroundColor: '#17202a',
     alignItems: 'center',
     justifyContent: 'center',
     padding: 24,
   },
   loadingTitle: {
-    color: '#f8fbff',
-    fontSize: 28,
-    fontWeight: '700',
+    color: '#ffffff',
+    fontSize: 30,
+    fontWeight: '800',
     marginBottom: 8,
   },
   loadingText: {
-    color: '#a8b4cb',
+    color: '#b9c3cc',
     fontSize: 15,
   },
-  banner: {
-    paddingHorizontal: 16,
-    paddingTop: 16,
-    paddingBottom: 12,
+  topBar: {
+    paddingHorizontal: 18,
+    paddingTop: 18,
+    paddingBottom: 14,
+    backgroundColor: '#ffffff',
     borderBottomWidth: 1,
-    borderBottomColor: '#1f2b42',
-    backgroundColor: '#0b1628',
-  },
-  bannerRow: {
+    borderBottomColor: '#d8e0e7',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 12,
   },
-  bannerLeft: {
+  topTitleGroup: {
     flex: 1,
     minWidth: 0,
   },
   product: {
-    color: '#f8fbff',
-    fontSize: 22,
-    fontWeight: '700',
+    color: '#17202a',
+    fontSize: 24,
+    fontWeight: '800',
     letterSpacing: 0,
   },
-  bannerText: {
-    color: '#c4d2ea',
+  topSubtitle: {
+    color: '#66717c',
     fontSize: 13,
-    marginTop: 2,
+    marginTop: 3,
   },
-  badge: {
+  statusPill: {
     borderRadius: 8,
     paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingVertical: 7,
     borderWidth: 1,
   },
-  badgeOpen: {
-    backgroundColor: '#103c35',
-    borderColor: '#2dd4bf',
+  statusOpen: {
+    backgroundColor: '#dcf7ea',
+    borderColor: '#65b98d',
   },
-  badgeMuted: {
-    backgroundColor: '#18233a',
-    borderColor: '#30415f',
+  statusMuted: {
+    backgroundColor: '#eef0f2',
+    borderColor: '#ccd1d6',
   },
-  badgeText: {
-    color: '#e8f0ff',
-    fontSize: 12,
-    fontWeight: '700',
+  statusText: {
+    color: '#17202a',
+    fontSize: 11,
+    fontWeight: '800',
     textTransform: 'uppercase',
-  },
-  errorText: {
-    color: '#ffb4b4',
-    marginTop: 10,
-    fontSize: 13,
-  },
-  metaRow: {
-    marginTop: 10,
-    flexDirection: 'row',
-    gap: 12,
-    justifyContent: 'space-between',
-  },
-  metaText: {
-    flex: 1,
-    color: '#8fa2c5',
-    fontSize: 12,
   },
   content: {
     flex: 1,
   },
-  tabContent: {
-    padding: 16,
-    gap: 16,
-    paddingBottom: 24,
+  pageContent: {
+    padding: 18,
+    paddingBottom: 28,
+    gap: 24,
   },
-  panel: {
-    backgroundColor: '#0d1728',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#213049',
-    padding: 14,
+  section: {
     gap: 12,
   },
-  panelTitle: {
-    color: '#f8fbff',
-    fontSize: 15,
-    fontWeight: '700',
-    textTransform: 'uppercase',
+  sectionTitle: {
+    color: '#17202a',
+    fontSize: 18,
+    fontWeight: '800',
+    letterSpacing: 0,
   },
-  panelBody: {
+  formBlock: {
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d8e0e7',
+    padding: 14,
     gap: 12,
   },
   field: {
     gap: 6,
   },
   fieldLabel: {
-    color: '#95a6c4',
+    color: '#66717c',
     fontSize: 12,
-    textTransform: 'uppercase',
+    fontWeight: '800',
     letterSpacing: 0,
   },
   input: {
-    backgroundColor: '#121d31',
-    color: '#eff5ff',
+    backgroundColor: '#ffffff',
+    color: '#17202a',
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#263551',
+    borderColor: '#d7dce0',
     paddingHorizontal: 12,
     paddingVertical: 10,
     fontSize: 14,
@@ -1342,14 +1269,8 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 10,
   },
-  wrapRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginTop: 10,
-  },
   actionButton: {
-    backgroundColor: '#6dd7ff',
+    backgroundColor: '#17202a',
     borderRadius: 8,
     paddingHorizontal: 14,
     paddingVertical: 10,
@@ -1358,43 +1279,43 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   actionButtonGhost: {
-    backgroundColor: '#121d31',
+    backgroundColor: '#ffffff',
     borderWidth: 1,
-    borderColor: '#2e405f',
+    borderColor: '#cfd5da',
   },
   actionButtonText: {
-    color: '#07111f',
-    fontWeight: '700',
+    color: '#ffffff',
+    fontWeight: '800',
     fontSize: 13,
   },
   actionButtonTextGhost: {
-    color: '#d8e4fb',
+    color: '#17202a',
   },
   miniButton: {
-    backgroundColor: '#121d31',
+    backgroundColor: '#ffffff',
     borderWidth: 1,
-    borderColor: '#2e405f',
+    borderColor: '#cfd5da',
     borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 7,
   },
   miniButtonText: {
-    color: '#d9e6fd',
+    color: '#26323d',
     fontSize: 12,
-    fontWeight: '600',
+    fontWeight: '800',
   },
-  listItem: {
-    backgroundColor: '#101a2e',
+  directoryItem: {
+    backgroundColor: '#ffffff',
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#233452',
-    padding: 12,
+    borderColor: '#d8e0e7',
+    padding: 14,
     gap: 8,
   },
-  listItemActive: {
-    borderColor: '#6dd7ff',
+  directoryItemActive: {
+    borderColor: '#17202a',
   },
-  listItemHeader: {
+  itemHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
@@ -1402,45 +1323,263 @@ const styles = StyleSheet.create({
   },
   itemTitle: {
     flex: 1,
-    color: '#f8fbff',
-    fontSize: 14,
-    fontWeight: '700',
+    color: '#17202a',
+    fontSize: 15,
+    fontWeight: '800',
     minWidth: 0,
   },
   itemTag: {
-    color: '#8fdcf8',
+    color: '#5f6c75',
     fontSize: 11,
-    fontWeight: '700',
-    textTransform: 'uppercase',
+    fontWeight: '800',
   },
   itemBody: {
-    color: '#bfd0ea',
+    color: '#66717c',
     fontSize: 13,
     lineHeight: 18,
   },
-  itemMeta: {
-    color: '#8a9bb8',
-    fontSize: 11,
-  },
   emptyState: {
-    color: '#8a9bb8',
-    fontSize: 13,
+    color: '#66717c',
+    fontSize: 14,
+    lineHeight: 20,
   },
-  timelineItem: {
-    backgroundColor: '#101a2e',
+  chatShell: {
+    flex: 1,
+    backgroundColor: '#f4f6f8',
+  },
+  workspaceHeader: {
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#d8e0e7',
+  },
+  backButton: {
+    backgroundColor: '#17202a',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  backButtonText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  workspaceTitleGroup: {
+    flex: 1,
+    minWidth: 0,
+  },
+  workspaceTitle: {
+    color: '#17202a',
+    fontSize: 17,
+    fontWeight: '800',
+  },
+  workspacePath: {
+    color: '#66717c',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  conversationRail: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    gap: 8,
+  },
+  newConversationButton: {
+    backgroundColor: '#17202a',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    justifyContent: 'center',
+  },
+  newConversationText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  conversationChip: {
+    backgroundColor: '#ffffff',
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#233452',
-    padding: 12,
+    borderColor: '#d8e0e7',
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    maxWidth: 150,
+  },
+  conversationChipActive: {
+    borderColor: '#17202a',
+    backgroundColor: '#e7ecef',
+  },
+  conversationChipText: {
+    color: '#66717c',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  conversationChipTextActive: {
+    color: '#17202a',
+  },
+  workspaceActions: {
+    paddingHorizontal: 14,
+    paddingBottom: 10,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: 8,
+  },
+  pendingStrip: {
+    marginHorizontal: 14,
+    marginBottom: 10,
+    padding: 10,
+    backgroundColor: '#fff7d9',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e1c565',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  pendingText: {
+    flex: 1,
+    color: '#4d4020',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  messageList: {
+    paddingHorizontal: 14,
+    paddingTop: 6,
+    paddingBottom: 16,
+    gap: 10,
+  },
+  bubbleRow: {
+    flexDirection: 'row',
+  },
+  bubbleRowOutgoing: {
+    justifyContent: 'flex-end',
+  },
+  bubble: {
+    maxWidth: '88%',
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#d8e0e7',
+    borderRadius: 8,
+    padding: 12,
+    gap: 6,
+  },
+  bubbleOutgoing: {
+    backgroundColor: '#17202a',
+    borderColor: '#17202a',
+  },
+  bubbleSystem: {
+    backgroundColor: '#edf0f2',
+    borderColor: '#d5dade',
+  },
+  bubbleMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  bubbleTitle: {
+    flex: 1,
+    color: '#17202a',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  bubbleTitleOutgoing: {
+    color: '#ffffff',
+  },
+  bubbleTime: {
+    color: '#87909a',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  bubbleTimeOutgoing: {
+    color: '#c5ccd3',
+  },
+  bubbleText: {
+    color: '#26323d',
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  bubbleTextOutgoing: {
+    color: '#ffffff',
+  },
+  composer: {
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#d8e0e7',
+    backgroundColor: '#ffffff',
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 10,
+  },
+  composerInput: {
+    flex: 1,
+    maxHeight: 110,
+    minHeight: 44,
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#d7dce0',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    color: '#17202a',
+    fontSize: 14,
+    textAlignVertical: 'top',
+  },
+  sendButton: {
+    minHeight: 44,
+    backgroundColor: '#17202a',
+    borderRadius: 8,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sendButtonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  diagnostics: {
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d8e0e7',
+    overflow: 'hidden',
+  },
+  diagnosticRow: {
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e7ecef',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  diagnosticLabel: {
+    width: 92,
+    color: '#66717c',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  diagnosticValue: {
+    flex: 1,
+    color: '#17202a',
+    fontSize: 13,
+  },
+  errorText: {
+    color: '#a23b3b',
+    fontSize: 13,
+    lineHeight: 18,
   },
   bottomNav: {
     flexDirection: 'row',
     borderTopWidth: 1,
-    borderTopColor: '#1f2b42',
-    backgroundColor: '#0b1628',
-    paddingHorizontal: 8,
+    borderTopColor: '#d8e0e7',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 10,
     paddingVertical: 8,
+    gap: 8,
   },
   navButton: {
     flex: 1,
@@ -1449,14 +1588,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   navButtonActive: {
-    backgroundColor: '#14233b',
+    backgroundColor: '#17202a',
   },
   navText: {
-    color: '#93a6c5',
-    fontSize: 12,
-    fontWeight: '700',
+    color: '#66717c',
+    fontSize: 13,
+    fontWeight: '800',
   },
   navTextActive: {
-    color: '#f8fbff',
+    color: '#ffffff',
   },
 });
