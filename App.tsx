@@ -39,7 +39,6 @@ import {
   normalizeThreadId,
   normalizeServerUrl,
   shortJson,
-  summarizeEventType,
 } from './src/lib/todex';
 import { loadJson, loadSecret, saveJson, saveSecret } from './src/lib/storage';
 
@@ -200,6 +199,50 @@ type TimelineEntry = {
   conversationId?: string;
 };
 
+function itemTypeOf(item: Record<string, unknown>): string {
+  const rawType = item.type ?? item.itemType ?? item.item_type;
+  return typeof rawType === 'string' ? rawType : '';
+}
+
+function itemIdOf(item: Record<string, unknown>, fallback: string): string {
+  const rawId = item.id ?? item.itemId ?? item.item_id;
+  return typeof rawId === 'string' && rawId ? rawId : fallback;
+}
+
+function textFromContent(value: unknown): string {
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (!Array.isArray(value)) {
+    return '';
+  }
+
+  return value
+    .map((part) => {
+      if (typeof part === 'string') {
+        return part;
+      }
+      if (part && typeof part === 'object') {
+        const record = part as Record<string, unknown>;
+        if (typeof record.text === 'string') {
+          return record.text;
+        }
+      }
+      return '';
+    })
+    .filter(Boolean)
+    .join('');
+}
+
+function textFromItem(item: Record<string, unknown>): string {
+  const directText = item.text ?? item.message;
+  if (typeof directText === 'string') {
+    return directText;
+  }
+  return textFromContent(item.content);
+}
+
 type PersistedSettings = Omit<ConnectionSettings, 'authToken'>;
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -280,15 +323,47 @@ function textFromLocalTurnPayload(payload: Record<string, unknown>): string {
   return text || shortJson(payload).slice(0, 240);
 }
 
-function classifyEvent(event: ServerEvent, workspaceId: string, conversationId: string): TimelineEntry {
+function classifyChatEvent(event: ServerEvent, workspaceId: string, conversationId: string): TimelineEntry | null {
   const data = eventPayloadData(event);
-  const title = summarizeEventType(event.type);
-  const subtitle = shortJson(data).slice(0, 420);
+  const itemValue = data.item;
+  const item = itemValue && typeof itemValue === 'object' && !Array.isArray(itemValue)
+    ? itemValue as Record<string, unknown>
+    : null;
+
+  if (event.type === 'codex.item.agentMessage.delta') {
+    const itemId = typeof data.itemId === 'string'
+      ? data.itemId
+      : typeof data.item_id === 'string'
+        ? data.item_id
+        : eventId(event);
+    const delta = typeof data.delta === 'string' ? data.delta : '';
+    return {
+      id: itemId,
+      kind: 'incoming',
+      title: 'Codex',
+      subtitle: delta,
+      raw: shortJson(event),
+      at: Date.now(),
+      workspaceId,
+      conversationId,
+    };
+  }
+
+  if (!item || (event.type !== 'codex.item.started' && event.type !== 'codex.item.completed')) {
+    return null;
+  }
+
+  const itemType = itemTypeOf(item);
+  if (itemType !== 'agentMessage' && itemType !== 'agent_message') {
+    return null;
+  }
+
+  const text = textFromItem(item);
   return {
-    id: eventId(event),
+    id: itemIdOf(item, eventId(event)),
     kind: 'incoming',
-    title,
-    subtitle,
+    title: 'Codex',
+    subtitle: text || '正在回复...',
     raw: shortJson(event),
     at: Date.now(),
     workspaceId,
@@ -529,6 +604,31 @@ export default function App() {
     setTimeline((current) => [entry, ...current].slice(0, MAX_TIMELINE_ITEMS));
   }, []);
 
+  const upsertChatTimeline = useCallback((entry: TimelineEntry, appendSubtitle = false) => {
+    setTimeline((current) => {
+      const index = current.findIndex(
+        (item) =>
+          item.id === entry.id &&
+          item.workspaceId === entry.workspaceId &&
+          item.conversationId === entry.conversationId,
+      );
+
+      if (index === -1) {
+        return [entry, ...current].slice(0, MAX_TIMELINE_ITEMS);
+      }
+
+      const next = current.slice();
+      const previous = next[index];
+      next[index] = {
+        ...previous,
+        ...entry,
+        subtitle: appendSubtitle ? `${previous.subtitle === '正在回复...' ? '' : previous.subtitle}${entry.subtitle}` : entry.subtitle,
+        at: Date.now(),
+      };
+      return next;
+    });
+  }, []);
+
   const settlePendingThreadStart = useCallback(
     (pending: PendingThreadStart, threadId: string, errorMessage = '') => {
       clearTimeout(pending.timeoutId);
@@ -608,7 +708,10 @@ export default function App() {
   const appendEvent = useCallback(
     (event: ServerEvent) => {
       setEvents((current) => [event, ...current].slice(0, MAX_EVENTS));
-      appendTimeline(classifyEvent(event, activeWorkspaceRef.current, activeConversationRef.current));
+      const chatEntry = classifyChatEvent(event, activeWorkspaceRef.current, activeConversationRef.current);
+      if (chatEntry) {
+        upsertChatTimeline(chatEntry, event.type === 'codex.item.agentMessage.delta');
+      }
       const data = eventPayloadData(event);
       const protocolError = extractProtocolError(event.type, data);
       if (event.type === 'codex.control.ready') {
@@ -662,7 +765,7 @@ export default function App() {
         setTurnId(maybeTurnId);
       }
     },
-    [appendTimeline, findPendingLocalStart, resetWorkspaceSession, settlePendingLocalStart, settlePendingThreadStart],
+    [findPendingLocalStart, resetWorkspaceSession, settlePendingLocalStart, settlePendingThreadStart, upsertChatTimeline],
   );
 
   const pushSystem = useCallback(
