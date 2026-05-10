@@ -114,7 +114,14 @@ function isLocalAdapterFailed(text: string): boolean {
   return /local Codex adapter is not ready;\s*current state is Failed/i.test(text);
 }
 
+function isThreadNotFound(text: string): boolean {
+  return /thread not found/i.test(text);
+}
+
 function localTurnErrorMessage(text: string): string {
+  if (isThreadNotFound(text)) {
+    return '缓存的 thread 已失效，下一次发送会自动创建新的 thread。';
+  }
   if (isLocalAdapterFailed(text)) {
     return '本地会话状态已失效，请重新发送消息以启动新的会话。';
   }
@@ -1002,6 +1009,32 @@ export default function App() {
           }
         }
       }
+      if (protocolError && isThreadNotFound(protocolError)) {
+        const sessionId = data.codexSessionId ?? data.codex_session_id ?? event.codex_session_id;
+        const requestId = data.requestId ?? data.request_id;
+        const conversation =
+          typeof sessionId === 'string'
+            ? conversations.find((item) => item.sessionId === sessionId)
+            : activeConversationRef.current
+              ? conversations.find((item) => item.id === activeConversationRef.current)
+              : null;
+        if (conversation) {
+          updateConversation(conversation.id, { threadId: '' });
+          appendTimeline(makeSystemEntry(
+            '已重置失效 Thread',
+            localTurnErrorMessage(protocolError),
+            conversation.workspaceId,
+            conversation.id,
+          ));
+        }
+        if (typeof requestId === 'string') {
+          const pendingThread = [...pendingThreadStartsRef.current.values()].find((item) => item.requestId === requestId);
+          if (pendingThread) {
+            settlePendingThreadStart(pendingThread, '', localTurnErrorMessage(protocolError));
+          }
+        }
+        setIsThinking(false);
+      }
       if (protocolError && !isLocalAdapterAlreadyRunning(protocolError)) {
         setLastError(localTurnErrorMessage(protocolError));
       }
@@ -1010,7 +1043,7 @@ export default function App() {
         setTurnId(maybeTurnId);
       }
     },
-    [conversations, findPendingLocalStart, resetWorkspaceSession, settlePendingLocalStart, settlePendingThreadStart, updateConversation, upsertChatTimeline],
+    [appendTimeline, conversations, findPendingLocalStart, resetWorkspaceSession, settlePendingLocalStart, settlePendingThreadStart, updateConversation, upsertChatTimeline],
   );
 
   const pushSystem = useCallback(
@@ -1379,6 +1412,7 @@ export default function App() {
 
       const activeSessionId = sessionIdForConversation(activeWorkspace, activeConversation);
       const activeCommandWorkspace = commandWorkspaceForConversation(activeWorkspace, activeConversation);
+      const canReuseCachedThread = localConversationStateOf(activeConversation) === 'running';
       try {
         await startLocalAdapter(activeWorkspace, activeConversation);
       } catch (error) {
@@ -1389,7 +1423,7 @@ export default function App() {
 
       let threadId = '';
       try {
-        threadId = await ensureThreadId(activeWorkspace, activeConversation, false);
+        threadId = await ensureThreadId(activeWorkspace, activeConversation, !canReuseCachedThread);
       } catch (error) {
         const message = error instanceof Error ? error.message : '创建 thread 失败';
         setLastError(message);
