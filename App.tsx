@@ -421,6 +421,10 @@ function progressTextFromData(data: Record<string, unknown>, item: Record<string
   return '';
 }
 
+function isLifecycleProgressText(text: string): boolean {
+  return /^(starting|ready|started|completed|running|idle|busy)$/i.test(text.trim());
+}
+
 function objectPayloadOf(event: ServerEvent): Record<string, unknown> {
   return event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
     ? event.payload as Record<string, unknown>
@@ -520,11 +524,14 @@ function classifyProgressEvent(event: ServerEvent, workspaceId: string, conversa
   const progressText = progressTextFromData(data, item);
 
   if (/reasoning|thinking|thought|analysis/i.test(type) || /reasoning|thinking|thought|analysis/i.test(itemType)) {
+    if (!progressText || isLifecycleProgressText(progressText)) {
+      return null;
+    }
     return {
       id: `progress-${eventId(event)}`,
       kind: 'system',
       title: '思考中',
-      subtitle: progressText || '正在整理思路...',
+      subtitle: progressText,
       raw: shortJson(event),
       at: Date.now(),
       workspaceId,
@@ -532,7 +539,14 @@ function classifyProgressEvent(event: ServerEvent, workspaceId: string, conversa
     };
   }
 
+  if (type === 'codex.control.request.accepted' || type === 'codex.control.ready' || type === 'codex.control.response') {
+    return null;
+  }
+
   if (/tool|command|mcp|approval|requestUserInput/i.test(type) || /tool|command|mcp|approval/i.test(itemType)) {
+    if (!progressText || isLifecycleProgressText(progressText)) {
+      return null;
+    }
     return {
       id: `progress-${eventId(event)}`,
       kind: 'system',
@@ -543,34 +557,6 @@ function classifyProgressEvent(event: ServerEvent, workspaceId: string, conversa
       workspaceId,
       conversationId,
     };
-  }
-
-  if (type === 'codex.control.request.accepted') {
-    const operation = stringFromUnknown(data.operation);
-    if (operation === 'codex.local.turn') {
-      return {
-        id: `progress-${eventId(event)}`,
-        kind: 'system',
-        title: '已开始思考',
-        subtitle: '请求已送达 Codex，本地会话正在处理。',
-        raw: shortJson(event),
-        at: Date.now(),
-        workspaceId,
-        conversationId,
-      };
-    }
-    if (operation) {
-      return {
-        id: `progress-${eventId(event)}`,
-        kind: 'system',
-        title: '协议指令',
-        subtitle: operation,
-        raw: shortJson(event),
-        at: Date.now(),
-        workspaceId,
-        conversationId,
-      };
-    }
   }
 
   if (/interrupted|failed|error/i.test(type)) {
@@ -630,6 +616,26 @@ function makeOutgoingEntry(
     workspaceId,
     conversationId,
   };
+}
+
+function isVisibleConversationEntry(entry: TimelineEntry): boolean {
+  if (entry.kind === 'outgoing' || entry.kind === 'incoming') {
+    return true;
+  }
+
+  if (/^sent codex\./i.test(entry.title)) {
+    return false;
+  }
+
+  if (entry.title === '协议指令' || entry.title === '已开始思考') {
+    return false;
+  }
+
+  if (isLifecycleProgressText(entry.subtitle)) {
+    return false;
+  }
+
+  return true;
 }
 
 function createDefaultConversation(workspace: WorkspaceRecord, fallbackThreadId: string): ConversationRecord {
@@ -1195,7 +1201,9 @@ export default function App() {
 
       const message = { id: requestId, type, payload };
       socket.send(JSON.stringify(message));
-      appendTimeline(makeOutgoingEntry(message, activeWorkspaceRef.current, activeConversationRef.current));
+      if (type === 'codex.local.turn') {
+        appendTimeline(makeOutgoingEntry(message, activeWorkspaceRef.current, activeConversationRef.current));
+      }
       return true;
     },
     [appendTimeline],
@@ -1995,7 +2003,7 @@ function ConversationListScreen({
         <EmptyState text="还没有对话。点右上角 + 创建一个纯粹的新对话。" />
       ) : (
         workspaceConversations.map((conversation) => {
-          const latest = timeline.find((entry) => entry.conversationId === conversation.id);
+          const latest = timeline.find((entry) => entry.conversationId === conversation.id && isVisibleConversationEntry(entry));
           return (
             <Pressable
               key={conversation.id}
@@ -2072,6 +2080,7 @@ function ChatScreen({
   const conversation = conversations.find((item) => item.id === route.params.conversationId) ?? null;
   const conversationMessages = timeline
     .filter((entry) => entry.conversationId === route.params.conversationId)
+    .filter(isVisibleConversationEntry)
     .slice()
     .reverse();
   const slashQuery = chatDraft.startsWith('/') ? chatDraft.slice(1).trim().toLowerCase() : '';
