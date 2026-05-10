@@ -934,9 +934,9 @@ export default function App() {
   );
 
   const ensureThreadId = useCallback(
-    (workspace: WorkspaceRecord, conversation: ConversationRecord) => {
+    (workspace: WorkspaceRecord, conversation: ConversationRecord, forceNewThread = false) => {
       const currentThreadId = normalizeThreadId(conversation.threadId || workspace.threadId || settings.defaultThreadId);
-      if (currentThreadId) {
+      if (!forceNewThread && currentThreadId) {
         return Promise.resolve(currentThreadId);
       }
 
@@ -1011,9 +1011,10 @@ export default function App() {
         return;
       }
 
+      const hadRunningAdapter = localAdapterStateOf(activeWorkspace) === 'running';
       let threadId = '';
       try {
-        threadId = await ensureThreadId(activeWorkspace, activeConversation);
+        threadId = await ensureThreadId(activeWorkspace, activeConversation, !hadRunningAdapter);
       } catch (error) {
         const message = error instanceof Error ? error.message : '创建 thread 失败';
         setLastError(message);
