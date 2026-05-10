@@ -73,11 +73,35 @@ type PendingLocalStart = {
   timeoutId: ReturnType<typeof setTimeout>;
 };
 
+type PendingThreadStart = {
+  workspaceId: string;
+  conversationId: string;
+  requestId: string;
+  promise: Promise<string>;
+  resolve: (threadId: string) => void;
+  reject: (reason: Error) => void;
+  timeoutId: ReturnType<typeof setTimeout>;
+};
+
 function localAdapterStateOf(workspace: WorkspaceRecord | null): LocalAdapterState {
   return workspace?.localAdapterState ?? 'idle';
 }
 
+function isLocalAdapterAlreadyRunning(text: string): boolean {
+  return /adapter already owns this session/i.test(text);
+}
+
+function isLocalAdapterFailed(text: string): boolean {
+  return /local Codex adapter is not ready;\s*current state is Failed/i.test(text);
+}
+
 function localTurnErrorMessage(text: string): string {
+  if (isLocalAdapterFailed(text)) {
+    return '本地会话状态已失效，请重新发送消息以启动新的会话。';
+  }
+  if (isLocalAdapterAlreadyRunning(text)) {
+    return '本地会话已经在运行，不要重复启动。';
+  }
   if (/unsupported_action/i.test(text) || /not running for this session/i.test(text)) {
     return '本地会话还没启动，先执行 start 再发送消息。';
   }
@@ -191,7 +215,7 @@ const defaultSettings: ConnectionSettings = {
   authToken: '',
   tenantId: 'local',
   defaultWorkspacePath: '/home/dev/projects',
-  defaultThreadId: 'thread_1',
+  defaultThreadId: '',
   defaultModel: 'gpt-5.5',
   approvalPolicy: 'on-request',
   sandboxMode: 'workspace-write',
@@ -203,10 +227,14 @@ function toPersistedSettings(settings: ConnectionSettings): PersistedSettings {
 }
 
 function fromPersistedSettings(raw: Partial<PersistedSettings> | null | undefined, authToken: string): ConnectionSettings {
-  return {
+  const settings = {
     ...defaultSettings,
     ...raw,
     authToken,
+  };
+  return {
+    ...settings,
+    defaultThreadId: normalizeThreadId(settings.defaultThreadId),
   };
 }
 
@@ -217,6 +245,45 @@ function sanitizeSlug(value: string): string {
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '')
     .slice(0, 40);
+}
+
+function createSessionId(name: string): string {
+  const slug = sanitizeSlug(name) || 'workspace';
+  return `cdxs_${slug}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function isValidThreadId(value: string): boolean {
+  return /^(urn:uuid:)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.trim());
+}
+
+function normalizeThreadId(value: string | null | undefined): string {
+  const trimmed = value?.trim() ?? '';
+  return isValidThreadId(trimmed) ? trimmed : '';
+}
+
+function extractThreadId(event: ServerEvent, data: Record<string, unknown>): string {
+  const candidates = [
+    data.threadId,
+    data.thread_id,
+    data.codexThreadId,
+    data.codex_thread_id,
+    event.codex_thread_id,
+  ];
+
+  const result = data.result;
+  if (result && typeof result === 'object') {
+    const resultData = result as Record<string, unknown>;
+    candidates.push(resultData.threadId, resultData.thread_id, resultData.codexThreadId, resultData.codex_thread_id);
+  }
+
+  const payload = data.payload;
+  if (payload && typeof payload === 'object') {
+    const payloadData = payload as Record<string, unknown>;
+    candidates.push(payloadData.threadId, payloadData.thread_id, payloadData.codexThreadId, payloadData.codex_thread_id);
+  }
+
+  const value = candidates.find((candidate) => typeof candidate === 'string' && isValidThreadId(candidate));
+  return typeof value === 'string' ? value : '';
 }
 
 function nowLabel(timestamp: number): string {
@@ -300,7 +367,7 @@ function createDefaultConversation(workspace: WorkspaceRecord, fallbackThreadId:
     id: createRequestId('conversation'),
     workspaceId: workspace.id,
     title: '默认对话',
-    threadId: workspace.threadId || fallbackThreadId,
+    threadId: normalizeThreadId(workspace.threadId || fallbackThreadId),
     createdAt,
     updatedAt: workspace.updatedAt || createdAt,
   };
@@ -310,7 +377,9 @@ export default function App() {
   const socketRef = useRef<WebSocket | null>(null);
   const activeWorkspaceRef = useRef('');
   const activeConversationRef = useRef('');
+  const workspacesRef = useRef<WorkspaceRecord[]>([]);
   const pendingLocalStartsRef = useRef(new Map<string, PendingLocalStart>());
+  const pendingThreadStartsRef = useRef(new Map<string, PendingThreadStart>());
   const autoConnectAttemptedRef = useRef(false);
 
   const [hydrated, setHydrated] = useState(false);
@@ -355,17 +424,27 @@ export default function App() {
       }
 
       const nextSettings = fromPersistedSettings(storedSettings, storedToken);
-      const existingWorkspaceIds = new Set(storedWorkspaces.map((workspace) => workspace.id));
+      const normalizedWorkspaces = storedWorkspaces.map((workspace) => ({
+        ...workspace,
+        threadId: normalizeThreadId(workspace.threadId || nextSettings.defaultThreadId),
+        localAdapterState: 'idle' as LocalAdapterState,
+      }));
+      const existingWorkspaceIds = new Set(normalizedWorkspaces.map((workspace) => workspace.id));
       const normalizedConversations =
         storedConversations.length > 0
-          ? storedConversations.filter((conversation) => existingWorkspaceIds.has(conversation.workspaceId))
-          : storedWorkspaces.map((workspace) => createDefaultConversation(workspace, nextSettings.defaultThreadId));
-      const firstWorkspaceId = storedWorkspaces[0]?.id ?? '';
+          ? storedConversations
+              .filter((conversation) => existingWorkspaceIds.has(conversation.workspaceId))
+              .map((conversation) => ({
+                ...conversation,
+                threadId: normalizeThreadId(conversation.threadId),
+              }))
+          : normalizedWorkspaces.map((workspace) => createDefaultConversation(workspace, nextSettings.defaultThreadId));
+      const firstWorkspaceId = normalizedWorkspaces[0]?.id ?? '';
       const firstConversationId =
         normalizedConversations.find((conversation) => conversation.workspaceId === firstWorkspaceId)?.id ?? '';
 
       setSettings(nextSettings);
-      setWorkspaces(storedWorkspaces);
+      setWorkspaces(normalizedWorkspaces);
       setConversations(normalizedConversations);
       setActiveWorkspaceId(firstWorkspaceId);
       setActiveConversationId(firstConversationId);
@@ -386,6 +465,10 @@ export default function App() {
   useEffect(() => {
     activeConversationRef.current = activeConversationId;
   }, [activeConversationId]);
+
+  useEffect(() => {
+    workspacesRef.current = workspaces;
+  }, [workspaces]);
 
   useEffect(() => {
     if (!hydrated) {
@@ -464,9 +547,95 @@ export default function App() {
     );
   }, []);
 
+  const resetWorkspaceSession = useCallback(
+    (workspace: WorkspaceRecord) => {
+      updateWorkspace(workspace.id, {
+        sessionId: createSessionId(workspace.name),
+        localAdapterState: 'idle',
+      });
+    },
+    [updateWorkspace],
+  );
+
   const appendTimeline = useCallback((entry: TimelineEntry) => {
     setTimeline((current) => [entry, ...current].slice(0, MAX_TIMELINE_ITEMS));
   }, []);
+
+  const settlePendingThreadStart = useCallback(
+    (pending: PendingThreadStart, threadId: string, errorMessage = '') => {
+      clearTimeout(pending.timeoutId);
+      pendingThreadStartsRef.current.delete(pending.conversationId);
+
+      if (errorMessage || !threadId) {
+        const error = new Error(errorMessage || '创建 thread 失败');
+        pending.reject(error);
+        setLastError(error.message);
+        return;
+      }
+
+      updateWorkspace(pending.workspaceId, { threadId });
+      setConversations((current) =>
+        current.map((conversation) =>
+          conversation.id === pending.conversationId ? { ...conversation, threadId, updatedAt: Date.now() } : conversation,
+        ),
+      );
+      pending.resolve(threadId);
+    },
+    [updateWorkspace],
+  );
+
+  const findPendingLocalStart = useCallback((event: ServerEvent, data: Record<string, unknown>) => {
+    const pendingStarts = [...pendingLocalStartsRef.current.values()];
+    const requestId = data.requestId ?? data.request_id;
+    if (typeof requestId === 'string' && requestId) {
+      const byRequestId = pendingStarts.find((item) => item.requestId === requestId);
+      if (byRequestId) {
+        return byRequestId;
+      }
+    }
+
+    const sessionId =
+      data.codexSessionId ??
+      data.codex_session_id ??
+      data.sessionId ??
+      data.session_id ??
+      event.codex_session_id;
+    if (typeof sessionId === 'string' && sessionId) {
+      return pendingStarts.find((item) => {
+        const workspace = workspacesRef.current.find((candidate) => candidate.id === item.workspaceId);
+        return workspace?.sessionId === sessionId;
+      }) ?? null;
+    }
+
+    return pendingStarts.length === 1 ? pendingStarts[0] : null;
+  }, []);
+
+  const settlePendingLocalStart = useCallback(
+    (pending: PendingLocalStart, errorMessage = '') => {
+      clearTimeout(pending.timeoutId);
+      pendingLocalStartsRef.current.delete(pending.workspaceId);
+
+      if (isLocalAdapterAlreadyRunning(errorMessage)) {
+        updateWorkspace(pending.workspaceId, { localAdapterState: 'running' });
+        setLastError('');
+        pending.resolve();
+        return;
+      }
+
+      if (errorMessage) {
+        updateWorkspace(pending.workspaceId, { localAdapterState: 'error' });
+        const error = new Error(localTurnErrorMessage(errorMessage));
+        pending.reject(error);
+        setLastError(error.message);
+        appendTimeline(makeSystemEntry('本地会话启动失败', error.message, activeWorkspaceRef.current, activeConversationRef.current));
+        return;
+      }
+
+      updateWorkspace(pending.workspaceId, { localAdapterState: 'running' });
+      pending.resolve();
+    },
+    [appendTimeline, updateWorkspace],
+  );
 
   const appendEvent = useCallback(
     (event: ServerEvent) => {
@@ -474,27 +643,50 @@ export default function App() {
       appendTimeline(classifyEvent(event, activeWorkspaceRef.current, activeConversationRef.current));
       const data = eventPayloadData(event);
       const protocolError = extractProtocolError(event.type, data);
-      const resolvedId = data.requestId ?? data.request_id;
-      if (event.type === 'codex.serverRequest.resolved') {
-        if (typeof resolvedId === 'string' && resolvedId) {
-          const pending = [...pendingLocalStartsRef.current.values()].find((item) => item.requestId === resolvedId);
-          if (pending) {
-            clearTimeout(pending.timeoutId);
-            pendingLocalStartsRef.current.delete(pending.workspaceId);
-            if (protocolError) {
-              updateWorkspace(pending.workspaceId, { localAdapterState: 'error' });
-              const error = new Error(localTurnErrorMessage(protocolError));
-              pending.reject(error);
-              setLastError(error.message);
-              appendTimeline(makeSystemEntry('本地会话启动失败', error.message, activeWorkspaceRef.current, activeConversationRef.current));
-            } else {
-              updateWorkspace(pending.workspaceId, { localAdapterState: 'running' });
-              pending.resolve();
-            }
-          }
+      if (event.type === 'codex.control.ready') {
+        const pending = findPendingLocalStart(event, data);
+        if (pending) {
+          settlePendingLocalStart(pending);
+        }
+      } else if (event.type === 'codex.control.error') {
+        const pending = findPendingLocalStart(event, data);
+        if (pending) {
+          settlePendingLocalStart(pending, protocolError || '本地会话启动失败');
+        }
+      } else if (event.type === 'codex.serverRequest.resolved' && protocolError) {
+        const pending = findPendingLocalStart(event, data);
+        if (pending) {
+          settlePendingLocalStart(pending, protocolError);
         }
       }
-      if (protocolError) {
+      const threadStartRequestId = data.requestId ?? data.request_id;
+      if (typeof threadStartRequestId === 'string' && threadStartRequestId) {
+        const pendingThread = [...pendingThreadStartsRef.current.values()].find((item) => item.requestId === threadStartRequestId);
+        if (pendingThread) {
+          const threadId = extractThreadId(event, data);
+          if (protocolError || event.type === 'codex.control.request.rejected') {
+            settlePendingThreadStart(pendingThread, '', localTurnErrorMessage(protocolError || '创建 thread 失败'));
+          } else if (threadId) {
+            settlePendingThreadStart(pendingThread, threadId);
+          }
+        }
+      } else {
+        const threadId = extractThreadId(event, data);
+        if (threadId && pendingThreadStartsRef.current.size === 1) {
+          const pendingThread = [...pendingThreadStartsRef.current.values()][0];
+          settlePendingThreadStart(pendingThread, threadId);
+        }
+      }
+      if (protocolError && isLocalAdapterFailed(protocolError)) {
+        const sessionId = data.codexSessionId ?? data.codex_session_id ?? event.codex_session_id;
+        const workspace = typeof sessionId === 'string'
+          ? workspacesRef.current.find((item) => item.sessionId === sessionId)
+          : null;
+        if (workspace) {
+          resetWorkspaceSession(workspace);
+        }
+      }
+      if (protocolError && !isLocalAdapterAlreadyRunning(protocolError)) {
         setLastError(localTurnErrorMessage(protocolError));
       }
       const maybeTurnId = data.turnId ?? data.turn_id;
@@ -502,7 +694,7 @@ export default function App() {
         setTurnId(maybeTurnId);
       }
     },
-    [appendTimeline, updateWorkspace],
+    [appendTimeline, findPendingLocalStart, resetWorkspaceSession, settlePendingLocalStart, settlePendingThreadStart],
   );
 
   const pushSystem = useCallback(
@@ -607,15 +799,15 @@ export default function App() {
 
       const name = nameDraft.trim() || displayNameFromPath(path);
       const id = createRequestId('workspace');
-      const slug = sanitizeSlug(name) || 'workspace';
-      const sessionId = `cdxs_${slug}_${Date.now().toString(36)}`;
+      const sessionId = createSessionId(name);
+      const threadId = normalizeThreadId(settings.defaultThreadId);
       const nextWorkspace: WorkspaceRecord = {
         id,
         name,
         path,
         sessionId,
         tenantId: settings.tenantId,
-        threadId: settings.defaultThreadId,
+        threadId,
         model: settings.defaultModel,
         approvalPolicy: settings.approvalPolicy,
         sandboxMode: settings.sandboxMode,
@@ -623,7 +815,7 @@ export default function App() {
         createdAt: Date.now(),
         updatedAt: Date.now(),
       };
-      const nextConversation = createDefaultConversation(nextWorkspace, settings.defaultThreadId);
+      const nextConversation = createDefaultConversation(nextWorkspace, threadId);
 
       setWorkspaces((current) => [nextWorkspace, ...current]);
       setConversations((current) => [nextConversation, ...current]);
@@ -667,7 +859,7 @@ export default function App() {
       id: createRequestId('conversation'),
       workspaceId,
       title: `对话 ${count + 1}`,
-      threadId: `thread_${Date.now().toString(36)}`,
+      threadId: '',
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -773,6 +965,69 @@ export default function App() {
     [pushSystem, sendProtocolMessage, updateWorkspace],
   );
 
+  const ensureThreadId = useCallback(
+    (workspace: WorkspaceRecord, conversation: ConversationRecord) => {
+      const currentThreadId = normalizeThreadId(conversation.threadId || workspace.threadId || settings.defaultThreadId);
+      if (currentThreadId) {
+        return Promise.resolve(currentThreadId);
+      }
+
+      const existingPending = pendingThreadStartsRef.current.get(conversation.id);
+      if (existingPending) {
+        return existingPending.promise;
+      }
+
+      return new Promise<string>((resolve, reject) => {
+        const requestId = createRequestId('thread-start');
+        let settleResolve: (threadId: string) => void = () => {};
+        let settleReject: (reason: Error) => void = () => {};
+        const promise = new Promise<string>((innerResolve, innerReject) => {
+          settleResolve = innerResolve;
+          settleReject = innerReject;
+        });
+        const timeoutId = setTimeout(() => {
+          pendingThreadStartsRef.current.delete(conversation.id);
+          const error = new Error('创建 thread 超时，请稍后重试。');
+          setLastError(error.message);
+          settleReject(error);
+          reject(error);
+        }, 15000);
+
+        pendingThreadStartsRef.current.set(conversation.id, {
+          workspaceId: workspace.id,
+          conversationId: conversation.id,
+          requestId,
+          promise,
+          resolve: (threadId) => {
+            settleResolve(threadId);
+            resolve(threadId);
+          },
+          reject: (reason) => {
+            settleReject(reason);
+            reject(reason);
+          },
+          timeoutId,
+        });
+
+        const sent = sendProtocolMessage('codex.local.request', {
+          codexSessionId: workspace.sessionId,
+          tenantId: workspace.tenantId,
+          method: 'thread/start',
+          params: {},
+        }, requestId);
+
+        if (!sent) {
+          clearTimeout(timeoutId);
+          pendingThreadStartsRef.current.delete(conversation.id);
+          const error = new Error('请先在设置里连接后端。');
+          settleReject(error);
+          reject(error);
+        }
+      });
+    },
+    [sendProtocolMessage, settings.defaultThreadId],
+  );
+
   const sendLocalTurn = useCallback(
     async (text: string) => {
       if (!activeWorkspace || !activeConversation) {
@@ -788,10 +1043,19 @@ export default function App() {
         return;
       }
 
+      let threadId = '';
+      try {
+        threadId = await ensureThreadId(activeWorkspace, activeConversation);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '创建 thread 失败';
+        setLastError(message);
+        return;
+      }
+
       const payload = {
         codexSessionId: activeWorkspace.sessionId,
         tenantId: activeWorkspace.tenantId,
-        threadId: activeConversation.threadId,
+        threadId,
         input: [{ type: 'text', text }],
         collaborationMode: {
           mode: 'default',
@@ -803,12 +1067,13 @@ export default function App() {
       };
 
       if (sendProtocolMessage('codex.local.turn', payload)) {
-        updateWorkspace(activeWorkspace.id, { threadId: activeConversation.threadId });
+        updateWorkspace(activeWorkspace.id, { threadId });
         setConversations((current) =>
           current.map((conversation) =>
             conversation.id === activeConversation.id
               ? {
                   ...conversation,
+                  threadId,
                   title: conversation.title === '默认对话' ? text.slice(0, 18) || conversation.title : conversation.title,
                   updatedAt: Date.now(),
                 }
@@ -817,7 +1082,7 @@ export default function App() {
         );
       }
     },
-    [activeConversation, activeWorkspace, sendProtocolMessage, settings.defaultModel, startLocalAdapter, updateWorkspace],
+    [activeConversation, activeWorkspace, ensureThreadId, sendProtocolMessage, settings.defaultModel, startLocalAdapter, updateWorkspace],
   );
 
   const sendApprovalResponse = useCallback(
@@ -906,7 +1171,7 @@ export default function App() {
 
       if (lower === 'interrupt') {
         sendWorkspaceCommand(activeWorkspace, 'codex.local.interrupt', {
-          threadId: activeConversation?.threadId || activeWorkspace.threadId || settings.defaultThreadId,
+          threadId: normalizeThreadId(activeConversation?.threadId || activeWorkspace.threadId || settings.defaultThreadId),
           turnId: turnId || '',
         });
         return;
@@ -953,7 +1218,7 @@ export default function App() {
     }
     if (command === 'interrupt') {
       sendWorkspaceCommand(workspace, 'codex.local.interrupt', {
-        threadId: activeConversation?.threadId || workspace.threadId || settings.defaultThreadId,
+        threadId: normalizeThreadId(activeConversation?.threadId || workspace.threadId || settings.defaultThreadId),
         turnId: turnId || '',
       });
       return;
@@ -1484,7 +1749,8 @@ function SettingsScreen({
             label="默认 Thread"
             value={settings.defaultThreadId}
             onChangeText={(value) => setSettings((current) => ({ ...current, defaultThreadId: value }))}
-            placeholder="thread_1"
+            onBlur={() => setSettings((current) => ({ ...current, defaultThreadId: normalizeThreadId(current.defaultThreadId) }))}
+            placeholder="UUID"
           />
           <Field
             label="默认模型"
