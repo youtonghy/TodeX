@@ -421,6 +421,46 @@ function progressTextFromData(data: Record<string, unknown>, item: Record<string
   return '';
 }
 
+function objectPayloadOf(event: ServerEvent): Record<string, unknown> {
+  return event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
+    ? event.payload as Record<string, unknown>
+    : {};
+}
+
+function sessionIdFromEvent(event: ServerEvent, data = eventPayloadData(event)): string {
+  const payload = objectPayloadOf(event);
+  const candidates = [
+    event.codex_session_id,
+    data.codexSessionId,
+    data.codex_session_id,
+    data.sessionId,
+    data.session_id,
+    payload.codexSessionId,
+    payload.codex_session_id,
+    payload.sessionId,
+    payload.session_id,
+  ];
+  const value = candidates.find((candidate) => typeof candidate === 'string' && candidate.trim());
+  return typeof value === 'string' ? value : '';
+}
+
+function threadIdFromEventData(event: ServerEvent, data = eventPayloadData(event)): string {
+  const threadId = extractThreadIdFromEvent(event);
+  if (threadId) {
+    return threadId;
+  }
+  const payload = objectPayloadOf(event);
+  const candidates = [
+    event.codex_thread_id,
+    payload.codexThreadId,
+    payload.codex_thread_id,
+    payload.threadId,
+    payload.thread_id,
+  ];
+  const value = candidates.find((candidate) => typeof candidate === 'string' && candidate.trim());
+  return typeof value === 'string' ? normalizeThreadId(value) : '';
+}
+
 function classifyChatEvent(event: ServerEvent, workspaceId: string, conversationId: string): TimelineEntry | null {
   const data = eventPayloadData(event);
   const itemValue = data.item;
@@ -611,6 +651,7 @@ export default function App() {
   const activeWorkspaceRef = useRef('');
   const activeConversationRef = useRef('');
   const workspacesRef = useRef<WorkspaceRecord[]>([]);
+  const conversationsRef = useRef<ConversationRecord[]>([]);
   const pendingLocalStartsRef = useRef(new Map<string, PendingLocalStart>());
   const pendingThreadStartsRef = useRef(new Map<string, PendingThreadStart>());
   const autoConnectAttemptedRef = useRef(false);
@@ -711,6 +752,10 @@ export default function App() {
   useEffect(() => {
     workspacesRef.current = workspaces;
   }, [workspaces]);
+
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
 
   useEffect(() => {
     if (!hydrated) {
@@ -828,6 +873,23 @@ export default function App() {
     setTimeline((current) => [entry, ...current].slice(0, MAX_TIMELINE_ITEMS));
   }, []);
 
+  const resolveTimelineTarget = useCallback((event: ServerEvent, data = eventPayloadData(event)) => {
+    const sessionId = sessionIdFromEvent(event, data);
+    const threadId = threadIdFromEventData(event, data);
+    const conversations = conversationsRef.current;
+    const bySession = sessionId ? conversations.find((conversation) => conversation.sessionId === sessionId) : null;
+    const byThread = threadId ? conversations.find((conversation) => normalizeThreadId(conversation.threadId) === threadId) : null;
+    const conversation = bySession ?? byThread ?? conversations.find((item) => item.id === activeConversationRef.current) ?? null;
+
+    return {
+      workspaceId: conversation?.workspaceId ?? activeWorkspaceRef.current,
+      conversationId: conversation?.id ?? activeConversationRef.current,
+      conversation,
+      sessionId,
+      threadId,
+    };
+  }, []);
+
   const upsertChatTimeline = useCallback((entry: TimelineEntry, appendSubtitle = false) => {
     setTimeline((current) => {
       const index = current.findIndex(
@@ -932,18 +994,19 @@ export default function App() {
   const appendEvent = useCallback(
     (event: ServerEvent) => {
       setEvents((current) => [event, ...current].slice(0, MAX_EVENTS));
-      const chatEntry = classifyChatEvent(event, activeWorkspaceRef.current, activeConversationRef.current);
+      const data = eventPayloadData(event);
+      const target = resolveTimelineTarget(event, data);
+      const chatEntry = classifyChatEvent(event, target.workspaceId, target.conversationId);
       if (chatEntry) {
         upsertChatTimeline(chatEntry, event.type === 'codex.item.agentMessage.delta');
         if (event.type === 'codex.item.completed') {
           setIsThinking(false);
         }
       }
-      const progressEntry = classifyProgressEvent(event, activeWorkspaceRef.current, activeConversationRef.current);
+      const progressEntry = classifyProgressEvent(event, target.workspaceId, target.conversationId);
       if (progressEntry) {
         upsertChatTimeline(progressEntry, false);
       }
-      const data = eventPayloadData(event);
       const protocolError = extractProtocolError(event.type, data);
       if (event.type === 'codex.control.request.accepted' && data.operation === 'codex.local.turn') {
         setIsThinking(true);
@@ -952,9 +1015,9 @@ export default function App() {
         setIsThinking(false);
       }
       if (event.type === 'codex.control.stopped') {
-        const sessionId = data.codexSessionId ?? data.codex_session_id ?? event.codex_session_id;
+        const sessionId = target.sessionId || sessionIdFromEvent(event, data);
         if (typeof sessionId === 'string') {
-          const conversation = conversations.find((item) => item.sessionId === sessionId);
+          const conversation = conversationsRef.current.find((item) => item.sessionId === sessionId);
           if (conversation) {
             updateConversation(conversation.id, { localAdapterState: 'stopped' });
           }
@@ -995,10 +1058,10 @@ export default function App() {
         }
       }
       if (protocolError && isLocalAdapterFailed(protocolError)) {
-        const sessionId = data.codexSessionId ?? data.codex_session_id ?? event.codex_session_id;
+        const sessionId = target.sessionId || sessionIdFromEvent(event, data);
         if (typeof sessionId === 'string') {
           const workspace = workspacesRef.current.find((item) => item.sessionId === sessionId);
-          const conversation = conversations.find((item) => item.sessionId === sessionId);
+          const conversation = conversationsRef.current.find((item) => item.sessionId === sessionId);
           if (conversation) {
             updateConversation(conversation.id, {
               sessionId: createSessionId(conversation.title),
@@ -1010,13 +1073,13 @@ export default function App() {
         }
       }
       if (protocolError && isThreadNotFound(protocolError)) {
-        const sessionId = data.codexSessionId ?? data.codex_session_id ?? event.codex_session_id;
+        const sessionId = target.sessionId || sessionIdFromEvent(event, data);
         const requestId = data.requestId ?? data.request_id;
         const conversation =
           typeof sessionId === 'string'
-            ? conversations.find((item) => item.sessionId === sessionId)
+            ? conversationsRef.current.find((item) => item.sessionId === sessionId)
             : activeConversationRef.current
-              ? conversations.find((item) => item.id === activeConversationRef.current)
+              ? conversationsRef.current.find((item) => item.id === activeConversationRef.current)
               : null;
         if (conversation) {
           updateConversation(conversation.id, { threadId: '' });
@@ -1043,7 +1106,7 @@ export default function App() {
         setTurnId(maybeTurnId);
       }
     },
-    [appendTimeline, conversations, findPendingLocalStart, resetWorkspaceSession, settlePendingLocalStart, settlePendingThreadStart, updateConversation, upsertChatTimeline],
+    [appendTimeline, findPendingLocalStart, resetWorkspaceSession, resolveTimelineTarget, settlePendingLocalStart, settlePendingThreadStart, updateConversation, upsertChatTimeline],
   );
 
   const pushSystem = useCallback(
