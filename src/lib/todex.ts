@@ -131,6 +131,38 @@ export function eventPayloadData(event: ServerEvent): Record<string, unknown> {
   return isObject(event.payload) ? event.payload : {};
 }
 
+export function normalizeThreadId(value: string | null | undefined): string {
+  return value?.trim() ?? '';
+}
+
+export function extractThreadIdFromEvent(event: ServerEvent): string {
+  const data = eventPayloadData(event);
+  const candidates = [
+    data.threadId,
+    data.thread_id,
+    data.codexThreadId,
+    data.codex_thread_id,
+    event.codex_thread_id,
+  ];
+
+  const result = data.result;
+  if (isObject(result)) {
+    candidates.push(result.threadId, result.thread_id, result.codexThreadId, result.codex_thread_id, result.id);
+    const thread = result.thread;
+    if (isObject(thread)) {
+      candidates.push(thread.id, thread.threadId, thread.thread_id);
+    }
+  }
+
+  const payload = data.payload;
+  if (isObject(payload)) {
+    candidates.push(payload.threadId, payload.thread_id, payload.codexThreadId, payload.codex_thread_id);
+  }
+
+  const value = candidates.find((candidate) => typeof candidate === 'string' && candidate.trim());
+  return typeof value === 'string' ? normalizeThreadId(value) : '';
+}
+
 export function eventId(event: ServerEvent): string {
   return String(event.event_id ?? event.id ?? createRequestId('event'));
 }

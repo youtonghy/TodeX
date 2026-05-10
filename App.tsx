@@ -33,8 +33,10 @@ import {
   displayNameFromPath,
   eventId,
   eventPayloadData,
+  extractThreadIdFromEvent,
   inferApprovalResponseType,
   isApprovalLikeRequest,
+  normalizeThreadId,
   normalizeServerUrl,
   shortJson,
   summarizeEventType,
@@ -250,40 +252,6 @@ function sanitizeSlug(value: string): string {
 function createSessionId(name: string): string {
   const slug = sanitizeSlug(name) || 'workspace';
   return `cdxs_${slug}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function isValidThreadId(value: string): boolean {
-  return /^(urn:uuid:)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.trim());
-}
-
-function normalizeThreadId(value: string | null | undefined): string {
-  const trimmed = value?.trim() ?? '';
-  return isValidThreadId(trimmed) ? trimmed : '';
-}
-
-function extractThreadId(event: ServerEvent, data: Record<string, unknown>): string {
-  const candidates = [
-    data.threadId,
-    data.thread_id,
-    data.codexThreadId,
-    data.codex_thread_id,
-    event.codex_thread_id,
-  ];
-
-  const result = data.result;
-  if (result && typeof result === 'object') {
-    const resultData = result as Record<string, unknown>;
-    candidates.push(resultData.threadId, resultData.thread_id, resultData.codexThreadId, resultData.codex_thread_id);
-  }
-
-  const payload = data.payload;
-  if (payload && typeof payload === 'object') {
-    const payloadData = payload as Record<string, unknown>;
-    candidates.push(payloadData.threadId, payloadData.thread_id, payloadData.codexThreadId, payloadData.codex_thread_id);
-  }
-
-  const value = candidates.find((candidate) => typeof candidate === 'string' && isValidThreadId(candidate));
-  return typeof value === 'string' ? value : '';
 }
 
 function nowLabel(timestamp: number): string {
@@ -663,7 +631,7 @@ export default function App() {
       if (typeof threadStartRequestId === 'string' && threadStartRequestId) {
         const pendingThread = [...pendingThreadStartsRef.current.values()].find((item) => item.requestId === threadStartRequestId);
         if (pendingThread) {
-          const threadId = extractThreadId(event, data);
+          const threadId = extractThreadIdFromEvent(event);
           if (protocolError || event.type === 'codex.control.request.rejected') {
             settlePendingThreadStart(pendingThread, '', localTurnErrorMessage(protocolError || '创建 thread 失败'));
           } else if (threadId) {
@@ -671,7 +639,7 @@ export default function App() {
           }
         }
       } else {
-        const threadId = extractThreadId(event, data);
+        const threadId = extractThreadIdFromEvent(event);
         if (threadId && pendingThreadStartsRef.current.size === 1) {
           const pendingThread = [...pendingThreadStartsRef.current.values()][0];
           settlePendingThreadStart(pendingThread, threadId);
@@ -1013,7 +981,7 @@ export default function App() {
           codexSessionId: workspace.sessionId,
           tenantId: workspace.tenantId,
           method: 'thread/start',
-          params: {},
+          params: { ephemeral: true },
         }, requestId);
 
         if (!sent) {
