@@ -11,6 +11,8 @@ export type ConnectionSettings = {
   sandboxMode: string;
 };
 
+export type LocalAdapterState = 'idle' | 'starting' | 'running' | 'stopped' | 'error';
+
 export type WorkspaceRecord = {
   id: string;
   name: string;
@@ -21,6 +23,7 @@ export type WorkspaceRecord = {
   model: string;
   approvalPolicy: string;
   sandboxMode: string;
+  localAdapterState?: LocalAdapterState;
   createdAt: number;
   updatedAt: number;
 };

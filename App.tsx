@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   Alert,
-  KeyboardAvoidingView,
+  Keyboard,
+  type KeyboardEvent,
   Modal,
   Platform,
   Pressable,
@@ -15,11 +16,12 @@ import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator, type NativeStackScreenProps } from '@react-navigation/native-stack';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { enableScreens } from 'react-native-screens';
 
 import {
   ConnectionSettings,
+  LocalAdapterState,
   PendingRequest,
   ServerEvent,
   WorkspaceRecord,
@@ -61,6 +63,105 @@ type ConversationRecord = {
   createdAt: number;
   updatedAt: number;
 };
+
+type PendingLocalStart = {
+  workspaceId: string;
+  requestId: string;
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (reason: Error) => void;
+  timeoutId: ReturnType<typeof setTimeout>;
+};
+
+function localAdapterStateOf(workspace: WorkspaceRecord | null): LocalAdapterState {
+  return workspace?.localAdapterState ?? 'idle';
+}
+
+function localTurnErrorMessage(text: string): string {
+  if (/unsupported_action/i.test(text) || /not running for this session/i.test(text)) {
+    return '本地会话还没启动，先执行 start 再发送消息。';
+  }
+  return text;
+}
+
+function extractProtocolError(eventType: string, data: Record<string, unknown>): string {
+  const rawError = data.error;
+  if (typeof rawError === 'string' && rawError) {
+    return rawError;
+  }
+
+  if (rawError && typeof rawError === 'object') {
+    const errorData = rawError as Record<string, unknown>;
+    const nestedMessage = errorData.message ?? errorData.error_message ?? errorData.reason;
+    if (typeof nestedMessage === 'string' && nestedMessage) {
+      return nestedMessage;
+    }
+
+    const nestedCode = errorData.code ?? errorData.error_code;
+    if (typeof nestedCode === 'string' && nestedCode) {
+      return nestedCode;
+    }
+  }
+
+  const message = data.errorMessage ?? data.error_message ?? data.message;
+  const code = data.errorCode ?? data.error_code ?? data.code;
+
+  if (typeof message === 'string' && message) {
+    return typeof code === 'string' && code ? `${code}: ${message}` : message;
+  }
+
+  if (typeof code === 'string' && code) {
+    return code;
+  }
+
+  if (/error|failed/i.test(eventType)) {
+    return eventType;
+  }
+
+  return '';
+}
+
+function keyboardHeightFromEvent(event: KeyboardEvent): number {
+  const height = event.endCoordinates?.height ?? 0;
+  return Number.isFinite(height) ? Math.max(0, height) : 0;
+}
+
+function useKeyboardInset(): number {
+  const [keyboardInset, setKeyboardInset] = useState(0);
+
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const changeEvent = Platform.OS === 'ios' ? 'keyboardWillChangeFrame' : 'keyboardDidShow';
+
+    const subscriptions = [
+      Keyboard.addListener(showEvent, (event) => {
+        setKeyboardInset(keyboardHeightFromEvent(event));
+      }),
+      Keyboard.addListener(hideEvent, () => {
+        setKeyboardInset(0);
+      }),
+    ];
+
+    if (changeEvent !== showEvent) {
+      subscriptions.push(Keyboard.addListener(changeEvent, (event) => {
+        setKeyboardInset(keyboardHeightFromEvent(event));
+      }));
+    }
+
+    const visibleKeyboard = Keyboard.metrics?.();
+    if (visibleKeyboard) {
+      const height = visibleKeyboard.height ?? 0;
+      setKeyboardInset(Number.isFinite(height) ? Math.max(0, height) : 0);
+    }
+
+    return () => {
+      subscriptions.forEach((subscription) => subscription.remove());
+    };
+  }, []);
+
+  return keyboardInset;
+}
 
 type TimelineEntry = {
   id: string;
@@ -209,8 +310,11 @@ export default function App() {
   const socketRef = useRef<WebSocket | null>(null);
   const activeWorkspaceRef = useRef('');
   const activeConversationRef = useRef('');
+  const pendingLocalStartsRef = useRef(new Map<string, PendingLocalStart>());
+  const autoConnectAttemptedRef = useRef(false);
 
   const [hydrated, setHydrated] = useState(false);
+  const [autoConnectEnabled, setAutoConnectEnabled] = useState(false);
   const [settings, setSettings] = useState<ConnectionSettings>(defaultSettings);
   const [workspaces, setWorkspaces] = useState<WorkspaceRecord[]>([]);
   const [conversations, setConversations] = useState<ConversationRecord[]>([]);
@@ -265,6 +369,7 @@ export default function App() {
       setConversations(normalizedConversations);
       setActiveWorkspaceId(firstWorkspaceId);
       setActiveConversationId(firstConversationId);
+      setAutoConnectEnabled(Boolean(storedSettings?.serverUrl?.trim()));
       setHydrated(true);
     })();
 
@@ -351,6 +456,14 @@ export default function App() {
     [pendingRequests, selectedRequestId],
   );
 
+  const updateWorkspace = useCallback((id: string, patch: Partial<WorkspaceRecord>) => {
+    setWorkspaces((current) =>
+      current.map((workspace) =>
+        workspace.id === id ? { ...workspace, ...patch, updatedAt: Date.now() } : workspace,
+      ),
+    );
+  }, []);
+
   const appendTimeline = useCallback((entry: TimelineEntry) => {
     setTimeline((current) => [entry, ...current].slice(0, MAX_TIMELINE_ITEMS));
   }, []);
@@ -360,12 +473,36 @@ export default function App() {
       setEvents((current) => [event, ...current].slice(0, MAX_EVENTS));
       appendTimeline(classifyEvent(event, activeWorkspaceRef.current, activeConversationRef.current));
       const data = eventPayloadData(event);
+      const protocolError = extractProtocolError(event.type, data);
+      const resolvedId = data.requestId ?? data.request_id;
+      if (event.type === 'codex.serverRequest.resolved') {
+        if (typeof resolvedId === 'string' && resolvedId) {
+          const pending = [...pendingLocalStartsRef.current.values()].find((item) => item.requestId === resolvedId);
+          if (pending) {
+            clearTimeout(pending.timeoutId);
+            pendingLocalStartsRef.current.delete(pending.workspaceId);
+            if (protocolError) {
+              updateWorkspace(pending.workspaceId, { localAdapterState: 'error' });
+              const error = new Error(localTurnErrorMessage(protocolError));
+              pending.reject(error);
+              setLastError(error.message);
+              appendTimeline(makeSystemEntry('本地会话启动失败', error.message, activeWorkspaceRef.current, activeConversationRef.current));
+            } else {
+              updateWorkspace(pending.workspaceId, { localAdapterState: 'running' });
+              pending.resolve();
+            }
+          }
+        }
+      }
+      if (protocolError) {
+        setLastError(localTurnErrorMessage(protocolError));
+      }
       const maybeTurnId = data.turnId ?? data.turn_id;
       if (typeof maybeTurnId === 'string' && maybeTurnId) {
         setTurnId(maybeTurnId);
       }
     },
-    [appendTimeline],
+    [appendTimeline, updateWorkspace],
   );
 
   const pushSystem = useCallback(
@@ -435,6 +572,15 @@ export default function App() {
     }
   }, [appendEvent, closeSocket, pushSystem, refreshServerVersion, settings.authToken, settings.serverUrl]);
 
+  useEffect(() => {
+    if (!hydrated || !autoConnectEnabled || autoConnectAttemptedRef.current) {
+      return;
+    }
+
+    autoConnectAttemptedRef.current = true;
+    connect();
+  }, [autoConnectEnabled, connect, hydrated]);
+
   const sendProtocolMessage = useCallback(
     (type: string, payload: Record<string, unknown>, requestId = createRequestId('msg')) => {
       const socket = socketRef.current;
@@ -473,6 +619,7 @@ export default function App() {
         model: settings.defaultModel,
         approvalPolicy: settings.approvalPolicy,
         sandboxMode: settings.sandboxMode,
+        localAdapterState: 'idle',
         createdAt: Date.now(),
         updatedAt: Date.now(),
       };
@@ -494,14 +641,6 @@ export default function App() {
       settings.tenantId,
     ],
   );
-
-  const updateWorkspace = useCallback((id: string, patch: Partial<WorkspaceRecord>) => {
-    setWorkspaces((current) =>
-      current.map((workspace) =>
-        workspace.id === id ? { ...workspace, ...patch, updatedAt: Date.now() } : workspace,
-      ),
-    );
-  }, []);
 
   const selectWorkspace = useCallback((workspaceId: string) => {
     setActiveWorkspaceId(workspaceId);
@@ -564,10 +703,88 @@ export default function App() {
     [sendProtocolMessage],
   );
 
+  const startLocalAdapter = useCallback(
+    (workspace: WorkspaceRecord) => {
+      const currentState = localAdapterStateOf(workspace);
+      const existingPending = pendingLocalStartsRef.current.get(workspace.id);
+
+      if (currentState === 'running' && !existingPending) {
+        return Promise.resolve(true);
+      }
+
+      if (existingPending) {
+        return existingPending.promise.then(() => true);
+      }
+
+      return new Promise<boolean>((resolve, reject) => {
+        const requestId = createRequestId('local-start');
+        let settleResolve: () => void = () => {};
+        let settleReject: (reason: Error) => void = () => {};
+        const promise = new Promise<void>((innerResolve, innerReject) => {
+          settleResolve = innerResolve;
+          settleReject = innerReject;
+        });
+        const timeoutId = setTimeout(() => {
+          pendingLocalStartsRef.current.delete(workspace.id);
+          updateWorkspace(workspace.id, { localAdapterState: 'error' });
+          const error = new Error('本地会话启动超时，请先确认 Codex 本地 adapter 可用。');
+          setLastError(error.message);
+          pushSystem('本地会话启动超时', error.message);
+          settleReject(error);
+          reject(error);
+        }, 15000);
+
+        pendingLocalStartsRef.current.set(workspace.id, {
+          workspaceId: workspace.id,
+          requestId,
+          promise,
+          resolve: () => {
+            settleResolve();
+            resolve(true);
+          },
+          reject: (reason) => {
+            settleReject(reason);
+            reject(reason);
+          },
+          timeoutId,
+        });
+
+        updateWorkspace(workspace.id, { localAdapterState: 'starting' });
+
+        const sent = sendProtocolMessage('codex.local.start', {
+          codexSessionId: workspace.sessionId,
+          tenantId: workspace.tenantId,
+          cwd: workspace.path,
+          model: workspace.model,
+          approvalPolicy: workspace.approvalPolicy,
+          sandboxMode: workspace.sandboxMode,
+          configOverrides: {},
+        }, requestId);
+
+        if (!sent) {
+          clearTimeout(timeoutId);
+          pendingLocalStartsRef.current.delete(workspace.id);
+          updateWorkspace(workspace.id, { localAdapterState: 'error' });
+          const error = new Error('请先在设置里连接后端。');
+          reject(error);
+        }
+      });
+    },
+    [pushSystem, sendProtocolMessage, updateWorkspace],
+  );
+
   const sendLocalTurn = useCallback(
-    (text: string) => {
+    async (text: string) => {
       if (!activeWorkspace || !activeConversation) {
         Alert.alert('未选择对话', '请先选择工作区和对话。');
+        return;
+      }
+
+      try {
+        await startLocalAdapter(activeWorkspace);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '本地会话未启动';
+        setLastError(localTurnErrorMessage(message));
         return;
       }
 
@@ -600,7 +817,7 @@ export default function App() {
         );
       }
     },
-    [activeConversation, activeWorkspace, sendProtocolMessage, settings.defaultModel, updateWorkspace],
+    [activeConversation, activeWorkspace, sendProtocolMessage, settings.defaultModel, startLocalAdapter, updateWorkspace],
   );
 
   const sendApprovalResponse = useCallback(
@@ -649,13 +866,7 @@ export default function App() {
       }
 
       if (lower === 'start') {
-        sendWorkspaceCommand(activeWorkspace, 'codex.local.start', {
-          cwd: activeWorkspace.path,
-          model: activeWorkspace.model,
-          approvalPolicy: activeWorkspace.approvalPolicy,
-          sandboxMode: activeWorkspace.sandboxMode,
-          configOverrides: {},
-        });
+        void startLocalAdapter(activeWorkspace).catch(() => undefined);
         return;
       }
 
@@ -665,7 +876,15 @@ export default function App() {
       }
 
       if (lower === 'stop') {
-        sendWorkspaceCommand(activeWorkspace, 'codex.local.stop', { force: false });
+        if (sendWorkspaceCommand(activeWorkspace, 'codex.local.stop', { force: false })) {
+          const pending = pendingLocalStartsRef.current.get(activeWorkspace.id);
+          if (pending) {
+            clearTimeout(pending.timeoutId);
+            pendingLocalStartsRef.current.delete(activeWorkspace.id);
+            pending.reject(new Error('本地会话已停止'));
+          }
+          updateWorkspace(activeWorkspace.id, { localAdapterState: 'stopped' });
+        }
         return;
       }
 
@@ -702,9 +921,11 @@ export default function App() {
       selectedRequest,
       sendApprovalResponse,
       sendLocalTurn,
+      startLocalAdapter,
       sendWorkspaceCommand,
       settings.defaultThreadId,
       turnId,
+      updateWorkspace,
     ],
   );
 
@@ -719,13 +940,7 @@ export default function App() {
 
   const runWorkspaceCommand = useCallback((workspace: WorkspaceRecord, command: 'start' | 'status' | 'attach' | 'stop' | 'interrupt') => {
     if (command === 'start') {
-      sendWorkspaceCommand(workspace, 'codex.local.start', {
-        cwd: workspace.path,
-        model: workspace.model,
-        approvalPolicy: workspace.approvalPolicy,
-        sandboxMode: workspace.sandboxMode,
-        configOverrides: {},
-      });
+      void startLocalAdapter(workspace).catch(() => undefined);
       return;
     }
     if (command === 'status') {
@@ -743,8 +958,16 @@ export default function App() {
       });
       return;
     }
-    sendWorkspaceCommand(workspace, 'codex.local.stop', { force: false });
-  }, [activeConversation, sendWorkspaceCommand, settings.defaultThreadId, turnId]);
+    if (sendWorkspaceCommand(workspace, 'codex.local.stop', { force: false })) {
+      const pending = pendingLocalStartsRef.current.get(workspace.id);
+      if (pending) {
+        clearTimeout(pending.timeoutId);
+        pendingLocalStartsRef.current.delete(workspace.id);
+        pending.reject(new Error('本地会话已停止'));
+      }
+      updateWorkspace(workspace.id, { localAdapterState: 'stopped' });
+    }
+  }, [activeConversation, sendWorkspaceCommand, settings.defaultThreadId, turnId, updateWorkspace, startLocalAdapter]);
 
   const pendingApprovalCount = pendingRequests.filter((request) => isApprovalLikeRequest(request.requestType)).length;
 
@@ -1087,6 +1310,9 @@ function ChatScreen({
   removeWorkspace: (workspaceId: string) => void;
 }) {
   const [menuVisible, setMenuVisible] = useState(false);
+  const insets = useSafeAreaInsets();
+  const keyboardInset = useKeyboardInset();
+  const composerPaddingBottom = 12 + (keyboardInset > 0 ? 0 : insets.bottom);
   const workspace = workspaces.find((item) => item.id === route.params.workspaceId) ?? null;
   const conversation = conversations.find((item) => item.id === route.params.conversationId) ?? null;
   const conversationMessages = timeline
@@ -1114,7 +1340,7 @@ function ChatScreen({
   }
 
   return (
-    <KeyboardAvoidingView style={styles.chatRoot} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+    <View style={[styles.chatRoot, { paddingBottom: keyboardInset }]}>
       {pendingRequests.length > 0 ? (
         <View style={styles.pendingStrip}>
           <Text style={styles.pendingText} numberOfLines={1}>
@@ -1131,7 +1357,7 @@ function ChatScreen({
 
       {lastError ? <Text style={styles.inlineError}>{lastError}</Text> : null}
 
-      <ScrollView contentContainerStyle={styles.messageList}>
+      <ScrollView contentContainerStyle={styles.messageList} keyboardShouldPersistTaps="handled">
         {conversationMessages.length === 0 ? (
           <EmptyState text="这是一段新的对话。" />
         ) : (
@@ -1139,7 +1365,7 @@ function ChatScreen({
         )}
       </ScrollView>
 
-      <View style={styles.composer}>
+      <View style={[styles.composer, { paddingBottom: composerPaddingBottom }]}>
         <TextInput
           value={chatDraft}
           onChangeText={setChatDraft}
@@ -1181,7 +1407,7 @@ function ChatScreen({
           </View>
         </Pressable>
       </Modal>
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
