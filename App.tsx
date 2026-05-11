@@ -1818,7 +1818,7 @@ export default function App() {
 
       const activeSessionId = sessionIdForConversation(activeWorkspace, activeConversation);
       const activeCommandWorkspace = commandWorkspaceForConversation(activeWorkspace, activeConversation);
-      const canReuseCachedThread = localConversationStateOf(activeConversation) === 'running';
+      const cachedThreadId = normalizeThreadId(activeConversation.threadId || settings.defaultThreadId);
       try {
         await startLocalAdapter(activeWorkspace, activeConversation);
       } catch (error) {
@@ -1829,7 +1829,7 @@ export default function App() {
 
       let threadId = '';
       try {
-        threadId = await ensureThreadId(activeWorkspace, activeConversation, !canReuseCachedThread);
+        threadId = await ensureThreadId(activeWorkspace, activeConversation, !cachedThreadId);
       } catch (error) {
         const message = error instanceof Error ? error.message : '创建 thread 失败';
         setLastError(message);
