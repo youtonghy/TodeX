@@ -2571,13 +2571,13 @@ function ChatScreen({
           autoCapitalize="none"
           autoCorrect={false}
         />
-        {isThinking ? (
-          <Pressable onPress={stopThinking} style={styles.stopButton}>
-            <Text style={styles.stopButtonText}>停止</Text>
-          </Pressable>
-        ) : null}
-        <Pressable onPress={submitChat} style={styles.sendButton}>
-          <Text style={styles.sendButtonText}>发送</Text>
+        <Pressable
+          onPress={isThinking ? stopThinking : submitChat}
+          style={[styles.sendButton, isThinking && styles.stopButton]}
+        >
+          <Text style={[styles.sendButtonText, isThinking && styles.stopButtonText]}>
+            {isThinking ? '停止' : '发送'}
+          </Text>
         </Pressable>
       </View>
 
