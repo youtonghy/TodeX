@@ -93,7 +93,6 @@ type PendingLocalStart = {
 };
 
 type PendingThreadStart = {
-  workspaceId: string;
   conversationId: string;
   requestId: string;
   promise: Promise<string>;
@@ -436,7 +435,6 @@ const defaultSettings: ConnectionSettings = {
   authToken: '',
   tenantId: 'local',
   defaultWorkspacePath: '/home/dev/projects',
-  defaultThreadId: '',
   defaultModel: 'gpt-5.5',
   approvalPolicy: 'on-request',
   sandboxMode: 'workspace-write',
@@ -448,14 +446,13 @@ function toPersistedSettings(settings: ConnectionSettings): PersistedSettings {
 }
 
 function fromPersistedSettings(raw: Partial<PersistedSettings> | null | undefined, authToken: string): ConnectionSettings {
-  const settings = {
-    ...defaultSettings,
-    ...raw,
-    authToken,
+  const { defaultThreadId: _legacyDefaultThreadId, ...safeRaw } = (raw ?? {}) as Partial<PersistedSettings> & {
+    defaultThreadId?: string;
   };
   return {
-    ...settings,
-    defaultThreadId: normalizeThreadId(settings.defaultThreadId),
+    ...defaultSettings,
+    ...safeRaw,
+    authToken,
   };
 }
 
@@ -963,14 +960,14 @@ function buildConversationRenderItems(entries: TimelineEntry[]): ConversationRen
   return items;
 }
 
-function createDefaultConversation(workspace: WorkspaceRecord, fallbackThreadId: string): ConversationRecord {
+function createDefaultConversation(workspace: WorkspaceRecord): ConversationRecord {
   const createdAt = workspace.createdAt || Date.now();
   return {
     id: createRequestId('conversation'),
     workspaceId: workspace.id,
     title: '默认对话',
     sessionId: workspace.sessionId || createSessionId(workspace.name),
-    threadId: normalizeThreadId(workspace.threadId || fallbackThreadId),
+    threadId: '',
     localAdapterState: 'idle',
     mode: 'implement',
     goalStatus: '',
@@ -1068,24 +1065,44 @@ export default function App() {
       const nextSettings = fromPersistedSettings(storedSettings, storedToken);
       const normalizedWorkspaces = storedWorkspaces.map((workspace) => ({
         ...workspace,
-        threadId: normalizeThreadId(workspace.threadId || nextSettings.defaultThreadId),
+        threadId: '',
         localAdapterState: 'idle' as LocalAdapterState,
       }));
       const existingWorkspaceIds = new Set(normalizedWorkspaces.map((workspace) => workspace.id));
+      const seenSessionIds = new Set<string>();
+      const seenThreadIds = new Set<string>();
       const normalizedConversations =
         storedConversations.length > 0
           ? storedConversations
               .filter((conversation) => existingWorkspaceIds.has(conversation.workspaceId))
-              .map((conversation) => ({
-                ...conversation,
-                sessionId: conversation.sessionId || normalizedWorkspaces.find((workspace) => workspace.id === conversation.workspaceId)?.sessionId || createSessionId(conversation.title),
-                threadId: normalizeThreadId(conversation.threadId),
-                localAdapterState: 'idle' as LocalAdapterState,
-                mode: (conversation.mode === 'plan' ? 'plan' : 'implement') as ConversationRecord['mode'],
-                goalStatus: conversation.goalStatus || '',
-                goalObjective: conversation.goalObjective || '',
-              }))
-          : normalizedWorkspaces.map((workspace) => createDefaultConversation(workspace, nextSettings.defaultThreadId));
+              .map((conversation) => {
+                const workspace = normalizedWorkspaces.find((item) => item.id === conversation.workspaceId);
+                const sessionSeed = workspace ? `${workspace.name}_${conversation.title}` : conversation.title;
+                let sessionId = conversation.sessionId || createSessionId(sessionSeed);
+                if (seenSessionIds.has(sessionId)) {
+                  sessionId = createSessionId(sessionSeed);
+                }
+                seenSessionIds.add(sessionId);
+
+                let threadId = normalizeThreadId(conversation.threadId);
+                if (threadId && seenThreadIds.has(threadId)) {
+                  threadId = '';
+                }
+                if (threadId) {
+                  seenThreadIds.add(threadId);
+                }
+
+                return {
+                  ...conversation,
+                  sessionId,
+                  threadId,
+                  localAdapterState: 'idle' as LocalAdapterState,
+                  mode: (conversation.mode === 'plan' ? 'plan' : 'implement') as ConversationRecord['mode'],
+                  goalStatus: conversation.goalStatus || '',
+                  goalObjective: conversation.goalObjective || '',
+                };
+              })
+          : normalizedWorkspaces.map((workspace) => createDefaultConversation(workspace));
       const storedConversation = normalizedConversations.find((conversation) => conversation.id === storedActiveSelection?.conversationId);
       const storedWorkspace = normalizedWorkspaces.find((workspace) => workspace.id === storedActiveSelection?.workspaceId);
       const firstWorkspaceId = storedConversation?.workspaceId ?? storedWorkspace?.id ?? normalizedWorkspaces[0]?.id ?? '';
@@ -1330,7 +1347,6 @@ export default function App() {
         return;
       }
 
-      updateWorkspace(pending.workspaceId, { threadId });
       setConversations((current) =>
         current.map((conversation) =>
           conversation.id === pending.conversationId ? { ...conversation, threadId, updatedAt: Date.now() } : conversation,
@@ -1338,7 +1354,7 @@ export default function App() {
       );
       pending.resolve(threadId);
     },
-    [updateWorkspace],
+    [],
   );
 
   const findPendingLocalStart = useCallback((event: ServerEvent, data: Record<string, unknown>) => {
@@ -1358,10 +1374,7 @@ export default function App() {
       data.session_id ??
       event.codex_session_id;
     if (typeof sessionId === 'string' && sessionId) {
-      return pendingStarts.find((item) => {
-        const workspace = workspacesRef.current.find((candidate) => candidate.id === item.workspaceId);
-        return workspace?.sessionId === sessionId || item.sessionId === sessionId;
-      }) ?? null;
+      return pendingStarts.find((item) => item.sessionId === sessionId) ?? null;
     }
 
     return pendingStarts.length === 1 ? pendingStarts[0] : null;
@@ -1491,6 +1504,7 @@ export default function App() {
           if (conversation) {
             updateConversation(conversation.id, {
               sessionId: createSessionId(conversation.title),
+              threadId: '',
               localAdapterState: 'idle',
             });
           } else if (workspace) {
@@ -1509,7 +1523,6 @@ export default function App() {
               : null;
         if (conversation) {
           updateConversation(conversation.id, { threadId: '' });
-          updateWorkspace(conversation.workspaceId, { threadId: '' });
           appendTimeline(makeSystemEntry(
             '已重置失效 Thread',
             localTurnErrorMessage(protocolError),
@@ -1669,7 +1682,7 @@ export default function App() {
       const name = nameDraft.trim() || displayNameFromPath(path);
       const id = createRequestId('workspace');
       const sessionId = createSessionId(name);
-      const threadId = normalizeThreadId(settings.defaultThreadId);
+      const threadId = '';
       const nextWorkspace: WorkspaceRecord = {
         id,
         name,
@@ -1685,7 +1698,7 @@ export default function App() {
         createdAt: Date.now(),
         updatedAt: Date.now(),
       };
-      const nextConversation = createDefaultConversation(nextWorkspace, threadId);
+      const nextConversation = createDefaultConversation(nextWorkspace);
       const normalizedConversation = {
         ...nextConversation,
         sessionId,
@@ -1702,7 +1715,6 @@ export default function App() {
       pushSystem,
       settings.approvalPolicy,
       settings.defaultModel,
-      settings.defaultThreadId,
       settings.sandboxMode,
       settings.tenantId,
     ],
@@ -1899,7 +1911,6 @@ export default function App() {
         }, 15000);
 
         pendingThreadStartsRef.current.set(conversation.id, {
-          workspaceId: workspace.id,
           conversationId: conversation.id,
           requestId,
           promise,
@@ -2006,7 +2017,7 @@ export default function App() {
         setIsThinking(false);
       }
     },
-    [activeConversation, activeWorkspace, appendTimeline, ensureThreadId, sendProtocolMessage, settings.approvalPolicy, settings.defaultModel, settings.sandboxMode, startLocalAdapter, updateWorkspace],
+    [activeConversation, activeWorkspace, appendTimeline, ensureThreadId, sendProtocolMessage, settings.approvalPolicy, settings.defaultModel, settings.sandboxMode, startLocalAdapter],
   );
 
   const sendApprovalResponse = useCallback(
@@ -2286,8 +2297,13 @@ export default function App() {
       }
 
       if (lower === 'interrupt') {
+        const threadId = normalizeThreadId(activeConversation.threadId);
+        if (!threadId) {
+          setLastError('当前对话还没有可中断的 thread。');
+          return;
+        }
         sendWorkspaceCommand(activeWorkspace, 'codex.local.interrupt', {
-          threadId: normalizeThreadId(activeConversation.threadId || settings.defaultThreadId),
+          threadId,
           turnId: turnId || '',
         }, activeConversation);
         return;
@@ -2398,7 +2414,6 @@ export default function App() {
       sendWorkspaceCommand,
       attachWorkspaceConversation,
       settings,
-      settings.defaultThreadId,
       setChatDraft,
       setComposerSelection,
       setLastError,
@@ -2413,7 +2428,7 @@ export default function App() {
       Alert.alert('未选择工作区', '请先选择一个工作区。');
       return;
     }
-    const threadId = normalizeThreadId(activeConversation.threadId || settings.defaultThreadId);
+    const threadId = normalizeThreadId(activeConversation.threadId);
     if (!threadId) {
       setLastError('当前还没有可中断的 thread。');
       return;
@@ -2421,7 +2436,7 @@ export default function App() {
     if (sendWorkspaceCommand(activeWorkspace, 'codex.local.interrupt', { threadId, turnId: turnId || '' }, activeConversation)) {
       appendTimeline(makeSystemEntry('已发送停止', '正在请求 Codex 中断当前思考。', activeWorkspace.id, activeConversation.id));
     }
-  }, [activeConversation, activeWorkspace, appendTimeline, sendWorkspaceCommand, settings.defaultThreadId, turnId]);
+  }, [activeConversation, activeWorkspace, appendTimeline, sendWorkspaceCommand, turnId]);
 
   const submitChat = useCallback(() => {
     const text = chatDraft.trim();
@@ -2455,8 +2470,13 @@ export default function App() {
       return;
     }
     if (command === 'interrupt') {
+      const threadId = normalizeThreadId(conversation.threadId);
+      if (!threadId) {
+        setLastError('当前对话还没有可中断的 thread。');
+        return;
+      }
       sendWorkspaceCommand(workspace, 'codex.local.interrupt', {
-        threadId: normalizeThreadId(conversation.threadId || settings.defaultThreadId),
+        threadId,
         turnId: turnId || '',
       }, conversation);
       return;
@@ -2470,7 +2490,7 @@ export default function App() {
       }
       updateConversation(conversation.id, { localAdapterState: 'stopped' });
     }
-  }, [attachWorkspaceConversation, sendWorkspaceCommand, settings.defaultThreadId, turnId, updateConversation, startLocalAdapter]);
+  }, [attachWorkspaceConversation, sendWorkspaceCommand, turnId, updateConversation, startLocalAdapter]);
 
   if (!hydrated) {
     return (
@@ -3197,13 +3217,6 @@ function SettingsScreen({
             value={settings.defaultWorkspacePath}
             onChangeText={(value) => setSettings((current) => ({ ...current, defaultWorkspacePath: value }))}
             placeholder="/home/dev/projects"
-          />
-          <Field
-            label="默认 Thread"
-            value={settings.defaultThreadId}
-            onChangeText={(value) => setSettings((current) => ({ ...current, defaultThreadId: value }))}
-            onBlur={() => setSettings((current) => ({ ...current, defaultThreadId: normalizeThreadId(current.defaultThreadId) }))}
-            placeholder="UUID"
           />
           <Field
             label="默认模型"

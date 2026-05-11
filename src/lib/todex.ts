@@ -5,7 +5,6 @@ export type ConnectionSettings = {
   authToken: string;
   tenantId: string;
   defaultWorkspacePath: string;
-  defaultThreadId: string;
   defaultModel: string;
   approvalPolicy: string;
   sandboxMode: string;
@@ -406,7 +405,7 @@ export const COMMAND_PRESETS: CommandPreset[] = [
     description: 'Send a new turn to the local adapter.',
     build: (ctx) => ({
       ...localSessionPayload(ctx),
-      threadId: ctx.threadId || ctx.settings.defaultThreadId,
+      threadId: ctx.threadId,
       input: [{ type: 'text', text: ctx.prompt || 'Write a message for Codex.' }],
       collaborationMode: {
         mode: 'default',
@@ -424,7 +423,7 @@ export const COMMAND_PRESETS: CommandPreset[] = [
     description: 'Append text to the active turn.',
     build: (ctx) => ({
       ...localSessionPayload(ctx),
-      threadId: ctx.threadId || ctx.settings.defaultThreadId,
+      threadId: ctx.threadId,
       turnId: ctx.turnId || '',
       input: [{ type: 'text', text: ctx.prompt || 'Continue.' }],
     }),
@@ -436,7 +435,7 @@ export const COMMAND_PRESETS: CommandPreset[] = [
     description: 'Steer the active turn with a new input.',
     build: (ctx) => ({
       ...localSessionPayload(ctx),
-      threadId: ctx.threadId || ctx.settings.defaultThreadId,
+      threadId: ctx.threadId,
       turnId: ctx.turnId || '',
       expectedTurnId: ctx.turnId || undefined,
       input: [{ type: 'text', text: ctx.prompt || 'Adjust the plan.' }],
@@ -449,7 +448,7 @@ export const COMMAND_PRESETS: CommandPreset[] = [
     description: 'Interrupt the active turn.',
     build: (ctx) => ({
       ...localSessionPayload(ctx),
-      threadId: ctx.threadId || ctx.settings.defaultThreadId,
+      threadId: ctx.threadId,
       turnId: ctx.turnId || undefined,
     }),
   },
@@ -505,7 +504,7 @@ export const COMMAND_PRESETS: CommandPreset[] = [
       ...localSessionPayload(ctx),
       method: 'thread/start',
       params: {
-        threadId: ctx.threadId || ctx.settings.defaultThreadId,
+        threadId: ctx.threadId,
       },
     }),
   },
@@ -533,7 +532,7 @@ export const COMMAND_PRESETS: CommandPreset[] = [
       codex_session_id: ctx.workspace?.sessionId ?? `cdxs_${createRequestId('session')}`,
       tenant_id: ctx.settings.tenantId,
       payload: {
-        threadId: ctx.threadId || ctx.settings.defaultThreadId,
+        threadId: ctx.threadId,
       },
     }),
   },
@@ -546,7 +545,7 @@ export const COMMAND_PRESETS: CommandPreset[] = [
       codex_session_id: ctx.workspace?.sessionId ?? `cdxs_${createRequestId('session')}`,
       tenant_id: ctx.settings.tenantId,
       payload: {
-        threadId: ctx.threadId || ctx.settings.defaultThreadId,
+        threadId: ctx.threadId,
         input: [{ type: 'text', text: ctx.prompt || 'Start the turn.' }],
       },
     }),
@@ -560,7 +559,7 @@ export const COMMAND_PRESETS: CommandPreset[] = [
       codex_session_id: ctx.workspace?.sessionId ?? `cdxs_${createRequestId('session')}`,
       tenant_id: ctx.settings.tenantId,
       payload: {
-        threadId: ctx.threadId || ctx.settings.defaultThreadId,
+        threadId: ctx.threadId,
         turnId: ctx.turnId || '',
         expectedTurnId: ctx.turnId || undefined,
         input: [{ type: 'text', text: ctx.prompt || 'Steer the turn.' }],
@@ -576,7 +575,7 @@ export const COMMAND_PRESETS: CommandPreset[] = [
       codex_session_id: ctx.workspace?.sessionId ?? `cdxs_${createRequestId('session')}`,
       tenant_id: ctx.settings.tenantId,
       payload: {
-        threadId: ctx.threadId || ctx.settings.defaultThreadId,
+        threadId: ctx.threadId,
         turnId: ctx.turnId || undefined,
       },
     }),
