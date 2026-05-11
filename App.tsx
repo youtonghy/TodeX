@@ -1,4 +1,14 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Dispatch,
+  type ReactNode,
+  type SetStateAction,
+} from 'react';
 import {
   Alert,
   Keyboard,
@@ -230,6 +240,29 @@ type SlashCommand = {
   description: string;
 };
 
+type MentionTrigger = {
+  start: number;
+  query: string;
+};
+
+type MentionSuggestion = {
+  id: string;
+  title: string;
+  description: string;
+  insertText: string;
+};
+
+type MentionReference = {
+  kind: 'file' | 'workspace' | 'conversation' | 'request';
+  value: string;
+};
+
+type WorkspaceMentionHistory = {
+  workspaceId: string;
+  files: string[];
+  updatedAt: number;
+};
+
 function itemTypeOf(item: Record<string, unknown>): string {
   const rawType = item.type ?? item.itemType ?? item.item_type;
   return typeof rawType === 'string' ? rawType : '';
@@ -284,9 +317,13 @@ const WORKSPACES_STORAGE_KEY = 'todex.mobile.workspaces.v1';
 const CONVERSATIONS_STORAGE_KEY = 'todex.mobile.conversations.v1';
 const TIMELINE_STORAGE_KEY = 'todex.mobile.timeline.v1';
 const ACTIVE_SELECTION_STORAGE_KEY = 'todex.mobile.activeSelection.v1';
+const MENTION_HISTORY_STORAGE_KEY = 'todex.mobile.mentionHistory.v1';
+const SESSION_CURSORS_STORAGE_KEY = 'todex.mobile.sessionCursors.v1';
 const TOKEN_STORAGE_KEY = 'todex.mobile.token.v1';
 const MAX_TIMELINE_ITEMS = 260;
 const MAX_EVENTS = 220;
+const RECONNECT_DELAY_MS = 2500;
+const RECONNECT_REPLAY_LIMIT = 5000;
 
 const SLASH_COMMANDS: SlashCommand[] = [
   { command: '/start', title: '启动本地会话', description: '启动当前目录的 Codex CLI adapter' },
@@ -372,6 +409,160 @@ function textFromLocalTurnPayload(payload: Record<string, unknown>): string {
   return text || shortJson(payload).slice(0, 240);
 }
 
+function findMentionTrigger(text: string): MentionTrigger | null {
+  const match = /(?:^|\s)@([^\s@]*)$/.exec(text);
+  if (!match || match.index === undefined) {
+    return null;
+  }
+
+  return {
+    start: match.index + match[0].indexOf('@'),
+    query: match[1] ?? '',
+  };
+}
+
+function pathFileName(path: string): string {
+  const parts = path.trim().split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] || path.trim();
+}
+
+function buildMentionSuggestions(
+  trigger: MentionTrigger | null,
+  workspace: WorkspaceRecord | null,
+  conversation: ConversationRecord | null,
+  selectedRequest: PendingRequest | null,
+  mentionHistory: WorkspaceMentionHistory[],
+): MentionSuggestion[] {
+  if (!trigger) {
+    return [];
+  }
+
+  const query = trigger.query.trim();
+  const normalizedQuery = query.toLowerCase();
+  const suggestions: MentionSuggestion[] = [];
+  const recentFiles = workspace
+    ? mentionHistory.find((item) => item.workspaceId === workspace.id)?.files ?? []
+    : [];
+
+  if (query) {
+    suggestions.push({
+      id: `file-${query}`,
+      title: `文件 ${pathFileName(query)}`,
+      description: query,
+      insertText: `@${query} `,
+    });
+
+    for (const path of recentFiles) {
+      if (!path.toLowerCase().includes(normalizedQuery)) {
+        continue;
+      }
+      suggestions.push({
+        id: `recent-file-${path}`,
+        title: `最近文件 ${pathFileName(path)}`,
+        description: path,
+        insertText: `@${path} `,
+      });
+    }
+  } else {
+    for (const path of recentFiles.slice(0, 4)) {
+      suggestions.push({
+        id: `recent-file-${path}`,
+        title: `最近文件 ${pathFileName(path)}`,
+        description: path,
+        insertText: `@${path} `,
+      });
+    }
+
+    for (const path of ['README.md', 'package.json', 'src/']) {
+      suggestions.push({
+        id: `file-template-${path}`,
+        title: `文件 ${path}`,
+        description: '输入 @ 后继续补相对路径也可以',
+        insertText: `@${path}`,
+      });
+    }
+  }
+
+  if (workspace) {
+    suggestions.push({
+      id: 'workspace-current',
+      title: '当前目录',
+      description: workspace.path,
+      insertText: `@workspace:${workspace.path} `,
+    });
+  }
+
+  if (conversation) {
+    suggestions.push({
+      id: 'conversation-current',
+      title: '当前对话',
+      description: conversation.title,
+      insertText: `@conversation:${conversation.title} `,
+    });
+  }
+
+  if (selectedRequest) {
+    suggestions.push({
+      id: `request-${selectedRequest.requestId}`,
+      title: '待处理请求',
+      description: selectedRequest.title,
+      insertText: `@request:${selectedRequest.requestId} `,
+    });
+  }
+
+  if (!normalizedQuery) {
+    return suggestions.filter((item, index, list) => list.findIndex((candidate) => candidate.insertText === item.insertText) === index).slice(0, 6);
+  }
+
+  return suggestions
+    .filter((item) => (
+      item.title.toLowerCase().includes(normalizedQuery) ||
+      item.description.toLowerCase().includes(normalizedQuery) ||
+      item.insertText.toLowerCase().includes(normalizedQuery)
+    ))
+    .filter((item, index, list) => list.findIndex((candidate) => candidate.insertText === item.insertText) === index)
+    .slice(0, 6);
+}
+
+function insertMention(text: string, trigger: MentionTrigger, insertText: string): string {
+  return `${text.slice(0, trigger.start)}${insertText}${text.slice(trigger.start + trigger.query.length + 1)}`;
+}
+
+function parseMentionReferences(text: string): MentionReference[] {
+  const references = new Map<string, MentionReference>();
+  const mentionPattern = /(?:^|\s)@([^\s@]+)/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = mentionPattern.exec(text)) !== null) {
+    const raw = (match[1] ?? '').replace(/[.,;:!?，。；：！？]+$/g, '');
+    if (!raw) {
+      continue;
+    }
+
+    const [prefix, ...rest] = raw.split(':');
+    const value = rest.join(':').trim();
+    const kind =
+      prefix === 'workspace' || prefix === 'conversation' || prefix === 'request'
+        ? prefix
+        : 'file';
+    const resolvedValue = kind === 'file' ? raw : value;
+    if (!resolvedValue) {
+      continue;
+    }
+    references.set(`${kind}:${resolvedValue}`, { kind, value: resolvedValue });
+  }
+
+  return [...references.values()];
+}
+
+function summarizeMentionReferences(references: MentionReference[]): string {
+  const files = references.filter((item) => item.kind === 'file');
+  if (!files.length) {
+    return '';
+  }
+  return files.map((item) => item.value).join(', ');
+}
+
 function stringFromUnknown(value: unknown): string {
   if (typeof value === 'string') {
     return value;
@@ -446,6 +637,17 @@ function sessionIdFromEvent(event: ServerEvent, data = eventPayloadData(event)):
   ];
   const value = candidates.find((candidate) => typeof candidate === 'string' && candidate.trim());
   return typeof value === 'string' ? value : '';
+}
+
+function cursorFromEvent(event: ServerEvent): number | null {
+  if (typeof event.cursor === 'number' && Number.isFinite(event.cursor)) {
+    return event.cursor;
+  }
+  if (typeof event.cursor === 'string') {
+    const parsed = Number(event.cursor);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
 }
 
 function threadIdFromEventData(event: ServerEvent, data = eventPayloadData(event)): string {
@@ -662,6 +864,9 @@ export default function App() {
   const pendingThreadStartsRef = useRef(new Map<string, PendingThreadStart>());
   const autoConnectAttemptedRef = useRef(false);
   const attachedSessionIdsRef = useRef(new Set<string>());
+  const sessionCursorsRef = useRef(new Map<string, number>());
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const manualDisconnectRef = useRef(false);
 
   const [hydrated, setHydrated] = useState(false);
   const [autoConnectEnabled, setAutoConnectEnabled] = useState(false);
@@ -675,12 +880,26 @@ export default function App() {
   const [serverVersion, setServerVersion] = useState<ServerVersion | null>(null);
   const [events, setEvents] = useState<ServerEvent[]>([]);
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
+  const [mentionHistory, setMentionHistory] = useState<WorkspaceMentionHistory[]>([]);
   const [selectedRequestId, setSelectedRequestId] = useState('');
   const [chatDraft, setChatDraft] = useState('');
   const [turnId, setTurnId] = useState('');
   const [isThinking, setIsThinking] = useState(false);
 
-  const closeSocket = useCallback(() => {
+  const persistSessionCursors = useCallback(() => {
+    const cursors = Object.fromEntries(sessionCursorsRef.current.entries());
+    void saveJson(SESSION_CURSORS_STORAGE_KEY, cursors);
+  }, []);
+
+  const closeSocket = useCallback((manual = true) => {
+    if (manual) {
+      manualDisconnectRef.current = true;
+      setAutoConnectEnabled(false);
+    }
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
     if (socketRef.current) {
       try {
         socketRef.current.close();
@@ -689,17 +908,29 @@ export default function App() {
       }
       socketRef.current = null;
     }
+    attachedSessionIdsRef.current.clear();
   }, []);
 
   useEffect(() => {
     let alive = true;
     (async () => {
-      const [storedSettings, storedWorkspaces, storedConversations, storedTimeline, storedActiveSelection, storedToken] = await Promise.all([
+      const [
+        storedSettings,
+        storedWorkspaces,
+        storedConversations,
+        storedTimeline,
+        storedActiveSelection,
+        storedMentionHistory,
+        storedSessionCursors,
+        storedToken,
+      ] = await Promise.all([
         loadJson<PersistedSettings | null>(SETTINGS_STORAGE_KEY, null),
         loadJson<WorkspaceRecord[]>(WORKSPACES_STORAGE_KEY, []),
         loadJson<ConversationRecord[]>(CONVERSATIONS_STORAGE_KEY, []),
         loadJson<TimelineEntry[]>(TIMELINE_STORAGE_KEY, []),
         loadJson<{ workspaceId?: string; conversationId?: string } | null>(ACTIVE_SELECTION_STORAGE_KEY, null),
+        loadJson<WorkspaceMentionHistory[]>(MENTION_HISTORY_STORAGE_KEY, []),
+        loadJson<Record<string, number>>(SESSION_CURSORS_STORAGE_KEY, {}),
         loadSecret(TOKEN_STORAGE_KEY),
       ]);
 
@@ -730,11 +961,16 @@ export default function App() {
       const firstWorkspaceId = storedConversation?.workspaceId ?? storedWorkspace?.id ?? normalizedWorkspaces[0]?.id ?? '';
       const firstConversationId =
         storedConversation?.id ?? normalizedConversations.find((conversation) => conversation.workspaceId === firstWorkspaceId)?.id ?? '';
+      sessionCursorsRef.current = new Map(
+        Object.entries(storedSessionCursors)
+          .filter((entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1]) && entry[1] > 0),
+      );
 
       setSettings(nextSettings);
       setWorkspaces(normalizedWorkspaces);
       setConversations(normalizedConversations);
       setTimeline(storedTimeline.slice(0, MAX_TIMELINE_ITEMS));
+      setMentionHistory(storedMentionHistory);
       setActiveWorkspaceId(firstWorkspaceId);
       setActiveConversationId(firstConversationId);
       setAutoConnectEnabled(Boolean(storedSettings?.serverUrl?.trim()));
@@ -743,7 +979,7 @@ export default function App() {
 
     return () => {
       alive = false;
-      closeSocket();
+      closeSocket(false);
     };
   }, [closeSocket]);
 
@@ -791,6 +1027,13 @@ export default function App() {
     }
     void saveJson(TIMELINE_STORAGE_KEY, timeline.slice(0, MAX_TIMELINE_ITEMS));
   }, [hydrated, timeline]);
+
+  useEffect(() => {
+    if (!hydrated) {
+      return;
+    }
+    void saveJson(MENTION_HISTORY_STORAGE_KEY, mentionHistory);
+  }, [hydrated, mentionHistory]);
 
   useEffect(() => {
     if (!hydrated) {
@@ -877,6 +1120,30 @@ export default function App() {
 
   const appendTimeline = useCallback((entry: TimelineEntry) => {
     setTimeline((current) => [entry, ...current].slice(0, MAX_TIMELINE_ITEMS));
+  }, []);
+
+  const rememberMentionReferences = useCallback((workspaceId: string, references: MentionReference[]) => {
+    const files = references
+      .filter((reference) => reference.kind === 'file')
+      .map((reference) => reference.value.trim())
+      .filter(Boolean);
+
+    if (!files.length) {
+      return;
+    }
+
+    setMentionHistory((current) => {
+      const existing = current.find((item) => item.workspaceId === workspaceId);
+      const merged = [...files, ...(existing?.files ?? [])]
+        .filter((file, index, list) => list.findIndex((candidate) => candidate === file) === index)
+        .slice(0, 20);
+      const nextRecord: WorkspaceMentionHistory = {
+        workspaceId,
+        files: merged,
+        updatedAt: Date.now(),
+      };
+      return [nextRecord, ...current.filter((item) => item.workspaceId !== workspaceId)].slice(0, 50);
+    });
   }, []);
 
   const resolveTimelineTarget = useCallback((event: ServerEvent, data = eventPayloadData(event)) => {
@@ -999,8 +1266,18 @@ export default function App() {
 
   const appendEvent = useCallback(
     (event: ServerEvent) => {
-      setEvents((current) => [event, ...current].slice(0, MAX_EVENTS));
       const data = eventPayloadData(event);
+      const sessionId = sessionIdFromEvent(event, data);
+      const cursor = cursorFromEvent(event);
+      if (sessionId && cursor !== null) {
+        const previousCursor = sessionCursorsRef.current.get(sessionId) ?? 0;
+        if (cursor <= previousCursor) {
+          return;
+        }
+        sessionCursorsRef.current.set(sessionId, cursor);
+        persistSessionCursors();
+      }
+      setEvents((current) => [event, ...current].slice(0, MAX_EVENTS));
       const target = resolveTimelineTarget(event, data);
       const chatEntry = classifyChatEvent(event, target.workspaceId, target.conversationId);
       if (chatEntry) {
@@ -1112,7 +1389,7 @@ export default function App() {
         setTurnId(maybeTurnId);
       }
     },
-    [appendTimeline, findPendingLocalStart, resetWorkspaceSession, resolveTimelineTarget, settlePendingLocalStart, settlePendingThreadStart, updateConversation, upsertChatTimeline],
+    [appendTimeline, findPendingLocalStart, persistSessionCursors, resetWorkspaceSession, resolveTimelineTarget, settlePendingLocalStart, settlePendingThreadStart, updateConversation, upsertChatTimeline],
   );
 
   const pushSystem = useCallback(
@@ -1137,7 +1414,10 @@ export default function App() {
   }, [settings.serverUrl]);
 
   const connect = useCallback(() => {
-    closeSocket();
+    manualDisconnectRef.current = false;
+    autoConnectAttemptedRef.current = true;
+    setAutoConnectEnabled(true);
+    closeSocket(false);
     setLastError('');
     setConnectionState('connecting');
 
@@ -1153,6 +1433,7 @@ export default function App() {
       socketRef.current = socket;
 
       socket.onopen = () => {
+        attachedSessionIdsRef.current.clear();
         setConnectionState('open');
         pushSystem('已连接', wsUrl);
         void refreshServerVersion();
@@ -1181,6 +1462,30 @@ export default function App() {
       setLastError(error instanceof Error ? error.message : 'failed to connect');
     }
   }, [appendEvent, closeSocket, pushSystem, refreshServerVersion, settings.authToken, settings.serverUrl]);
+
+  useEffect(() => {
+    if (!hydrated || !autoConnectEnabled || manualDisconnectRef.current) {
+      return;
+    }
+    if (connectionState !== 'closed' && connectionState !== 'error') {
+      return;
+    }
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+    }
+    reconnectTimerRef.current = setTimeout(() => {
+      reconnectTimerRef.current = null;
+      if (!manualDisconnectRef.current) {
+        connect();
+      }
+    }, RECONNECT_DELAY_MS);
+    return () => {
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+    };
+  }, [autoConnectEnabled, connect, connectionState, hydrated]);
 
   useEffect(() => {
     if (!hydrated || !autoConnectEnabled || autoConnectAttemptedRef.current) {
@@ -1322,6 +1627,15 @@ export default function App() {
     [sendProtocolMessage],
   );
 
+  const attachWorkspaceConversation = useCallback((workspace: WorkspaceRecord, conversation: ConversationRecord) => {
+    const sessionId = sessionIdForConversation(workspace, conversation);
+    const afterCursor = sessionCursorsRef.current.get(sessionId) ?? null;
+    return sendWorkspaceCommand(workspace, 'codex.local.attach', {
+      afterCursor,
+      replayLimit: RECONNECT_REPLAY_LIMIT,
+    }, conversation);
+  }, [sendWorkspaceCommand]);
+
   useEffect(() => {
     if (connectionState !== 'open' || !activeWorkspace || !activeConversation?.sessionId) {
       return;
@@ -1331,11 +1645,8 @@ export default function App() {
       return;
     }
     attachedSessionIdsRef.current.add(sessionId);
-    sendWorkspaceCommand(activeWorkspace, 'codex.local.attach', {
-      afterCursor: null,
-      replayLimit: 200,
-    }, activeConversation);
-  }, [activeConversation, activeWorkspace, connectionState, sendWorkspaceCommand]);
+    attachWorkspaceConversation(activeWorkspace, activeConversation);
+  }, [activeConversation, activeWorkspace, attachWorkspaceConversation, connectionState]);
 
   const startLocalAdapter = useCallback(
     (workspace: WorkspaceRecord, conversation: ConversationRecord) => {
@@ -1608,10 +1919,7 @@ export default function App() {
       }
 
       if (lower === 'attach') {
-        sendWorkspaceCommand(activeWorkspace, 'codex.local.attach', {
-          afterCursor: null,
-          replayLimit: 200,
-        }, activeConversation);
+        attachWorkspaceConversation(activeWorkspace, activeConversation);
         return;
       }
 
@@ -1664,6 +1972,7 @@ export default function App() {
       sendProtocolMessage,
       startLocalAdapter,
       sendWorkspaceCommand,
+      attachWorkspaceConversation,
       settings,
       settings.defaultThreadId,
       turnId,
@@ -1691,9 +2000,17 @@ export default function App() {
     if (!text) {
       return;
     }
+    const mentionReferences = parseMentionReferences(text);
+    if (activeWorkspace && mentionReferences.length > 0) {
+      rememberMentionReferences(activeWorkspace.id, mentionReferences);
+      const mentionSummary = summarizeMentionReferences(mentionReferences);
+      if (mentionSummary) {
+        appendTimeline(makeSystemEntry('已引用文件', mentionSummary, activeWorkspace.id, activeConversationId));
+      }
+    }
     setChatDraft('');
     sendSlashCommand(text);
-  }, [chatDraft, sendSlashCommand]);
+  }, [activeConversationId, activeWorkspace, appendTimeline, chatDraft, rememberMentionReferences, sendSlashCommand]);
 
   const runWorkspaceCommand = useCallback((workspace: WorkspaceRecord, conversation: ConversationRecord, command: 'start' | 'status' | 'attach' | 'stop' | 'interrupt') => {
     if (command === 'start') {
@@ -1705,7 +2022,7 @@ export default function App() {
       return;
     }
     if (command === 'attach') {
-      sendWorkspaceCommand(workspace, 'codex.local.attach', { afterCursor: null, replayLimit: 200 }, conversation);
+      attachWorkspaceConversation(workspace, conversation);
       return;
     }
     if (command === 'interrupt') {
@@ -1724,7 +2041,7 @@ export default function App() {
       }
       updateConversation(conversation.id, { localAdapterState: 'stopped' });
     }
-  }, [sendWorkspaceCommand, settings.defaultThreadId, turnId, updateConversation, startLocalAdapter]);
+  }, [attachWorkspaceConversation, sendWorkspaceCommand, settings.defaultThreadId, turnId, updateConversation, startLocalAdapter]);
 
   const pendingApprovalCount = pendingRequests.filter((request) => isApprovalLikeRequest(request.requestType)).length;
 
@@ -1785,6 +2102,7 @@ export default function App() {
                   workspaces={workspaces}
                   conversations={conversations}
                   timeline={timeline}
+                  mentionHistory={mentionHistory}
                   pendingRequests={pendingRequests}
                   pendingApprovalCount={pendingApprovalCount}
                   selectedRequest={selectedRequest}
@@ -2041,6 +2359,7 @@ function ChatScreen({
   workspaces,
   conversations,
   timeline,
+  mentionHistory,
   pendingRequests,
   pendingApprovalCount,
   selectedRequest,
@@ -2058,13 +2377,14 @@ function ChatScreen({
   workspaces: WorkspaceRecord[];
   conversations: ConversationRecord[];
   timeline: TimelineEntry[];
+  mentionHistory: WorkspaceMentionHistory[];
   pendingRequests: PendingRequest[];
   pendingApprovalCount: number;
   selectedRequest: PendingRequest | null;
   chatDraft: string;
   isThinking: boolean;
   lastError: string;
-  setChatDraft: (value: string) => void;
+  setChatDraft: Dispatch<SetStateAction<string>>;
   submitChat: () => void;
   stopThinking: () => void;
   sendApprovalResponse: (accepted: boolean, request: PendingRequest) => void;
@@ -2073,6 +2393,7 @@ function ChatScreen({
   removeWorkspace: (workspaceId: string) => void;
 }) {
   const [menuVisible, setMenuVisible] = useState(false);
+  const composerInputRef = useRef<TextInput | null>(null);
   const insets = useSafeAreaInsets();
   const keyboardInset = useKeyboardInset();
   const composerPaddingBottom = 12 + (keyboardInset > 0 ? 0 : insets.bottom);
@@ -2100,6 +2421,26 @@ function ChatScreen({
         );
       }).slice(0, 6)
     : [];
+  const mentionTrigger = slashSuggestions.length === 0 ? findMentionTrigger(chatDraft) : null;
+  const mentionSuggestions = buildMentionSuggestions(mentionTrigger, workspace, conversation, selectedRequest, mentionHistory);
+
+  const appendMentionTrigger = useCallback(() => {
+    setChatDraft((current) => {
+      if (!current || /\s$/.test(current)) {
+        return `${current}@`;
+      }
+      return `${current} @`;
+    });
+    requestAnimationFrame(() => composerInputRef.current?.focus());
+  }, [setChatDraft]);
+
+  const selectMention = useCallback((item: MentionSuggestion) => {
+    if (!mentionTrigger) {
+      return;
+    }
+    setChatDraft((current) => insertMention(current, mentionTrigger, item.insertText));
+    requestAnimationFrame(() => composerInputRef.current?.focus());
+  }, [mentionTrigger, setChatDraft]);
 
   useEffect(() => {
     selectConversation(route.params.workspaceId, route.params.conversationId);
@@ -2161,10 +2502,33 @@ function ChatScreen({
             ))}
           </View>
         ) : null}
+        {mentionSuggestions.length > 0 ? (
+          <View style={styles.mentionPanel}>
+            {mentionSuggestions.map((item) => (
+              <Pressable
+                key={item.id}
+                style={styles.mentionItem}
+                onPress={() => selectMention(item)}
+              >
+                <View style={styles.mentionIcon}>
+                  <Text style={styles.mentionIconText}>@</Text>
+                </View>
+                <View style={styles.mentionMain}>
+                  <Text style={styles.mentionTitle} numberOfLines={1}>{item.title}</Text>
+                  <Text style={styles.mentionDescription} numberOfLines={1}>{item.description}</Text>
+                </View>
+              </Pressable>
+            ))}
+          </View>
+        ) : null}
+        <Pressable onPress={appendMentionTrigger} style={styles.mentionButton}>
+          <Text style={styles.mentionButtonText}>@</Text>
+        </Pressable>
         <TextInput
+          ref={composerInputRef}
           value={chatDraft}
           onChangeText={setChatDraft}
-          placeholder="输入消息"
+          placeholder="输入消息，@ 引用文件"
           placeholderTextColor="#7a8391"
           style={styles.composerInput}
           multiline
@@ -2233,7 +2597,7 @@ function SettingsScreen({
   connectionState: string;
   lastError: string;
   connect: () => void;
-  closeSocket: () => void;
+  closeSocket: (manual?: boolean) => void;
   refreshServerVersion: () => void;
 }) {
   return (
@@ -2883,6 +3247,66 @@ const styles = StyleSheet.create({
   slashDescription: {
     color: '#66717c',
     fontSize: 12,
+  },
+  mentionPanel: {
+    width: '100%',
+    backgroundColor: '#f7f9fa',
+    borderWidth: 1,
+    borderColor: '#d8e0e7',
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+  mentionItem: {
+    minHeight: 50,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e7ecef',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  mentionIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 8,
+    backgroundColor: '#e1ebea',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  mentionIconText: {
+    color: '#244641',
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  mentionMain: {
+    flex: 1,
+    minWidth: 0,
+  },
+  mentionTitle: {
+    color: '#17202a',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  mentionDescription: {
+    color: '#66717c',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  mentionButton: {
+    width: 44,
+    minHeight: 44,
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#cfd5da',
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  mentionButtonText: {
+    color: '#17202a',
+    fontSize: 18,
+    fontWeight: '800',
   },
   composerInput: {
     flex: 1,
