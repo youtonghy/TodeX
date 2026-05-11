@@ -2867,7 +2867,6 @@ function ChatScreen({
   const [menuVisible, setMenuVisible] = useState(false);
   const [mentionEntries, setMentionEntries] = useState<WorkspaceEntry[]>([]);
   const [expandedProgressIds, setExpandedProgressIds] = useState<Set<string>>(() => new Set());
-  const [collapsedProgressIds, setCollapsedProgressIds] = useState<Set<string>>(() => new Set());
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const messageScrollRef = useRef<ScrollView | null>(null);
   const shouldFollowLatestRef = useRef(true);
@@ -2888,18 +2887,6 @@ function ChatScreen({
     () => buildConversationRenderItems(conversationMessages),
     [conversationMessages],
   );
-  const laterThinkingByEntryId = useMemo(() => {
-    const result = new Map<string, boolean>();
-    let hasLaterThinking = false;
-    for (let index = conversationMessages.length - 1; index >= 0; index -= 1) {
-      const entry = conversationMessages[index];
-      result.set(entry.id, hasLaterThinking);
-      if (isThinkingProgressEntry(entry)) {
-        hasLaterThinking = true;
-      }
-    }
-    return result;
-  }, [conversationMessages]);
   const pendingRequestById = useMemo(() => {
     const result = new Map<string, PendingRequest>();
     pendingRequests.forEach((request) => result.set(request.requestId, request));
@@ -3013,15 +3000,6 @@ function ChatScreen({
       }
       return next;
     });
-    setCollapsedProgressIds((current) => {
-      const next = new Set(current);
-      if (collapsed) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
   }, []);
   const toggleProgressEntry = useCallback((entry: TimelineEntry, collapsed: boolean) => {
     toggleProgressId(entry.id, collapsed);
@@ -3092,19 +3070,16 @@ function ChatScreen({
           ) : (
             conversationRenderItems.map((item) => {
               if (item.type === 'executionGroup') {
-                const autoCollapsed = item.entries.some((entry) => laterThinkingByEntryId.get(entry.id) === true);
                 const manuallyExpanded = expandedProgressIds.has(item.id);
-                const manuallyCollapsed = collapsedProgressIds.has(item.id);
-                const collapsed = manuallyExpanded ? false : manuallyCollapsed || autoCollapsed;
+                const collapsed = !manuallyExpanded;
                 return (
                   <ExecutionGroupBubble
                     key={item.id}
                     id={item.id}
                     entries={item.entries}
                     collapsed={collapsed}
-                    compactItems={autoCollapsed}
+                    compactItems
                     expandedProgressIds={expandedProgressIds}
-                    collapsedProgressIds={collapsedProgressIds}
                     pendingRequestById={pendingRequestById}
                     onToggleGroup={toggleProgressId}
                     onToggleProgress={toggleProgressEntry}
@@ -3115,14 +3090,8 @@ function ChatScreen({
 
               const entry = item.entry;
               const collapsible = isCollapsibleProgressEntry(entry);
-              const autoCollapsed = collapsible && laterThinkingByEntryId.get(entry.id) === true;
               const manuallyExpanded = expandedProgressIds.has(entry.id);
-              const manuallyCollapsed = collapsedProgressIds.has(entry.id);
-              const collapsed = collapsible
-                ? manuallyExpanded
-                  ? false
-                  : manuallyCollapsed || autoCollapsed
-                : false;
+              const collapsed = collapsible ? !manuallyExpanded : false;
               return (
                 <MessageBubble
                   key={entry.id}
@@ -3413,7 +3382,6 @@ function ExecutionGroupBubble({
   collapsed,
   compactItems,
   expandedProgressIds,
-  collapsedProgressIds,
   pendingRequestById,
   onToggleGroup,
   onToggleProgress,
@@ -3424,7 +3392,6 @@ function ExecutionGroupBubble({
   collapsed: boolean;
   compactItems: boolean;
   expandedProgressIds: Set<string>;
-  collapsedProgressIds: Set<string>;
   pendingRequestById: Map<string, PendingRequest>;
   onToggleGroup: (id: string, collapsed: boolean) => void;
   onToggleProgress: (entry: TimelineEntry, collapsed: boolean) => void;
@@ -3449,8 +3416,7 @@ function ExecutionGroupBubble({
           <View style={styles.executionGroupItems}>
             {entries.map((entry) => {
               const manuallyExpanded = expandedProgressIds.has(entry.id);
-              const manuallyCollapsed = collapsedProgressIds.has(entry.id);
-              const entryCollapsed = manuallyExpanded ? false : manuallyCollapsed || compactItems;
+              const entryCollapsed = compactItems && !manuallyExpanded;
               return (
                 <MessageBubble
                   key={entry.id}
