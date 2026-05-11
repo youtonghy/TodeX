@@ -47,7 +47,6 @@ import {
   eventPayloadData,
   extractThreadIdFromEvent,
   inferApprovalResponseType,
-  isApprovalLikeRequest,
   normalizeThreadId,
   normalizeServerUrl,
   shortJson,
@@ -233,6 +232,7 @@ type TimelineEntry = {
   at: number;
   workspaceId?: string;
   conversationId?: string;
+  requestId?: string;
 };
 
 type SlashCommand = {
@@ -608,9 +608,23 @@ function progressTextFromData(data: Record<string, unknown>, item: Record<string
     data.status,
     data.reason,
     data.operation,
+    data.command,
+    data.question,
   ].map(stringFromUnknown).find(Boolean);
   if (direct) {
     return direct;
+  }
+
+  const questions = data.questions;
+  if (Array.isArray(questions)) {
+    const questionText = questions
+      .map((question) => question && typeof question === 'object' && !Array.isArray(question)
+        ? stringFromUnknown((question as Record<string, unknown>).question)
+        : '')
+      .find(Boolean);
+    if (questionText) {
+      return questionText;
+    }
   }
 
   if (item) {
@@ -747,6 +761,8 @@ function classifyProgressEvent(event: ServerEvent, workspaceId: string, conversa
   const type = event.type;
   const itemType = item ? itemTypeOf(item) : '';
   const progressText = progressTextFromData(data, item);
+  const requestId = data.requestId ?? data.request_id;
+  const pendingRequestId = typeof requestId === 'string' && requestId ? requestId : undefined;
 
   if (/reasoning|thinking|thought|analysis/i.test(type) || /reasoning|thinking|thought|analysis/i.test(itemType)) {
     if (!progressText || isLifecycleProgressText(progressText)) {
@@ -769,18 +785,23 @@ function classifyProgressEvent(event: ServerEvent, workspaceId: string, conversa
   }
 
   if (/tool|command|mcp|approval|requestUserInput/i.test(type) || /tool|command|mcp|approval/i.test(itemType)) {
-    if (!progressText || isLifecycleProgressText(progressText)) {
+    if ((!progressText || isLifecycleProgressText(progressText)) && !type.endsWith('.request')) {
       return null;
     }
     return {
       id: `progress-${eventId(event)}`,
       kind: 'system',
-      title: type.endsWith('.completed') || /resolved|completed/i.test(type) ? '步骤完成' : '执行步骤',
+      title: type.endsWith('.request')
+        ? '请求权限批准'
+        : type.endsWith('.completed') || /resolved|completed/i.test(type)
+          ? '步骤完成'
+          : '执行步骤',
       subtitle: progressText || type,
       raw: shortJson(event),
       at: Date.now(),
       workspaceId,
       conversationId,
+      requestId: pendingRequestId,
     };
   }
 
@@ -861,6 +882,14 @@ function isVisibleConversationEntry(entry: TimelineEntry): boolean {
   }
 
   return true;
+}
+
+function isStepProgressEntry(entry: TimelineEntry): boolean {
+  return entry.kind === 'system' && (entry.title === '执行步骤' || entry.title === '步骤完成');
+}
+
+function isThinkingProgressEntry(entry: TimelineEntry): boolean {
+  return entry.kind === 'system' && entry.title === '思考中';
 }
 
 function createDefaultConversation(workspace: WorkspaceRecord, fallbackThreadId: string): ConversationRecord {
@@ -2068,8 +2097,6 @@ export default function App() {
     }
   }, [attachWorkspaceConversation, sendWorkspaceCommand, settings.defaultThreadId, turnId, updateConversation, startLocalAdapter]);
 
-  const pendingApprovalCount = pendingRequests.filter((request) => isApprovalLikeRequest(request.requestType)).length;
-
   if (!hydrated) {
     return (
       <View style={styles.loadingScreen}>
@@ -2129,7 +2156,6 @@ export default function App() {
                   timeline={timeline}
                   mentionHistory={mentionHistory}
                   pendingRequests={pendingRequests}
-                  pendingApprovalCount={pendingApprovalCount}
                   selectedRequest={selectedRequest}
                   chatDraft={chatDraft}
                   composerSelection={composerSelection}
@@ -2388,7 +2414,6 @@ function ChatScreen({
   timeline,
   mentionHistory,
   pendingRequests,
-  pendingApprovalCount,
   selectedRequest,
   chatDraft,
   composerSelection,
@@ -2408,7 +2433,6 @@ function ChatScreen({
   timeline: TimelineEntry[];
   mentionHistory: WorkspaceMentionHistory[];
   pendingRequests: PendingRequest[];
-  pendingApprovalCount: number;
   selectedRequest: PendingRequest | null;
   chatDraft: string;
   composerSelection: TextInputSelectionChangeEventData['selection'];
@@ -2424,6 +2448,8 @@ function ChatScreen({
   removeWorkspace: (workspaceId: string) => void;
 }) {
   const [menuVisible, setMenuVisible] = useState(false);
+  const [expandedProgressIds, setExpandedProgressIds] = useState<Set<string>>(() => new Set());
+  const [collapsedProgressIds, setCollapsedProgressIds] = useState<Set<string>>(() => new Set());
   const composerInputRef = useRef<TextInput | null>(null);
   const insets = useSafeAreaInsets();
   const keyboardInset = useKeyboardInset();
@@ -2435,6 +2461,23 @@ function ChatScreen({
     .filter(isVisibleConversationEntry)
     .slice()
     .reverse();
+  const laterThinkingByEntryId = useMemo(() => {
+    const result = new Map<string, boolean>();
+    let hasLaterThinking = false;
+    for (let index = conversationMessages.length - 1; index >= 0; index -= 1) {
+      const entry = conversationMessages[index];
+      result.set(entry.id, hasLaterThinking);
+      if (isThinkingProgressEntry(entry)) {
+        hasLaterThinking = true;
+      }
+    }
+    return result;
+  }, [conversationMessages]);
+  const pendingRequestById = useMemo(() => {
+    const result = new Map<string, PendingRequest>();
+    pendingRequests.forEach((request) => result.set(request.requestId, request));
+    return result;
+  }, [pendingRequests]);
   const slashQuery = chatDraft.startsWith('/') ? chatDraft.slice(1).trim().toLowerCase() : '';
   const slashSuggestions = chatDraft.startsWith('/')
     ? SLASH_COMMANDS.filter((item, index, list) => {
@@ -2472,6 +2515,27 @@ function ChatScreen({
     requestAnimationFrame(() => composerInputRef.current?.focus());
   }, [mentionTrigger, setChatDraft]);
 
+  const toggleProgressEntry = useCallback((entry: TimelineEntry, collapsed: boolean) => {
+    setExpandedProgressIds((current) => {
+      const next = new Set(current);
+      if (collapsed) {
+        next.add(entry.id);
+      } else {
+        next.delete(entry.id);
+      }
+      return next;
+    });
+    setCollapsedProgressIds((current) => {
+      const next = new Set(current);
+      if (collapsed) {
+        next.delete(entry.id);
+      } else {
+        next.add(entry.id);
+      }
+      return next;
+    });
+  }, []);
+
   useEffect(() => {
     selectConversation(route.params.workspaceId, route.params.conversationId);
   }, [route.params.conversationId, route.params.workspaceId, selectConversation]);
@@ -2493,27 +2557,33 @@ function ChatScreen({
 
   return (
     <View style={[styles.chatRoot, { paddingBottom: keyboardInset }]}>
-      {pendingRequests.length > 0 ? (
-        <View style={styles.pendingStrip}>
-          <Text style={styles.pendingText} numberOfLines={1}>
-            {pendingApprovalCount || pendingRequests.length} 个待处理请求
-          </Text>
-          {selectedRequest ? (
-            <>
-              <MiniButton title="同意" onPress={() => sendApprovalResponse(true, selectedRequest)} />
-              <MiniButton title="拒绝" onPress={() => sendApprovalResponse(false, selectedRequest)} />
-            </>
-          ) : null}
-        </View>
-      ) : null}
-
       {lastError ? <Text style={styles.inlineError}>{lastError}</Text> : null}
 
       <ScrollView contentContainerStyle={styles.messageList} keyboardShouldPersistTaps="handled">
         {conversationMessages.length === 0 ? (
           <EmptyState text="这是一段新的对话。" />
         ) : (
-          conversationMessages.map((entry) => <MessageBubble key={entry.id} entry={entry} />)
+          conversationMessages.map((entry) => {
+            const autoCollapsed = isStepProgressEntry(entry) && laterThinkingByEntryId.get(entry.id) === true;
+            const manuallyExpanded = expandedProgressIds.has(entry.id);
+            const manuallyCollapsed = collapsedProgressIds.has(entry.id);
+            const collapsed = isStepProgressEntry(entry)
+              ? manuallyExpanded
+                ? false
+                : manuallyCollapsed || autoCollapsed
+              : false;
+            return (
+              <MessageBubble
+                key={entry.id}
+                entry={entry}
+                collapsed={collapsed}
+                collapsible={isStepProgressEntry(entry)}
+                pendingRequest={entry.requestId ? pendingRequestById.get(entry.requestId) : undefined}
+                onToggleProgress={toggleProgressEntry}
+                onApprovalResponse={sendApprovalResponse}
+              />
+            );
+          })
         )}
       </ScrollView>
 
@@ -2723,22 +2793,58 @@ function SettingsScreen({
   );
 }
 
-function MessageBubble({ entry }: { entry: TimelineEntry }) {
+function MessageBubble({
+  entry,
+  collapsed = false,
+  collapsible = false,
+  pendingRequest,
+  onToggleProgress,
+  onApprovalResponse,
+}: {
+  entry: TimelineEntry;
+  collapsed?: boolean;
+  collapsible?: boolean;
+  pendingRequest?: PendingRequest;
+  onToggleProgress?: (entry: TimelineEntry, collapsed: boolean) => void;
+  onApprovalResponse?: (accepted: boolean, request: PendingRequest) => void;
+}) {
   const outgoing = entry.kind === 'outgoing';
   const system = entry.kind === 'system';
+  const content = (
+    <View style={[styles.bubble, collapsible && styles.progressBubble, outgoing && styles.bubbleOutgoing, system && styles.bubbleSystem]}>
+      <View style={styles.bubbleMetaRow}>
+        {collapsible ? (
+          <Text style={styles.progressChevron}>{collapsed ? '›' : '⌄'}</Text>
+        ) : null}
+        <Text style={[styles.bubbleTitle, outgoing && styles.bubbleTitleOutgoing]} numberOfLines={1}>
+          {entry.title}
+        </Text>
+        <Text style={[styles.bubbleTime, outgoing && styles.bubbleTimeOutgoing]}>{nowLabel(entry.at)}</Text>
+      </View>
+      {entry.subtitle && !collapsed ? (
+        <Text style={[styles.bubbleText, outgoing && styles.bubbleTextOutgoing]}>{entry.subtitle}</Text>
+      ) : null}
+      {entry.subtitle && collapsed ? (
+        <Text style={styles.collapsedProgressText} numberOfLines={1}>
+          {entry.subtitle}
+        </Text>
+      ) : null}
+      {pendingRequest ? (
+        <View style={styles.approvalActions}>
+          <MiniButton title="同意" onPress={() => onApprovalResponse?.(true, pendingRequest)} />
+          <MiniButton title="拒绝" onPress={() => onApprovalResponse?.(false, pendingRequest)} />
+        </View>
+      ) : null}
+    </View>
+  );
+
   return (
     <View style={[styles.bubbleRow, outgoing && styles.bubbleRowOutgoing]}>
-      <View style={[styles.bubble, outgoing && styles.bubbleOutgoing, system && styles.bubbleSystem]}>
-        <View style={styles.bubbleMetaRow}>
-          <Text style={[styles.bubbleTitle, outgoing && styles.bubbleTitleOutgoing]} numberOfLines={1}>
-            {entry.title}
-          </Text>
-          <Text style={[styles.bubbleTime, outgoing && styles.bubbleTimeOutgoing]}>{nowLabel(entry.at)}</Text>
-        </View>
-        {entry.subtitle ? (
-          <Text style={[styles.bubbleText, outgoing && styles.bubbleTextOutgoing]}>{entry.subtitle}</Text>
-        ) : null}
-      </View>
+      {collapsible ? (
+        <Pressable onPress={() => onToggleProgress?.(entry, collapsed)} style={styles.progressPressable}>
+          {content}
+        </Pressable>
+      ) : content}
     </View>
   );
 }
@@ -3164,25 +3270,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '800',
   },
-  pendingStrip: {
-    marginHorizontal: 14,
-    marginTop: 10,
-    marginBottom: 4,
-    padding: 10,
-    backgroundColor: '#fff7d9',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#e1c565',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  pendingText: {
-    flex: 1,
-    color: '#4d4020',
-    fontSize: 13,
-    fontWeight: '800',
-  },
   inlineError: {
     color: '#a23b3b',
     fontSize: 12,
@@ -3210,6 +3297,12 @@ const styles = StyleSheet.create({
     padding: 12,
     gap: 6,
   },
+  progressPressable: {
+    maxWidth: '88%',
+  },
+  progressBubble: {
+    maxWidth: '100%',
+  },
   bubbleOutgoing: {
     backgroundColor: '#17202a',
     borderColor: '#17202a',
@@ -3232,6 +3325,13 @@ const styles = StyleSheet.create({
   bubbleTitleOutgoing: {
     color: '#ffffff',
   },
+  progressChevron: {
+    width: 12,
+    color: '#52606d',
+    fontSize: 16,
+    fontWeight: '800',
+    lineHeight: 18,
+  },
   bubbleTime: {
     color: '#87909a',
     fontSize: 11,
@@ -3247,6 +3347,17 @@ const styles = StyleSheet.create({
   },
   bubbleTextOutgoing: {
     color: '#ffffff',
+  },
+  collapsedProgressText: {
+    color: '#6f7882',
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  approvalActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    paddingTop: 4,
   },
   composer: {
     paddingHorizontal: 14,
