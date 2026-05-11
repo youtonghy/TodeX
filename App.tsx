@@ -238,6 +238,10 @@ type TimelineEntry = {
   requestId?: string;
 };
 
+type ConversationRenderItem =
+  | { type: 'entry'; entry: TimelineEntry }
+  | { type: 'executionGroup'; id: string; entries: TimelineEntry[] };
+
 type SlashCommand = {
   command: string;
   title: string;
@@ -915,11 +919,48 @@ function isVisibleConversationEntry(entry: TimelineEntry): boolean {
 }
 
 function isStepProgressEntry(entry: TimelineEntry): boolean {
-  return entry.kind === 'system' && (entry.title === '执行步骤' || entry.title === '步骤完成');
+  return entry.kind === 'system' && (
+    entry.title === '执行步骤' ||
+    entry.title === '步骤完成' ||
+    entry.title === '请求权限批准'
+  );
 }
 
 function isThinkingProgressEntry(entry: TimelineEntry): boolean {
   return entry.kind === 'system' && entry.title === '思考中';
+}
+
+function executionGroupId(entries: TimelineEntry[]): string {
+  const first = entries[0]?.id ?? 'empty';
+  const last = entries[entries.length - 1]?.id ?? first;
+  return `execution-group-${first}-${last}`;
+}
+
+function buildConversationRenderItems(entries: TimelineEntry[]): ConversationRenderItem[] {
+  const items: ConversationRenderItem[] = [];
+  let index = 0;
+
+  while (index < entries.length) {
+    const entry = entries[index];
+    if (!isStepProgressEntry(entry)) {
+      items.push({ type: 'entry', entry });
+      index += 1;
+      continue;
+    }
+
+    const groupEntries: TimelineEntry[] = [];
+    while (index < entries.length && isStepProgressEntry(entries[index])) {
+      groupEntries.push(entries[index]);
+      index += 1;
+    }
+    items.push({
+      type: 'executionGroup',
+      id: executionGroupId(groupEntries),
+      entries: groupEntries,
+    });
+  }
+
+  return items;
 }
 
 function createDefaultConversation(workspace: WorkspaceRecord, fallbackThreadId: string): ConversationRecord {
@@ -2796,6 +2837,10 @@ function ChatScreen({
     .filter(isVisibleConversationEntry)
     .slice()
     .reverse();
+  const conversationRenderItems = useMemo(
+    () => buildConversationRenderItems(conversationMessages),
+    [conversationMessages],
+  );
   const laterThinkingByEntryId = useMemo(() => {
     const result = new Map<string, boolean>();
     let hasLaterThinking = false;
@@ -2881,26 +2926,29 @@ function ChatScreen({
     requestAnimationFrame(() => composerInputRef.current?.focus());
   }, [mentionTrigger, setChatDraft]);
 
-  const toggleProgressEntry = useCallback((entry: TimelineEntry, collapsed: boolean) => {
+  const toggleProgressId = useCallback((id: string, collapsed: boolean) => {
     setExpandedProgressIds((current) => {
       const next = new Set(current);
       if (collapsed) {
-        next.add(entry.id);
+        next.add(id);
       } else {
-        next.delete(entry.id);
+        next.delete(id);
       }
       return next;
     });
     setCollapsedProgressIds((current) => {
       const next = new Set(current);
       if (collapsed) {
-        next.delete(entry.id);
+        next.delete(id);
       } else {
-        next.add(entry.id);
+        next.add(id);
       }
       return next;
     });
   }, []);
+  const toggleProgressEntry = useCallback((entry: TimelineEntry, collapsed: boolean) => {
+    toggleProgressId(entry.id, collapsed);
+  }, [toggleProgressId]);
 
   useEffect(() => {
     selectConversation(route.params.workspaceId, route.params.conversationId);
@@ -2943,7 +2991,30 @@ function ChatScreen({
         {conversationMessages.length === 0 ? (
           <EmptyState text="这是一段新的对话。" />
         ) : (
-          conversationMessages.map((entry) => {
+          conversationRenderItems.map((item) => {
+            if (item.type === 'executionGroup') {
+              const autoCollapsed = item.entries.some((entry) => laterThinkingByEntryId.get(entry.id) === true);
+              const manuallyExpanded = expandedProgressIds.has(item.id);
+              const manuallyCollapsed = collapsedProgressIds.has(item.id);
+              const collapsed = manuallyExpanded ? false : manuallyCollapsed || autoCollapsed;
+              return (
+                <ExecutionGroupBubble
+                  key={item.id}
+                  id={item.id}
+                  entries={item.entries}
+                  collapsed={collapsed}
+                  compactItems={autoCollapsed}
+                  expandedProgressIds={expandedProgressIds}
+                  collapsedProgressIds={collapsedProgressIds}
+                  pendingRequestById={pendingRequestById}
+                  onToggleGroup={toggleProgressId}
+                  onToggleProgress={toggleProgressEntry}
+                  onApprovalResponse={sendApprovalResponse}
+                />
+              );
+            }
+
+            const entry = item.entry;
             const autoCollapsed = isStepProgressEntry(entry) && laterThinkingByEntryId.get(entry.id) === true;
             const manuallyExpanded = expandedProgressIds.has(entry.id);
             const manuallyCollapsed = collapsedProgressIds.has(entry.id);
@@ -3174,6 +3245,7 @@ function MessageBubble({
   entry,
   collapsed = false,
   collapsible = false,
+  hideTitle = false,
   pendingRequest,
   onToggleProgress,
   onApprovalResponse,
@@ -3181,6 +3253,7 @@ function MessageBubble({
   entry: TimelineEntry;
   collapsed?: boolean;
   collapsible?: boolean;
+  hideTitle?: boolean;
   pendingRequest?: PendingRequest;
   onToggleProgress?: (entry: TimelineEntry, collapsed: boolean) => void;
   onApprovalResponse?: (accepted: boolean, request: PendingRequest) => void;
@@ -3193,9 +3266,13 @@ function MessageBubble({
         {collapsible ? (
           <Text style={styles.progressChevron}>{collapsed ? '›' : '⌄'}</Text>
         ) : null}
-        <Text style={[styles.bubbleTitle, outgoing && styles.bubbleTitleOutgoing]} numberOfLines={1}>
-          {entry.title}
-        </Text>
+        {!hideTitle ? (
+          <Text style={[styles.bubbleTitle, outgoing && styles.bubbleTitleOutgoing]} numberOfLines={1}>
+            {entry.title}
+          </Text>
+        ) : (
+          <View style={styles.hiddenBubbleTitleSpacer} />
+        )}
         <Text style={[styles.bubbleTime, outgoing && styles.bubbleTimeOutgoing]}>{nowLabel(entry.at)}</Text>
       </View>
       {entry.subtitle && !collapsed ? (
@@ -3222,6 +3299,70 @@ function MessageBubble({
           {content}
         </Pressable>
       ) : content}
+    </View>
+  );
+}
+
+function ExecutionGroupBubble({
+  id,
+  entries,
+  collapsed,
+  compactItems,
+  expandedProgressIds,
+  collapsedProgressIds,
+  pendingRequestById,
+  onToggleGroup,
+  onToggleProgress,
+  onApprovalResponse,
+}: {
+  id: string;
+  entries: TimelineEntry[];
+  collapsed: boolean;
+  compactItems: boolean;
+  expandedProgressIds: Set<string>;
+  collapsedProgressIds: Set<string>;
+  pendingRequestById: Map<string, PendingRequest>;
+  onToggleGroup: (id: string, collapsed: boolean) => void;
+  onToggleProgress: (entry: TimelineEntry, collapsed: boolean) => void;
+  onApprovalResponse?: (accepted: boolean, request: PendingRequest) => void;
+}) {
+  const latestEntry = entries[entries.length - 1];
+  const summary = entries
+    .map((entry) => entry.subtitle)
+    .find(Boolean) ?? `${entries.length} 个执行`;
+
+  return (
+    <View style={styles.bubbleRow}>
+      <View style={styles.executionGroupShell}>
+        <Pressable onPress={() => onToggleGroup(id, collapsed)} style={styles.executionGroupHeader}>
+          <Text style={styles.progressChevron}>{collapsed ? '›' : '⌄'}</Text>
+          <Text style={styles.executionGroupSummary} numberOfLines={1}>
+            {summary}
+          </Text>
+          <Text style={styles.bubbleTime}>{latestEntry ? nowLabel(latestEntry.at) : ''}</Text>
+        </Pressable>
+        {!collapsed ? (
+          <View style={styles.executionGroupItems}>
+            {entries.map((entry) => {
+              const manuallyExpanded = expandedProgressIds.has(entry.id);
+              const manuallyCollapsed = collapsedProgressIds.has(entry.id);
+              const entryCollapsed = manuallyExpanded ? false : manuallyCollapsed || compactItems;
+              return (
+                <MessageBubble
+                  key={entry.id}
+                  entry={entry}
+                  collapsed={entryCollapsed}
+                  collapsible
+                  hideTitle
+                  pendingRequest={entry.requestId ? pendingRequestById.get(entry.requestId) : undefined}
+                  onToggleProgress={onToggleProgress}
+                  onApprovalResponse={onApprovalResponse}
+                />
+              );
+            })}
+          </View>
+        ) : null}
+      </View>
     </View>
   );
 }
@@ -3750,6 +3891,30 @@ const styles = StyleSheet.create({
   progressBubble: {
     maxWidth: '100%',
   },
+  executionGroupShell: {
+    maxWidth: '88%',
+    backgroundColor: '#edf0f2',
+    borderWidth: 1,
+    borderColor: '#d5dade',
+    borderRadius: 8,
+    padding: 10,
+    gap: 8,
+  },
+  executionGroupHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  executionGroupSummary: {
+    flex: 1,
+    color: '#26323d',
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '700',
+  },
+  executionGroupItems: {
+    gap: 8,
+  },
   bubbleOutgoing: {
     backgroundColor: '#17202a',
     borderColor: '#17202a',
@@ -3771,6 +3936,9 @@ const styles = StyleSheet.create({
   },
   bubbleTitleOutgoing: {
     color: '#ffffff',
+  },
+  hiddenBubbleTitleSpacer: {
+    flex: 1,
   },
   progressChevron: {
     width: 12,
