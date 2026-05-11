@@ -25,6 +25,7 @@ import {
   type TextInputSelectionChangeEventData,
   View,
 } from 'react-native';
+import * as Clipboard from 'expo-clipboard';
 import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator, type NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -997,6 +998,19 @@ function createDefaultConversation(workspace: WorkspaceRecord): ConversationReco
   };
 }
 
+function forkConversationRecord(conversation: ConversationRecord, title?: string): ConversationRecord {
+  return {
+    ...conversation,
+    id: createRequestId('conversation'),
+    title: title?.trim() || `${conversation.title || '新对话'} fork`,
+    sessionId: createSessionId(`${conversation.title || 'conversation'}_fork`),
+    threadId: '',
+    localAdapterState: 'idle',
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+}
+
 export default function App() {
   const socketRef = useRef<WebSocket | null>(null);
   const activeWorkspaceRef = useRef('');
@@ -1842,6 +1856,7 @@ export default function App() {
         .map((conversation) => conversation.id);
       setWorkspaces((current) => current.filter((workspace) => workspace.id !== workspaceId));
       setConversations((current) => current.filter((conversation) => conversation.workspaceId !== workspaceId));
+      setTimeline((current) => current.filter((entry) => entry.workspaceId !== workspaceId && !removedConversationIds.includes(entry.conversationId ?? '')));
       const pruneConversationState = <T,>(current: Record<string, T>) => {
         const next = { ...current };
         removedConversationIds.forEach((id) => {
@@ -1861,6 +1876,93 @@ export default function App() {
     },
     [activeWorkspaceId, conversations, workspaces],
   );
+
+  const renameWorkspace = useCallback((workspaceId: string, name: string) => {
+    const nextName = name.trim();
+    if (!nextName) {
+      Alert.alert('名称不能为空', '请输入新的工作区名称。');
+      return;
+    }
+    updateWorkspace(workspaceId, { name: nextName });
+  }, [updateWorkspace]);
+
+  const forkWorkspace = useCallback((workspaceId: string) => {
+    const workspace = workspaces.find((item) => item.id === workspaceId);
+    if (!workspace) {
+      Alert.alert('未找到工作区', '请返回后重新选择工作区。');
+      return null;
+    }
+
+    const now = Date.now();
+    const nextWorkspace: WorkspaceRecord = {
+      ...workspace,
+      id: createRequestId('workspace'),
+      name: `${workspace.name} fork`,
+      sessionId: createSessionId(`${workspace.name}_fork`),
+      threadId: '',
+      localAdapterState: 'idle',
+      createdAt: now,
+      updatedAt: now,
+    };
+    const sourceConversations = conversations.filter((conversation) => conversation.workspaceId === workspaceId);
+    const nextConversations = sourceConversations.length > 0
+      ? sourceConversations.map((conversation) => ({
+          ...forkConversationRecord(conversation),
+          workspaceId: nextWorkspace.id,
+        }))
+      : [createDefaultConversation(nextWorkspace)];
+
+    setWorkspaces((current) => [nextWorkspace, ...current]);
+    setConversations((current) => [...nextConversations, ...current]);
+    setActiveWorkspaceId(nextWorkspace.id);
+    setActiveConversationId(nextConversations[0]?.id ?? '');
+    return { workspace: nextWorkspace, conversation: nextConversations[0] ?? null };
+  }, [conversations, workspaces]);
+
+  const renameConversation = useCallback((conversationId: string, title: string) => {
+    const nextTitle = title.trim();
+    if (!nextTitle) {
+      Alert.alert('标题不能为空', '请输入新的对话标题。');
+      return;
+    }
+    updateConversation(conversationId, { title: nextTitle });
+  }, [updateConversation]);
+
+  const forkConversation = useCallback((conversationId: string) => {
+    const conversation = conversations.find((item) => item.id === conversationId);
+    if (!conversation) {
+      Alert.alert('未找到对话', '请返回后重新选择对话。');
+      return null;
+    }
+    const nextConversation = forkConversationRecord(conversation);
+    setConversations((current) => [nextConversation, ...current]);
+    setActiveWorkspaceId(nextConversation.workspaceId);
+    setActiveConversationId(nextConversation.id);
+    return nextConversation;
+  }, [conversations]);
+
+  const removeConversation = useCallback((conversationId: string) => {
+    const conversation = conversations.find((item) => item.id === conversationId);
+    if (!conversation) {
+      return;
+    }
+    const workspaceConversations = conversations.filter((item) => item.workspaceId === conversation.workspaceId);
+    setConversations((current) => current.filter((item) => item.id !== conversationId));
+    setTimeline((current) => current.filter((entry) => entry.conversationId !== conversationId));
+    const pruneConversationState = <T,>(current: Record<string, T>) => {
+      const next = { ...current };
+      delete next[conversationId];
+      return next;
+    };
+    setChatDrafts(pruneConversationState);
+    setComposerSelections(pruneConversationState);
+    setTurnIds(pruneConversationState);
+    setThinkingConversations(pruneConversationState);
+    if (activeConversationId === conversationId) {
+      const next = workspaceConversations.find((item) => item.id !== conversationId);
+      setActiveConversationId(next?.id ?? '');
+    }
+  }, [activeConversationId, conversations]);
 
   const sendWorkspaceCommand = useCallback(
     (workspace: WorkspaceRecord, type: string, extra: Record<string, unknown> = {}, conversation?: ConversationRecord | null) => {
@@ -2618,6 +2720,9 @@ export default function App() {
                   connectionState={connectionState}
                   createWorkspace={createWorkspace}
                   selectWorkspace={selectWorkspace}
+                  renameWorkspace={renameWorkspace}
+                  forkWorkspace={forkWorkspace}
+                  removeWorkspace={removeWorkspace}
                 />
               )}
             </Stack.Screen>
@@ -2631,6 +2736,9 @@ export default function App() {
                   createConversation={createConversation}
                   selectWorkspace={selectWorkspace}
                   selectConversation={selectConversation}
+                  renameConversation={renameConversation}
+                  forkConversation={forkConversation}
+                  removeConversation={removeConversation}
                 />
               )}
             </Stack.Screen>
@@ -2692,6 +2800,9 @@ function WorkspaceListScreen({
   connectionState,
   createWorkspace,
   selectWorkspace,
+  renameWorkspace,
+  forkWorkspace,
+  removeWorkspace,
 }: NativeStackScreenProps<RootStackParamList, 'Workspaces'> & {
   workspaces: WorkspaceRecord[];
   conversations: ConversationRecord[];
@@ -2699,10 +2810,14 @@ function WorkspaceListScreen({
   connectionState: string;
   createWorkspace: (name: string, path: string) => { workspace: WorkspaceRecord; conversation: ConversationRecord } | null;
   selectWorkspace: (workspaceId: string) => void;
+  renameWorkspace: (workspaceId: string, name: string) => void;
+  forkWorkspace: (workspaceId: string) => { workspace: WorkspaceRecord; conversation: ConversationRecord | null } | null;
+  removeWorkspace: (workspaceId: string) => void;
 }) {
   const [modalVisible, setModalVisible] = useState(false);
   const [workspaceNameDraft, setWorkspaceNameDraft] = useState('');
   const [workspacePathDraft, setWorkspacePathDraft] = useState('');
+  const [renamingWorkspace, setRenamingWorkspace] = useState<WorkspaceRecord | null>(null);
 
   useLayoutEffect(() => {
     navigation.setOptions({
@@ -2724,6 +2839,32 @@ function WorkspaceListScreen({
     setWorkspacePathDraft('');
     setModalVisible(false);
     navigation.navigate('Conversations', { workspaceId: created.workspace.id });
+  };
+
+  const openWorkspaceActions = (workspace: WorkspaceRecord) => {
+    Alert.alert('工作区操作', workspace.name, [
+      { text: '改名', onPress: () => setRenamingWorkspace(workspace) },
+      {
+        text: 'Fork',
+        onPress: () => {
+          const forked = forkWorkspace(workspace.id);
+          if (forked) {
+            navigation.navigate('Conversations', { workspaceId: forked.workspace.id });
+          }
+        },
+      },
+      {
+        text: '删除',
+        style: 'destructive',
+        onPress: () => {
+          Alert.alert('删除工作区', `确定删除「${workspace.name}」及其所有本地对话记录？`, [
+            { text: '取消', style: 'cancel' },
+            { text: '删除', style: 'destructive', onPress: () => removeWorkspace(workspace.id) },
+          ]);
+        },
+      },
+      { text: '取消', style: 'cancel' },
+    ]);
   };
 
   return (
@@ -2748,6 +2889,7 @@ function WorkspaceListScreen({
                   selectWorkspace(workspace.id);
                   navigation.navigate('Conversations', { workspaceId: workspace.id });
                 }}
+                onLongPress={() => openWorkspaceActions(workspace)}
                 style={styles.listItem}
               >
                 <View style={styles.itemAvatar}>
@@ -2793,6 +2935,20 @@ function WorkspaceListScreen({
           </View>
         </View>
       </Modal>
+
+      <PromptModal
+        visible={Boolean(renamingWorkspace)}
+        title="重命名工作区"
+        initialValue={renamingWorkspace?.name ?? ''}
+        placeholder="新的工作区名称"
+        onCancel={() => setRenamingWorkspace(null)}
+        onSubmit={(value) => {
+          if (renamingWorkspace) {
+            renameWorkspace(renamingWorkspace.id, value);
+          }
+          setRenamingWorkspace(null);
+        }}
+      />
     </View>
   );
 }
@@ -2806,6 +2962,9 @@ function ConversationListScreen({
   createConversation,
   selectWorkspace,
   selectConversation,
+  renameConversation,
+  forkConversation,
+  removeConversation,
 }: NativeStackScreenProps<RootStackParamList, 'Conversations'> & {
   workspaces: WorkspaceRecord[];
   conversations: ConversationRecord[];
@@ -2813,7 +2972,11 @@ function ConversationListScreen({
   createConversation: (workspaceId: string) => ConversationRecord | null;
   selectWorkspace: (workspaceId: string) => void;
   selectConversation: (workspaceId: string, conversationId: string) => void;
+  renameConversation: (conversationId: string, title: string) => void;
+  forkConversation: (conversationId: string) => ConversationRecord | null;
+  removeConversation: (conversationId: string) => void;
 }) {
+  const [renamingConversation, setRenamingConversation] = useState<ConversationRecord | null>(null);
   const workspace = workspaces.find((item) => item.id === route.params.workspaceId) ?? null;
   const workspaceConversations = conversations.filter((conversation) => conversation.workspaceId === route.params.workspaceId);
 
@@ -2837,6 +3000,38 @@ function ConversationListScreen({
       ),
     });
   }, [createConversation, navigation, route.params.workspaceId, workspace?.name]);
+
+  const conversationTitle = (conversation: ConversationRecord) => {
+    const latest = timeline.find((entry) => entry.conversationId === conversation.id && isVisibleConversationEntry(entry));
+    return conversation.title || conversationPreviewText(latest);
+  };
+
+  const openConversationActions = (conversation: ConversationRecord) => {
+    const title = conversationTitle(conversation);
+    Alert.alert('对话操作', title, [
+      { text: '改名', onPress: () => setRenamingConversation({ ...conversation, title }) },
+      {
+        text: 'Fork',
+        onPress: () => {
+          const forked = forkConversation(conversation.id);
+          if (forked && workspace) {
+            navigation.navigate('Chat', { workspaceId: workspace.id, conversationId: forked.id });
+          }
+        },
+      },
+      {
+        text: '删除',
+        style: 'destructive',
+        onPress: () => {
+          Alert.alert('删除对话', `确定删除「${title}」的本地记录？`, [
+            { text: '取消', style: 'cancel' },
+            { text: '删除', style: 'destructive', onPress: () => removeConversation(conversation.id) },
+          ]);
+        },
+      },
+      { text: '取消', style: 'cancel' },
+    ]);
+  };
 
   if (!workspace) {
     return (
@@ -2862,7 +3057,7 @@ function ConversationListScreen({
       ) : (
         workspaceConversations.map((conversation) => {
           const latest = timeline.find((entry) => entry.conversationId === conversation.id && isVisibleConversationEntry(entry));
-          const preview = conversationPreviewText(latest);
+          const preview = conversation.title || conversationPreviewText(latest);
           const active = isConversationActive(conversation);
           return (
             <Pressable
@@ -2871,6 +3066,7 @@ function ConversationListScreen({
                 selectConversation(workspace.id, conversation.id);
                 navigation.navigate('Chat', { workspaceId: workspace.id, conversationId: conversation.id });
               }}
+              onLongPress={() => openConversationActions(conversation)}
               style={[styles.listItem, active && styles.listItemActive]}
             >
               <View style={[styles.conversationAvatar, active && styles.conversationAvatarActive]}>
@@ -2895,6 +3091,19 @@ function ConversationListScreen({
           );
         })
       )}
+      <PromptModal
+        visible={Boolean(renamingConversation)}
+        title="重命名对话"
+        initialValue={renamingConversation?.title ?? ''}
+        placeholder="新的对话标题"
+        onCancel={() => setRenamingConversation(null)}
+        onSubmit={(value) => {
+          if (renamingConversation) {
+            renameConversation(renamingConversation.id, value);
+          }
+          setRenamingConversation(null);
+        }}
+      />
     </ScrollView>
   );
 }
@@ -2958,7 +3167,7 @@ function ChatScreen({
     .filter(isVisibleConversationEntry)
     .slice()
     .reverse();
-  const chatHeaderTitle = conversationPreviewText(conversationMessages[conversationMessages.length - 1]);
+  const chatHeaderTitle = conversation?.title || conversationPreviewText(conversationMessages[conversationMessages.length - 1]);
   const conversationRenderItems = useMemo(
     () => buildConversationRenderItems(conversationMessages),
     [conversationMessages],
@@ -3409,6 +3618,14 @@ function MessageBubble({
 }) {
   const outgoing = entry.kind === 'outgoing';
   const system = entry.kind === 'system';
+  const copyText = async () => {
+    const text = entry.subtitle || entry.title || entry.raw;
+    if (!text) {
+      return;
+    }
+    await Clipboard.setStringAsync(text);
+    Alert.alert('已复制', '消息内容已复制到剪贴板。');
+  };
   const content = (
     <View style={[styles.bubble, collapsible && styles.progressBubble, outgoing && styles.bubbleOutgoing, system && styles.bubbleSystem]}>
       <View style={styles.bubbleMetaRow}>
@@ -3425,10 +3642,10 @@ function MessageBubble({
         <Text style={[styles.bubbleTime, outgoing && styles.bubbleTimeOutgoing]}>{nowLabel(entry.at)}</Text>
       </View>
       {entry.subtitle && !collapsed ? (
-        <Text style={[styles.bubbleText, outgoing && styles.bubbleTextOutgoing]}>{entry.subtitle}</Text>
+        <Text selectable style={[styles.bubbleText, outgoing && styles.bubbleTextOutgoing]}>{entry.subtitle}</Text>
       ) : null}
       {entry.subtitle && collapsed ? (
-        <Text style={styles.collapsedProgressText} numberOfLines={1}>
+        <Text selectable style={styles.collapsedProgressText} numberOfLines={1}>
           {entry.subtitle}
         </Text>
       ) : null}
@@ -3443,11 +3660,14 @@ function MessageBubble({
 
   return (
     <View style={[styles.bubbleRow, outgoing && styles.bubbleRowOutgoing]}>
-      {collapsible ? (
-        <Pressable onPress={() => onToggleProgress?.(entry, collapsed)} style={styles.progressPressable}>
-          {content}
-        </Pressable>
-      ) : content}
+      <Pressable
+        onPress={collapsible ? () => onToggleProgress?.(entry, collapsed) : undefined}
+        onLongPress={copyText}
+        delayLongPress={360}
+        style={collapsible ? styles.progressPressable : undefined}
+      >
+        {content}
+      </Pressable>
     </View>
   );
 }
@@ -3657,6 +3877,54 @@ function Field({
         textAlignVertical={multiline ? 'top' : 'center'}
       />
     </View>
+  );
+}
+
+function PromptModal({
+  visible,
+  title,
+  initialValue,
+  placeholder,
+  onCancel,
+  onSubmit,
+}: {
+  visible: boolean;
+  title: string;
+  initialValue: string;
+  placeholder: string;
+  onCancel: () => void;
+  onSubmit: (value: string) => void;
+}) {
+  const [value, setValue] = useState(initialValue);
+
+  useEffect(() => {
+    if (visible) {
+      setValue(initialValue);
+    }
+  }, [initialValue, visible]);
+
+  return (
+    <Modal visible={visible} animationType="fade" transparent onRequestClose={onCancel}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.promptSheet}>
+          <Text style={styles.modalTitle}>{title}</Text>
+          <TextInput
+            value={value}
+            onChangeText={setValue}
+            placeholder={placeholder}
+            placeholderTextColor="#8a93a1"
+            style={styles.input}
+            autoCapitalize="none"
+            autoCorrect={false}
+            autoFocus
+          />
+          <Row>
+            <ActionButton title="保存" onPress={() => onSubmit(value)} />
+            <ActionButton title="取消" onPress={onCancel} tone="ghost" />
+          </Row>
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -3914,6 +4182,13 @@ const styles = StyleSheet.create({
     paddingBottom: 28,
     borderTopLeftRadius: 8,
     borderTopRightRadius: 8,
+    gap: 14,
+  },
+  promptSheet: {
+    backgroundColor: '#ffffff',
+    marginHorizontal: 18,
+    borderRadius: 8,
+    padding: 18,
     gap: 14,
   },
   modalHeader: {
