@@ -1040,9 +1040,13 @@ export default function App() {
   const [mentionHistory, setMentionHistory] = useState<WorkspaceMentionHistory[]>([]);
   const [selectedRequestId, setSelectedRequestId] = useState('');
   const [chatDrafts, setChatDrafts] = useState<Record<string, string>>({});
+  const [queuedChatDrafts, setQueuedChatDrafts] = useState<Record<string, string[]>>({});
   const [composerSelections, setComposerSelections] = useState<Record<string, ComposerSelection>>({});
   const [turnIds, setTurnIds] = useState<Record<string, string>>({});
   const [thinkingConversations, setThinkingConversations] = useState<Record<string, boolean>>({});
+  const queuedChatDraftsRef = useRef<Record<string, string[]>>({});
+  const queuedChatDispatchingRef = useRef(new Set<string>());
+  const sendQueuedChatDraftRef = useRef<(text: string) => Promise<boolean>>(async () => false);
 
   const activeTurnId = activeConversationId ? turnIds[activeConversationId] ?? '' : '';
 
@@ -1059,6 +1063,10 @@ export default function App() {
       return { ...current, [conversationId]: next };
     });
   }, []);
+
+  useEffect(() => {
+    queuedChatDraftsRef.current = queuedChatDrafts;
+  }, [queuedChatDrafts]);
 
   const setConversationComposerSelection = useCallback((conversationId: string, value: SetStateAction<ComposerSelection>) => {
     if (!conversationId) {
@@ -1541,6 +1549,36 @@ export default function App() {
       }
       if (isTurnTerminalEvent(event)) {
         setConversationThinking(targetConversationId, false);
+        const queuedDrafts = queuedChatDraftsRef.current[targetConversationId] ?? [];
+        const nextQueuedDraft = queuedDrafts[0]?.trim() ?? '';
+        if (
+          nextQueuedDraft &&
+          activeConversationRef.current === targetConversationId &&
+          !queuedChatDispatchingRef.current.has(targetConversationId)
+        ) {
+          queuedChatDispatchingRef.current.add(targetConversationId);
+          void (async () => {
+            try {
+              const sent = await sendQueuedChatDraftRef.current(nextQueuedDraft);
+              if (sent) {
+                setQueuedChatDrafts((current) => {
+                  const queue = current[targetConversationId] ?? [];
+                  if (queue.length === 0 || queue[0]?.trim() !== nextQueuedDraft) {
+                    return current;
+                  }
+                  const nextQueue = queue.slice(1);
+                  if (nextQueue.length === 0) {
+                    const { [targetConversationId]: _removed, ...rest } = current;
+                    return rest;
+                  }
+                  return { ...current, [targetConversationId]: nextQueue };
+                });
+              }
+            } finally {
+              queuedChatDispatchingRef.current.delete(targetConversationId);
+            }
+          })();
+        }
       }
       if (event.type === 'codex.control.stopped') {
         const sessionId = target.sessionId || sessionIdFromEvent(event, data);
@@ -1865,6 +1903,7 @@ export default function App() {
         return next;
       };
       setChatDrafts(pruneConversationState);
+      setQueuedChatDrafts(pruneConversationState);
       setComposerSelections(pruneConversationState);
       setTurnIds(pruneConversationState);
       setThinkingConversations(pruneConversationState);
@@ -1955,6 +1994,7 @@ export default function App() {
       return next;
     };
     setChatDrafts(pruneConversationState);
+    setQueuedChatDrafts(pruneConversationState);
     setComposerSelections(pruneConversationState);
     setTurnIds(pruneConversationState);
     setThinkingConversations(pruneConversationState);
@@ -2145,7 +2185,7 @@ export default function App() {
     async (text: string, mode: ConversationRecord['mode'] = 'implement') => {
       if (!activeWorkspace || !activeConversation) {
         Alert.alert('未选择对话', '请先选择工作区和对话。');
-        return;
+        return false;
       }
 
       const activeSessionId = sessionIdForConversation(activeWorkspace, activeConversation);
@@ -2156,7 +2196,7 @@ export default function App() {
       } catch (error) {
         const message = error instanceof Error ? error.message : '本地会话未启动';
         setLastError(localTurnErrorMessage(message));
-        return;
+        return false;
       }
 
       let threadId = '';
@@ -2165,7 +2205,7 @@ export default function App() {
       } catch (error) {
         const message = error instanceof Error ? error.message : '创建 thread 失败';
         setLastError(message);
-        return;
+        return false;
       }
 
       setConversationThinking(activeConversation.id, true);
@@ -2203,12 +2243,18 @@ export default function App() {
               : conversation,
           ),
         );
-      } else {
-        setConversationThinking(activeConversation.id, false);
+        return true;
       }
+
+      setConversationThinking(activeConversation.id, false);
+      return false;
     },
     [activeConversation, activeWorkspace, appendTimeline, ensureThreadId, sendProtocolMessage, setConversationThinking, settings.approvalPolicy, settings.defaultModel, settings.sandboxMode, startLocalAdapter],
   );
+
+  useEffect(() => {
+    sendQueuedChatDraftRef.current = sendLocalTurn;
+  }, [sendLocalTurn]);
 
   const sendApprovalResponse = useCallback(
     (accepted: boolean, request: PendingRequest) => {
@@ -2637,6 +2683,7 @@ export default function App() {
     if (!text) {
       return;
     }
+    const isThinking = thinkingConversations[conversationId] === true;
     const mentionReferences = parseMentionReferences(text);
     if (activeWorkspace && mentionReferences.length > 0) {
       rememberMentionReferences(activeWorkspace.id, mentionReferences);
@@ -2647,8 +2694,18 @@ export default function App() {
     }
     setConversationChatDraft(conversationId, '');
     setConversationComposerSelection(conversationId, DEFAULT_COMPOSER_SELECTION);
+    if (isThinking) {
+      setQueuedChatDrafts((current) => ({
+        ...current,
+        [conversationId]: [...(current[conversationId] ?? []), text],
+      }));
+      if (activeWorkspace && activeConversationId === conversationId) {
+        appendTimeline(makeSystemEntry('消息已加入候选', '当前任务完成后会自动继续发送。', activeWorkspace.id, activeConversationId));
+      }
+      return;
+    }
     sendSlashCommand(text);
-  }, [activeConversationId, activeWorkspace, appendTimeline, chatDrafts, rememberMentionReferences, sendSlashCommand, setConversationChatDraft, setConversationComposerSelection]);
+  }, [activeConversationId, activeWorkspace, appendTimeline, chatDrafts, thinkingConversations, rememberMentionReferences, sendSlashCommand, setConversationChatDraft, setConversationComposerSelection]);
 
   const runWorkspaceCommand = useCallback((workspace: WorkspaceRecord, conversation: ConversationRecord, command: 'start' | 'status' | 'attach' | 'stop' | 'interrupt') => {
     if (command === 'start') {
@@ -3446,6 +3503,11 @@ function ChatScreen({
           value={chatDraft}
           onChangeText={setChatDraft}
           onSelectionChange={(event) => setComposerSelection(event.nativeEvent.selection)}
+          onKeyPress={(event) => {
+            if (event.nativeEvent.key === 'Escape' && isThinking) {
+              stopThinking(route.params.conversationId);
+            }
+          }}
           selection={composerSelection}
           placeholder="输入消息，@ 引用文件，/ 输入命令"
           placeholderTextColor="#7a8391"
@@ -3454,14 +3516,23 @@ function ChatScreen({
           autoCapitalize="none"
           autoCorrect={false}
         />
-        <Pressable
-          onPress={isThinking ? () => stopThinking(route.params.conversationId) : () => submitChat(route.params.conversationId)}
-          style={[styles.sendButton, isThinking && styles.stopButton]}
-        >
-          <Text style={[styles.sendButtonText, isThinking && styles.stopButtonText]}>
-            {isThinking ? '停止' : '发送'}
-          </Text>
-        </Pressable>
+        <View style={styles.composerActions}>
+          {isThinking ? (
+            <Pressable
+              accessibilityLabel="中断当前任务"
+              onPress={() => stopThinking(route.params.conversationId)}
+              style={styles.stopButton}
+            >
+              <Text style={styles.stopButtonText}>ESC</Text>
+            </Pressable>
+          ) : null}
+          <Pressable
+            onPress={() => submitChat(route.params.conversationId)}
+            style={styles.sendButton}
+          >
+            <Text style={styles.sendButtonText}>发送</Text>
+          </Pressable>
+        </View>
       </View>
 
       <Modal visible={menuVisible} animationType="fade" transparent onRequestClose={() => setMenuVisible(false)}>
@@ -4532,6 +4603,11 @@ const styles = StyleSheet.create({
     color: '#17202a',
     fontSize: 14,
     textAlignVertical: 'top',
+  },
+  composerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
   },
   sendButton: {
     minHeight: 44,
