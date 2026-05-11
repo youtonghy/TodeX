@@ -83,6 +83,10 @@ type ConversationRecord = {
   updatedAt: number;
 };
 
+type ComposerSelection = TextInputSelectionChangeEventData['selection'];
+
+const DEFAULT_COMPOSER_SELECTION: ComposerSelection = { start: 0, end: 0 };
+
 type PendingLocalStart = {
   workspaceId: string;
   conversationId: string;
@@ -1021,10 +1025,64 @@ export default function App() {
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
   const [mentionHistory, setMentionHistory] = useState<WorkspaceMentionHistory[]>([]);
   const [selectedRequestId, setSelectedRequestId] = useState('');
-  const [chatDraft, setChatDraft] = useState('');
-  const [composerSelection, setComposerSelection] = useState<TextInputSelectionChangeEventData['selection']>({ start: 0, end: 0 });
-  const [turnId, setTurnId] = useState('');
-  const [isThinking, setIsThinking] = useState(false);
+  const [chatDrafts, setChatDrafts] = useState<Record<string, string>>({});
+  const [composerSelections, setComposerSelections] = useState<Record<string, ComposerSelection>>({});
+  const [turnIds, setTurnIds] = useState<Record<string, string>>({});
+  const [thinkingConversations, setThinkingConversations] = useState<Record<string, boolean>>({});
+
+  const activeTurnId = activeConversationId ? turnIds[activeConversationId] ?? '' : '';
+
+  const setConversationChatDraft = useCallback((conversationId: string, value: SetStateAction<string>) => {
+    if (!conversationId) {
+      return;
+    }
+    setChatDrafts((current) => {
+      const previous = current[conversationId] ?? '';
+      const next = typeof value === 'function' ? value(previous) : value;
+      if (next === previous) {
+        return current;
+      }
+      return { ...current, [conversationId]: next };
+    });
+  }, []);
+
+  const setConversationComposerSelection = useCallback((conversationId: string, value: SetStateAction<ComposerSelection>) => {
+    if (!conversationId) {
+      return;
+    }
+    setComposerSelections((current) => {
+      const previous = current[conversationId] ?? DEFAULT_COMPOSER_SELECTION;
+      const next = typeof value === 'function' ? value(previous) : value;
+      if (next.start === previous.start && next.end === previous.end) {
+        return current;
+      }
+      return { ...current, [conversationId]: next };
+    });
+  }, []);
+
+  const setConversationTurnId = useCallback((conversationId: string, value: string) => {
+    if (!conversationId) {
+      return;
+    }
+    setTurnIds((current) => {
+      if ((current[conversationId] ?? '') === value) {
+        return current;
+      }
+      return { ...current, [conversationId]: value };
+    });
+  }, []);
+
+  const setConversationThinking = useCallback((conversationId: string, value: boolean) => {
+    if (!conversationId) {
+      return;
+    }
+    setThinkingConversations((current) => {
+      if ((current[conversationId] === true) === value) {
+        return current;
+      }
+      return { ...current, [conversationId]: value };
+    });
+  }, []);
 
   const persistSessionCursors = useCallback(() => {
     const cursors = Object.fromEntries(sessionCursorsRef.current.entries());
@@ -1438,6 +1496,7 @@ export default function App() {
       }
       setEvents((current) => [event, ...current].slice(0, MAX_EVENTS));
       const target = resolveTimelineTarget(event, data);
+      const targetConversationId = target.conversationId || target.conversation?.id || activeConversationRef.current;
       const goalPatch = goalPatchFromEventData(data);
       if (
         target.conversation &&
@@ -1455,7 +1514,7 @@ export default function App() {
       if (chatEntry) {
         upsertChatTimeline(chatEntry, event.type === 'codex.item.agentMessage.delta');
         if (event.type === 'codex.item.completed') {
-          setIsThinking(false);
+          setConversationThinking(targetConversationId, false);
         }
       }
       const progressEntry = classifyProgressEvent(event, target.workspaceId, target.conversationId);
@@ -1464,10 +1523,10 @@ export default function App() {
       }
       const protocolError = extractProtocolError(event.type, data);
       if (event.type === 'codex.control.request.accepted' && data.operation === 'codex.local.turn') {
-        setIsThinking(true);
+        setConversationThinking(targetConversationId, true);
       }
       if (isTurnTerminalEvent(event)) {
-        setIsThinking(false);
+        setConversationThinking(targetConversationId, false);
       }
       if (event.type === 'codex.control.stopped') {
         const sessionId = target.sessionId || sessionIdFromEvent(event, data);
@@ -1552,17 +1611,17 @@ export default function App() {
             settlePendingThreadStart(pendingThread, '', localTurnErrorMessage(protocolError));
           }
         }
-        setIsThinking(false);
+        setConversationThinking(conversation?.id ?? targetConversationId, false);
       }
       if (protocolError && !isLocalAdapterAlreadyRunning(protocolError)) {
         setLastError(localTurnErrorMessage(protocolError));
       }
       const maybeTurnId = data.turnId ?? data.turn_id;
       if (typeof maybeTurnId === 'string' && maybeTurnId) {
-        setTurnId(maybeTurnId);
+        setConversationTurnId(targetConversationId, maybeTurnId);
       }
     },
-    [appendTimeline, findPendingLocalStart, persistSessionCursors, resetWorkspaceSession, resolveTimelineTarget, settlePendingLocalStart, settlePendingThreadStart, updateConversation, upsertChatTimeline],
+    [appendTimeline, findPendingLocalStart, persistSessionCursors, resetWorkspaceSession, resolveTimelineTarget, settlePendingLocalStart, settlePendingThreadStart, setConversationThinking, setConversationTurnId, updateConversation, upsertChatTimeline],
   );
 
   const pushSystem = useCallback(
@@ -1773,14 +1832,27 @@ export default function App() {
     setConversations((current) => [next, ...current]);
     setActiveWorkspaceId(workspaceId);
     setActiveConversationId(next.id);
-    setTurnId('');
     return next;
   }, [conversations, workspaces]);
 
   const removeWorkspace = useCallback(
     (workspaceId: string) => {
+      const removedConversationIds = conversations
+        .filter((conversation) => conversation.workspaceId === workspaceId)
+        .map((conversation) => conversation.id);
       setWorkspaces((current) => current.filter((workspace) => workspace.id !== workspaceId));
       setConversations((current) => current.filter((conversation) => conversation.workspaceId !== workspaceId));
+      const pruneConversationState = <T,>(current: Record<string, T>) => {
+        const next = { ...current };
+        removedConversationIds.forEach((id) => {
+          delete next[id];
+        });
+        return next;
+      };
+      setChatDrafts(pruneConversationState);
+      setComposerSelections(pruneConversationState);
+      setTurnIds(pruneConversationState);
+      setThinkingConversations(pruneConversationState);
       if (activeWorkspaceId === workspaceId) {
         const next = workspaces.find((workspace) => workspace.id !== workspaceId);
         setActiveWorkspaceId(next?.id ?? '');
@@ -1994,7 +2066,7 @@ export default function App() {
         return;
       }
 
-      setIsThinking(true);
+      setConversationThinking(activeConversation.id, true);
       appendTimeline(makeSystemEntry('正在思考', '请求已发出，等待 Codex 返回中间步骤...', activeWorkspace.id, activeConversation.id));
 
       const payload = {
@@ -2030,10 +2102,10 @@ export default function App() {
           ),
         );
       } else {
-        setIsThinking(false);
+        setConversationThinking(activeConversation.id, false);
       }
     },
-    [activeConversation, activeWorkspace, appendTimeline, ensureThreadId, sendProtocolMessage, settings.approvalPolicy, settings.defaultModel, settings.sandboxMode, startLocalAdapter],
+    [activeConversation, activeWorkspace, appendTimeline, ensureThreadId, sendProtocolMessage, setConversationThinking, settings.approvalPolicy, settings.defaultModel, settings.sandboxMode, startLocalAdapter],
   );
 
   const sendApprovalResponse = useCallback(
@@ -2294,8 +2366,8 @@ export default function App() {
       }
 
       if (lower === 'mention') {
-        setChatDraft('@');
-        setComposerSelection({ start: 1, end: 1 });
+        setConversationChatDraft(activeConversation.id, '@');
+        setConversationComposerSelection(activeConversation.id, { start: 1, end: 1 });
         return;
       }
 
@@ -2320,7 +2392,7 @@ export default function App() {
         }
         sendWorkspaceCommand(activeWorkspace, 'codex.local.interrupt', {
           threadId,
-          turnId: turnId || '',
+          turnId: activeTurnId || '',
         }, activeConversation);
         return;
       }
@@ -2430,32 +2502,36 @@ export default function App() {
       sendWorkspaceCommand,
       attachWorkspaceConversation,
       settings,
-      setChatDraft,
-      setComposerSelection,
+      setConversationChatDraft,
+      setConversationComposerSelection,
       setLastError,
-      turnId,
+      activeTurnId,
       updateConversation,
       updateWorkspace,
     ],
   );
 
-  const stopThinking = useCallback(() => {
-    if (!activeWorkspace || !activeConversation) {
+  const stopThinking = useCallback((conversationId: string) => {
+    const conversation = conversationsRef.current.find((item) => item.id === conversationId) ?? null;
+    const workspace = conversation
+      ? workspacesRef.current.find((item) => item.id === conversation.workspaceId) ?? null
+      : null;
+    if (!workspace || !conversation) {
       Alert.alert('未选择工作区', '请先选择一个工作区。');
       return;
     }
-    const threadId = normalizeThreadId(activeConversation.threadId);
+    const threadId = normalizeThreadId(conversation.threadId);
     if (!threadId) {
       setLastError('当前还没有可中断的 thread。');
       return;
     }
-    if (sendWorkspaceCommand(activeWorkspace, 'codex.local.interrupt', { threadId, turnId: turnId || '' }, activeConversation)) {
-      appendTimeline(makeSystemEntry('已发送停止', '正在请求 Codex 中断当前思考。', activeWorkspace.id, activeConversation.id));
+    if (sendWorkspaceCommand(workspace, 'codex.local.interrupt', { threadId, turnId: turnIds[conversationId] || '' }, conversation)) {
+      appendTimeline(makeSystemEntry('已发送停止', '正在请求 Codex 中断当前思考。', workspace.id, conversation.id));
     }
-  }, [activeConversation, activeWorkspace, appendTimeline, sendWorkspaceCommand, turnId]);
+  }, [appendTimeline, sendWorkspaceCommand, turnIds]);
 
-  const submitChat = useCallback(() => {
-    const text = chatDraft.trim();
+  const submitChat = useCallback((conversationId: string) => {
+    const text = (chatDrafts[conversationId] ?? '').trim();
     if (!text) {
       return;
     }
@@ -2467,10 +2543,10 @@ export default function App() {
         appendTimeline(makeSystemEntry('已引用文件', mentionSummary, activeWorkspace.id, activeConversationId));
       }
     }
-    setChatDraft('');
-    setComposerSelection({ start: 0, end: 0 });
+    setConversationChatDraft(conversationId, '');
+    setConversationComposerSelection(conversationId, DEFAULT_COMPOSER_SELECTION);
     sendSlashCommand(text);
-  }, [activeConversationId, activeWorkspace, appendTimeline, chatDraft, rememberMentionReferences, sendSlashCommand]);
+  }, [activeConversationId, activeWorkspace, appendTimeline, chatDrafts, rememberMentionReferences, sendSlashCommand, setConversationChatDraft, setConversationComposerSelection]);
 
   const runWorkspaceCommand = useCallback((workspace: WorkspaceRecord, conversation: ConversationRecord, command: 'start' | 'status' | 'attach' | 'stop' | 'interrupt') => {
     if (command === 'start') {
@@ -2493,7 +2569,7 @@ export default function App() {
       }
       sendWorkspaceCommand(workspace, 'codex.local.interrupt', {
         threadId,
-        turnId: turnId || '',
+        turnId: turnIds[conversation.id] || '',
       }, conversation);
       return;
     }
@@ -2506,7 +2582,7 @@ export default function App() {
       }
       updateConversation(conversation.id, { localAdapterState: 'stopped' });
     }
-  }, [attachWorkspaceConversation, sendWorkspaceCommand, turnId, updateConversation, startLocalAdapter]);
+  }, [attachWorkspaceConversation, sendWorkspaceCommand, turnIds, updateConversation, startLocalAdapter]);
 
   if (!hydrated) {
     return (
@@ -2568,12 +2644,12 @@ export default function App() {
                   timeline={timeline}
                   pendingRequests={pendingRequests}
                   selectedRequest={selectedRequest}
-                  chatDraft={chatDraft}
-                  composerSelection={composerSelection}
-                  isThinking={isThinking}
+                  chatDraft={chatDrafts[props.route.params.conversationId] ?? ''}
+                  composerSelection={composerSelections[props.route.params.conversationId] ?? DEFAULT_COMPOSER_SELECTION}
+                  isThinking={thinkingConversations[props.route.params.conversationId] === true}
                   lastError={lastError}
-                  setChatDraft={setChatDraft}
-                  setComposerSelection={setComposerSelection}
+                  setChatDraft={(value) => setConversationChatDraft(props.route.params.conversationId, value)}
+                  setComposerSelection={(value) => setConversationComposerSelection(props.route.params.conversationId, value)}
                   submitChat={submitChat}
                   stopThinking={stopThinking}
                   sendApprovalResponse={sendApprovalResponse}
@@ -2592,7 +2668,7 @@ export default function App() {
                   serverVersion={serverVersion}
                   activeWorkspace={activeWorkspace}
                   pendingRequestCount={pendingRequests.length}
-                  turnId={turnId}
+                  turnId={activeTurnId}
                   connectionState={connectionState}
                   lastError={lastError}
                   connect={connect}
@@ -2857,8 +2933,8 @@ function ChatScreen({
   lastError: string;
   setChatDraft: Dispatch<SetStateAction<string>>;
   setComposerSelection: Dispatch<SetStateAction<TextInputSelectionChangeEventData['selection']>>;
-  submitChat: () => void;
-  stopThinking: () => void;
+  submitChat: (conversationId: string) => void;
+  stopThinking: (conversationId: string) => void;
   sendApprovalResponse: (accepted: boolean, request: PendingRequest) => void;
   selectConversation: (workspaceId: string, conversationId: string) => void;
   runWorkspaceCommand: (workspace: WorkspaceRecord, conversation: ConversationRecord, command: 'start' | 'status' | 'attach' | 'stop' | 'interrupt') => void;
@@ -3170,7 +3246,7 @@ function ChatScreen({
           autoCorrect={false}
         />
         <Pressable
-          onPress={isThinking ? stopThinking : submitChat}
+          onPress={isThinking ? () => stopThinking(route.params.conversationId) : () => submitChat(route.params.conversationId)}
           style={[styles.sendButton, isThinking && styles.stopButton]}
         >
           <Text style={[styles.sendButtonText, isThinking && styles.stopButtonText]}>
