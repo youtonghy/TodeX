@@ -12,6 +12,8 @@ import {
 import {
   Alert,
   Keyboard,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
   type KeyboardEvent,
   Modal,
   Platform,
@@ -348,6 +350,7 @@ const MAX_TIMELINE_ITEMS = 260;
 const MAX_EVENTS = 220;
 const RECONNECT_DELAY_MS = 2500;
 const RECONNECT_REPLAY_LIMIT = 5000;
+const CHAT_BOTTOM_FOLLOW_THRESHOLD = 72;
 
 const SLASH_COMMANDS: SlashCommand[] = [
   { command: '/model', title: 'Model', description: 'choose what model and reasoning effort to use' },
@@ -2846,6 +2849,10 @@ function ChatScreen({
   const [mentionEntries, setMentionEntries] = useState<WorkspaceEntry[]>([]);
   const [expandedProgressIds, setExpandedProgressIds] = useState<Set<string>>(() => new Set());
   const [collapsedProgressIds, setCollapsedProgressIds] = useState<Set<string>>(() => new Set());
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const messageScrollRef = useRef<ScrollView | null>(null);
+  const shouldFollowLatestRef = useRef(true);
+  const initialLatestScrollRef = useRef(true);
   const composerInputRef = useRef<TextInput | null>(null);
   const insets = useSafeAreaInsets();
   const keyboardInset = useKeyboardInset();
@@ -2897,6 +2904,36 @@ function ChatScreen({
     : [];
   const mentionTrigger = slashSuggestions.length === 0 ? findMentionTrigger(chatDraft, composerSelection.start) : null;
   const mentionSuggestions = buildMentionSuggestions(mentionTrigger, mentionEntries);
+
+  const scrollToLatest = useCallback((animated = false) => {
+    requestAnimationFrame(() => {
+      messageScrollRef.current?.scrollToEnd({ animated });
+    });
+  }, []);
+
+  const handleMessageScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+    const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y;
+    const isAtBottom = distanceFromBottom <= CHAT_BOTTOM_FOLLOW_THRESHOLD;
+    shouldFollowLatestRef.current = isAtBottom;
+    setShowJumpToLatest(!isAtBottom && conversationMessages.length > 0);
+  }, [conversationMessages.length]);
+
+  const handleMessageContentSizeChange = useCallback(() => {
+    if (!shouldFollowLatestRef.current) {
+      return;
+    }
+    const animated = !initialLatestScrollRef.current;
+    initialLatestScrollRef.current = false;
+    scrollToLatest(animated);
+  }, [scrollToLatest]);
+
+  const jumpToLatest = useCallback(() => {
+    shouldFollowLatestRef.current = true;
+    initialLatestScrollRef.current = false;
+    setShowJumpToLatest(false);
+    scrollToLatest(true);
+  }, [scrollToLatest]);
 
   useEffect(() => {
     if (!mentionTrigger || !workspace) {
@@ -2974,6 +3011,19 @@ function ChatScreen({
     selectConversation(route.params.workspaceId, route.params.conversationId);
   }, [route.params.conversationId, route.params.workspaceId, selectConversation]);
 
+  useEffect(() => {
+    shouldFollowLatestRef.current = true;
+    initialLatestScrollRef.current = true;
+    setShowJumpToLatest(false);
+    scrollToLatest(false);
+  }, [route.params.conversationId, scrollToLatest]);
+
+  useEffect(() => {
+    if (shouldFollowLatestRef.current) {
+      scrollToLatest(false);
+    }
+  }, [keyboardInset, scrollToLatest]);
+
   useLayoutEffect(() => {
     navigation.setOptions({
       headerTitle: () => (
@@ -3007,56 +3057,76 @@ function ChatScreen({
     <View style={[styles.chatRoot, { paddingBottom: keyboardInset }]}>
       {lastError ? <Text style={styles.inlineError}>{lastError}</Text> : null}
 
-      <ScrollView contentContainerStyle={styles.messageList} keyboardShouldPersistTaps="handled">
-        {conversationMessages.length === 0 ? (
-          <EmptyState text="这是一段新的对话。" />
-        ) : (
-          conversationRenderItems.map((item) => {
-            if (item.type === 'executionGroup') {
-              const autoCollapsed = item.entries.some((entry) => laterThinkingByEntryId.get(entry.id) === true);
-              const manuallyExpanded = expandedProgressIds.has(item.id);
-              const manuallyCollapsed = collapsedProgressIds.has(item.id);
-              const collapsed = manuallyExpanded ? false : manuallyCollapsed || autoCollapsed;
+      <View style={styles.messageArea}>
+        <ScrollView
+          ref={messageScrollRef}
+          style={styles.messageScroller}
+          contentContainerStyle={styles.messageList}
+          keyboardShouldPersistTaps="handled"
+          onContentSizeChange={handleMessageContentSizeChange}
+          onScroll={handleMessageScroll}
+          scrollEventThrottle={80}
+        >
+          {conversationMessages.length === 0 ? (
+            <EmptyState text="这是一段新的对话。" />
+          ) : (
+            conversationRenderItems.map((item) => {
+              if (item.type === 'executionGroup') {
+                const autoCollapsed = item.entries.some((entry) => laterThinkingByEntryId.get(entry.id) === true);
+                const manuallyExpanded = expandedProgressIds.has(item.id);
+                const manuallyCollapsed = collapsedProgressIds.has(item.id);
+                const collapsed = manuallyExpanded ? false : manuallyCollapsed || autoCollapsed;
+                return (
+                  <ExecutionGroupBubble
+                    key={item.id}
+                    id={item.id}
+                    entries={item.entries}
+                    collapsed={collapsed}
+                    compactItems={autoCollapsed}
+                    expandedProgressIds={expandedProgressIds}
+                    collapsedProgressIds={collapsedProgressIds}
+                    pendingRequestById={pendingRequestById}
+                    onToggleGroup={toggleProgressId}
+                    onToggleProgress={toggleProgressEntry}
+                    onApprovalResponse={sendApprovalResponse}
+                  />
+                );
+              }
+
+              const entry = item.entry;
+              const autoCollapsed = isStepProgressEntry(entry) && laterThinkingByEntryId.get(entry.id) === true;
+              const manuallyExpanded = expandedProgressIds.has(entry.id);
+              const manuallyCollapsed = collapsedProgressIds.has(entry.id);
+              const collapsed = isStepProgressEntry(entry)
+                ? manuallyExpanded
+                  ? false
+                  : manuallyCollapsed || autoCollapsed
+                : false;
               return (
-                <ExecutionGroupBubble
-                  key={item.id}
-                  id={item.id}
-                  entries={item.entries}
+                <MessageBubble
+                  key={entry.id}
+                  entry={entry}
                   collapsed={collapsed}
-                  compactItems={autoCollapsed}
-                  expandedProgressIds={expandedProgressIds}
-                  collapsedProgressIds={collapsedProgressIds}
-                  pendingRequestById={pendingRequestById}
-                  onToggleGroup={toggleProgressId}
+                  collapsible={isStepProgressEntry(entry)}
+                  pendingRequest={entry.requestId ? pendingRequestById.get(entry.requestId) : undefined}
                   onToggleProgress={toggleProgressEntry}
                   onApprovalResponse={sendApprovalResponse}
                 />
               );
-            }
+            })
+          )}
+        </ScrollView>
 
-            const entry = item.entry;
-            const autoCollapsed = isStepProgressEntry(entry) && laterThinkingByEntryId.get(entry.id) === true;
-            const manuallyExpanded = expandedProgressIds.has(entry.id);
-            const manuallyCollapsed = collapsedProgressIds.has(entry.id);
-            const collapsed = isStepProgressEntry(entry)
-              ? manuallyExpanded
-                ? false
-                : manuallyCollapsed || autoCollapsed
-              : false;
-            return (
-              <MessageBubble
-                key={entry.id}
-                entry={entry}
-                collapsed={collapsed}
-                collapsible={isStepProgressEntry(entry)}
-                pendingRequest={entry.requestId ? pendingRequestById.get(entry.requestId) : undefined}
-                onToggleProgress={toggleProgressEntry}
-                onApprovalResponse={sendApprovalResponse}
-              />
-            );
-          })
-        )}
-      </ScrollView>
+        {showJumpToLatest ? (
+          <Pressable
+            accessibilityLabel="跳到最新消息"
+            onPress={jumpToLatest}
+            style={styles.jumpToLatestButton}
+          >
+            <Text style={styles.jumpToLatestText}>↓</Text>
+          </Pressable>
+        ) : null}
+      </View>
 
       <View style={[styles.composer, { paddingBottom: composerPaddingBottom }]}>
         {slashSuggestions.length > 0 ? (
@@ -3877,11 +3947,37 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 8,
   },
+  messageArea: {
+    flex: 1,
+    position: 'relative',
+  },
+  messageScroller: {
+    flex: 1,
+  },
   messageList: {
     paddingHorizontal: 14,
     paddingTop: 12,
     paddingBottom: 16,
     gap: 10,
+  },
+  jumpToLatestButton: {
+    position: 'absolute',
+    alignSelf: 'center',
+    bottom: 14,
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: 'rgba(255, 255, 255, 0.72)',
+    borderWidth: 1,
+    borderColor: 'rgba(38, 50, 61, 0.16)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  jumpToLatestText: {
+    color: '#26323d',
+    fontSize: 24,
+    fontWeight: '800',
+    lineHeight: 28,
   },
   bubbleRow: {
     flexDirection: 'row',
