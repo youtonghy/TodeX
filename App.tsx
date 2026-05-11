@@ -20,6 +20,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  type TextInputSelectionChangeEventData,
   View,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
@@ -242,6 +243,7 @@ type SlashCommand = {
 
 type MentionTrigger = {
   start: number;
+  end: number;
   query: string;
 };
 
@@ -409,15 +411,28 @@ function textFromLocalTurnPayload(payload: Record<string, unknown>): string {
   return text || shortJson(payload).slice(0, 240);
 }
 
-function findMentionTrigger(text: string): MentionTrigger | null {
-  const match = /(?:^|\s)@([^\s@]*)$/.exec(text);
-  if (!match || match.index === undefined) {
+function findMentionTrigger(text: string, cursor: number): MentionTrigger | null {
+  const end = Math.max(0, Math.min(cursor, text.length));
+  const beforeCursor = text.slice(0, end);
+  const atIndex = beforeCursor.lastIndexOf('@');
+  if (atIndex < 0) {
+    return null;
+  }
+
+  const prefix = beforeCursor.slice(0, atIndex);
+  if (prefix && !/\s$/.test(prefix)) {
+    return null;
+  }
+
+  const query = beforeCursor.slice(atIndex + 1);
+  if (/[^\s@]*\s/.test(query) || query.includes('@')) {
     return null;
   }
 
   return {
-    start: match.index + match[0].indexOf('@'),
-    query: match[1] ?? '',
+    start: atIndex,
+    end,
+    query,
   };
 }
 
@@ -525,7 +540,15 @@ function buildMentionSuggestions(
 }
 
 function insertMention(text: string, trigger: MentionTrigger, insertText: string): string {
-  return `${text.slice(0, trigger.start)}${insertText}${text.slice(trigger.start + trigger.query.length + 1)}`;
+  return `${text.slice(0, trigger.start)}${insertText}${text.slice(trigger.end)}`;
+}
+
+function insertTextAtSelection(
+  text: string,
+  selection: { start: number; end: number },
+  insertText: string,
+): string {
+  return `${text.slice(0, selection.start)}${insertText}${text.slice(selection.end)}`;
 }
 
 function parseMentionReferences(text: string): MentionReference[] {
@@ -883,6 +906,7 @@ export default function App() {
   const [mentionHistory, setMentionHistory] = useState<WorkspaceMentionHistory[]>([]);
   const [selectedRequestId, setSelectedRequestId] = useState('');
   const [chatDraft, setChatDraft] = useState('');
+  const [composerSelection, setComposerSelection] = useState<TextInputSelectionChangeEventData['selection']>({ start: 0, end: 0 });
   const [turnId, setTurnId] = useState('');
   const [isThinking, setIsThinking] = useState(false);
 
@@ -2009,6 +2033,7 @@ export default function App() {
       }
     }
     setChatDraft('');
+    setComposerSelection({ start: 0, end: 0 });
     sendSlashCommand(text);
   }, [activeConversationId, activeWorkspace, appendTimeline, chatDraft, rememberMentionReferences, sendSlashCommand]);
 
@@ -2107,9 +2132,11 @@ export default function App() {
                   pendingApprovalCount={pendingApprovalCount}
                   selectedRequest={selectedRequest}
                   chatDraft={chatDraft}
+                  composerSelection={composerSelection}
                   isThinking={isThinking}
                   lastError={lastError}
                   setChatDraft={setChatDraft}
+                  setComposerSelection={setComposerSelection}
                   submitChat={submitChat}
                   stopThinking={stopThinking}
                   sendApprovalResponse={sendApprovalResponse}
@@ -2364,9 +2391,11 @@ function ChatScreen({
   pendingApprovalCount,
   selectedRequest,
   chatDraft,
+  composerSelection,
   isThinking,
   lastError,
   setChatDraft,
+  setComposerSelection,
   submitChat,
   stopThinking,
   sendApprovalResponse,
@@ -2382,9 +2411,11 @@ function ChatScreen({
   pendingApprovalCount: number;
   selectedRequest: PendingRequest | null;
   chatDraft: string;
+  composerSelection: TextInputSelectionChangeEventData['selection'];
   isThinking: boolean;
   lastError: string;
   setChatDraft: Dispatch<SetStateAction<string>>;
+  setComposerSelection: Dispatch<SetStateAction<TextInputSelectionChangeEventData['selection']>>;
   submitChat: () => void;
   stopThinking: () => void;
   sendApprovalResponse: (accepted: boolean, request: PendingRequest) => void;
@@ -2421,24 +2452,23 @@ function ChatScreen({
         );
       }).slice(0, 6)
     : [];
-  const mentionTrigger = slashSuggestions.length === 0 ? findMentionTrigger(chatDraft) : null;
+  const mentionTrigger = slashSuggestions.length === 0 ? findMentionTrigger(chatDraft, composerSelection.start) : null;
   const mentionSuggestions = buildMentionSuggestions(mentionTrigger, workspace, conversation, selectedRequest, mentionHistory);
 
   const appendMentionTrigger = useCallback(() => {
-    setChatDraft((current) => {
-      if (!current || /\s$/.test(current)) {
-        return `${current}@`;
-      }
-      return `${current} @`;
-    });
+    setChatDraft((current) => insertTextAtSelection(current, composerSelection, '@'));
+    const nextCursor = composerSelection.start + 1;
+    setComposerSelection({ start: nextCursor, end: nextCursor });
     requestAnimationFrame(() => composerInputRef.current?.focus());
-  }, [setChatDraft]);
+  }, [composerSelection, setChatDraft]);
 
   const selectMention = useCallback((item: MentionSuggestion) => {
     if (!mentionTrigger) {
       return;
     }
     setChatDraft((current) => insertMention(current, mentionTrigger, item.insertText));
+    const nextCursor = mentionTrigger.start + item.insertText.length;
+    setComposerSelection({ start: nextCursor, end: nextCursor });
     requestAnimationFrame(() => composerInputRef.current?.focus());
   }, [mentionTrigger, setChatDraft]);
 
@@ -2494,7 +2524,11 @@ function ChatScreen({
               <Pressable
                 key={item.command}
                 style={styles.slashItem}
-                onPress={() => setChatDraft(`${item.command} `)}
+                onPress={() => {
+                  const nextText = `${item.command} `;
+                  setChatDraft(nextText);
+                  setComposerSelection({ start: nextText.length, end: nextText.length });
+                }}
               >
                 <Text style={styles.slashCommand} numberOfLines={1}>{item.command}</Text>
                 <Text style={styles.slashDescription} numberOfLines={1}>{item.description || item.title}</Text>
@@ -2528,6 +2562,8 @@ function ChatScreen({
           ref={composerInputRef}
           value={chatDraft}
           onChangeText={setChatDraft}
+          onSelectionChange={(event) => setComposerSelection(event.nativeEvent.selection)}
+          selection={composerSelection}
           placeholder="输入消息，@ 引用文件"
           placeholderTextColor="#7a8391"
           style={styles.composerInput}
