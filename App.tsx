@@ -74,6 +74,9 @@ type ConversationRecord = {
   sessionId: string;
   threadId: string;
   localAdapterState?: LocalAdapterState;
+  mode?: 'plan' | 'implement';
+  goalStatus?: string;
+  goalObjective?: string;
   createdAt: number;
   updatedAt: number;
 };
@@ -471,6 +474,47 @@ function nowLabel(timestamp: number): string {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+function modeLabelOf(mode: ConversationRecord['mode']): string {
+  return mode === 'plan' ? 'Plan mode' : 'Implement mode';
+}
+
+function compactGoalLabel(conversation: ConversationRecord): string {
+  if (!conversation.goalStatus && !conversation.goalObjective) {
+    return 'No goal';
+  }
+  if (conversation.goalObjective) {
+    return `Goal · ${conversation.goalObjective}`;
+  }
+  return `Goal · ${conversation.goalStatus}`;
+}
+
+function goalPatchFromEventData(data: Record<string, unknown>): Pick<ConversationRecord, 'goalStatus' | 'goalObjective'> | null {
+  const result = data.result;
+  const resultObject = result && typeof result === 'object' && !Array.isArray(result)
+    ? result as Record<string, unknown>
+    : null;
+  const goalValue = resultObject?.goal ?? data.goal;
+  const goal = goalValue && typeof goalValue === 'object' && !Array.isArray(goalValue)
+    ? goalValue as Record<string, unknown>
+    : null;
+
+  if (goal) {
+    return {
+      goalStatus: typeof goal.status === 'string' ? goal.status : 'active',
+      goalObjective: typeof goal.objective === 'string' ? goal.objective : '',
+    };
+  }
+
+  if (resultObject?.cleared === true || data.cleared === true) {
+    return {
+      goalStatus: '',
+      goalObjective: '',
+    };
+  }
+
+  return null;
 }
 
 function textFromLocalTurnPayload(payload: Record<string, unknown>): string {
@@ -887,6 +931,9 @@ function createDefaultConversation(workspace: WorkspaceRecord, fallbackThreadId:
     sessionId: workspace.sessionId || createSessionId(workspace.name),
     threadId: normalizeThreadId(workspace.threadId || fallbackThreadId),
     localAdapterState: 'idle',
+    mode: 'implement',
+    goalStatus: '',
+    goalObjective: '',
     createdAt,
     updatedAt: workspace.updatedAt || createdAt,
   };
@@ -993,6 +1040,9 @@ export default function App() {
                 sessionId: conversation.sessionId || normalizedWorkspaces.find((workspace) => workspace.id === conversation.workspaceId)?.sessionId || createSessionId(conversation.title),
                 threadId: normalizeThreadId(conversation.threadId),
                 localAdapterState: 'idle' as LocalAdapterState,
+                mode: (conversation.mode === 'plan' ? 'plan' : 'implement') as ConversationRecord['mode'],
+                goalStatus: conversation.goalStatus || '',
+                goalObjective: conversation.goalObjective || '',
               }))
           : normalizedWorkspaces.map((workspace) => createDefaultConversation(workspace, nextSettings.defaultThreadId));
       const storedConversation = normalizedConversations.find((conversation) => conversation.id === storedActiveSelection?.conversationId);
@@ -1318,6 +1368,19 @@ export default function App() {
       }
       setEvents((current) => [event, ...current].slice(0, MAX_EVENTS));
       const target = resolveTimelineTarget(event, data);
+      const goalPatch = goalPatchFromEventData(data);
+      if (
+        target.conversation &&
+        goalPatch &&
+        (
+          /goal/i.test(event.type) ||
+          data.method === 'thread/goal/set' ||
+          data.method === 'thread/goal/get' ||
+          data.method === 'thread/goal/clear'
+        )
+      ) {
+        updateConversation(target.conversation.id, goalPatch);
+      }
       const chatEntry = classifyChatEvent(event, target.workspaceId, target.conversationId);
       if (chatEntry) {
         upsertChatTimeline(chatEntry, event.type === 'codex.item.agentMessage.delta');
@@ -1632,6 +1695,9 @@ export default function App() {
       sessionId: createSessionId(`${workspace.name}_${count + 1}`),
       threadId: '',
       localAdapterState: 'idle',
+      mode: 'implement',
+      goalStatus: '',
+      goalObjective: '',
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -1834,7 +1900,7 @@ export default function App() {
   );
 
   const sendLocalTurn = useCallback(
-    async (text: string) => {
+    async (text: string, mode: ConversationRecord['mode'] = 'implement') => {
       if (!activeWorkspace || !activeConversation) {
         Alert.alert('未选择对话', '请先选择工作区和对话。');
         return;
@@ -1888,6 +1954,7 @@ export default function App() {
                   ...conversation,
                   sessionId: activeCommandWorkspace.sessionId,
                   threadId,
+                  mode,
                   title: conversation.title === '默认对话' ? text.slice(0, 18) || conversation.title : conversation.title,
                   updatedAt: Date.now(),
                 }
@@ -2074,6 +2141,17 @@ export default function App() {
         const subcommand = rest[0]?.toLowerCase() ?? '';
         const objective = subcommand === 'set' ? rest.slice(1).join(' ').trim() : rest.join(' ').trim();
         const method = subcommand === 'clear' ? 'thread/goal/clear' : objective ? 'thread/goal/set' : 'thread/goal/get';
+        if (method === 'thread/goal/set') {
+          updateConversation(activeConversation.id, {
+            goalStatus: 'active',
+            goalObjective: objective,
+          });
+        } else if (method === 'thread/goal/clear') {
+          updateConversation(activeConversation.id, {
+            goalStatus: '',
+            goalObjective: '',
+          });
+        }
         sendThreadMethod(
           method,
           (threadId) => (method === 'thread/goal/set' ? { threadId, objective } : { threadId }),
@@ -2195,7 +2273,7 @@ export default function App() {
       }
 
       if (lower === 'plan') {
-        sendLocalTurn(rest.length > 0 ? `make a plan for: ${rest.join(' ')}` : 'switch into planning mode and create a concise implementation plan');
+        sendLocalTurn(rest.length > 0 ? `make a plan for: ${rest.join(' ')}` : 'switch into planning mode and create a concise implementation plan', 'plan');
         return;
       }
 
@@ -2830,10 +2908,24 @@ function ChatScreen({
 
   useLayoutEffect(() => {
     navigation.setOptions({
-      title: conversation?.title ?? '对话',
+      headerTitle: () => (
+        <ConversationHeaderTitle
+          title={conversation?.title ?? '对话'}
+          mode={conversation?.mode ?? 'implement'}
+          goalLabel={conversation ? compactGoalLabel(conversation) : 'No goal'}
+          localState={conversation?.localAdapterState ?? 'idle'}
+        />
+      ),
       headerRight: () => <HeaderIconButton label="..." onPress={() => setMenuVisible(true)} />,
     });
-  }, [conversation?.title, navigation]);
+  }, [
+    conversation?.goalObjective,
+    conversation?.goalStatus,
+    conversation?.localAdapterState,
+    conversation?.mode,
+    conversation?.title,
+    navigation,
+  ]);
 
   if (!workspace || !conversation) {
     return (
@@ -3150,6 +3242,38 @@ function HeaderIconButton({ label, onPress }: { label: string; onPress: () => vo
   );
 }
 
+function ConversationHeaderTitle({
+  title,
+  mode,
+  goalLabel,
+  localState,
+}: {
+  title: string;
+  mode: ConversationRecord['mode'];
+  goalLabel: string;
+  localState: LocalAdapterState;
+}) {
+  const stateLabel = localState === 'idle' ? '' : localState;
+  return (
+    <View style={styles.conversationHeaderTitle}>
+      <Text style={styles.conversationHeaderName} numberOfLines={1}>{title}</Text>
+      <View style={styles.conversationHeaderStatusRow}>
+        <View style={[styles.headerStatusChip, mode === 'plan' ? styles.headerStatusChipAccent : styles.headerStatusChipMuted]}>
+          <Text style={styles.headerStatusText} numberOfLines={1}>{modeLabelOf(mode)}</Text>
+        </View>
+        <View style={styles.headerStatusChip}>
+          <Text style={styles.headerStatusText} numberOfLines={1}>{goalLabel}</Text>
+        </View>
+        {stateLabel ? (
+          <View style={styles.headerStatusChip}>
+            <Text style={styles.headerStatusText} numberOfLines={1}>{stateLabel}</Text>
+          </View>
+        ) : null}
+      </View>
+    </View>
+  );
+}
+
 function ActionButton({
   title,
   onPress,
@@ -3284,6 +3408,44 @@ const styles = StyleSheet.create({
   headerTitle: {
     color: '#17202a',
     fontSize: 17,
+    fontWeight: '800',
+  },
+  conversationHeaderTitle: {
+    width: 230,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  conversationHeaderName: {
+    maxWidth: 230,
+    color: '#17202a',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  conversationHeaderStatusRow: {
+    maxWidth: 230,
+    marginTop: 3,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+  },
+  headerStatusChip: {
+    maxWidth: 108,
+    minHeight: 18,
+    borderRadius: 6,
+    backgroundColor: '#eef0f2',
+    paddingHorizontal: 6,
+    justifyContent: 'center',
+  },
+  headerStatusChipAccent: {
+    backgroundColor: '#dcefeb',
+  },
+  headerStatusChipMuted: {
+    backgroundColor: '#eef0f2',
+  },
+  headerStatusText: {
+    color: '#52606b',
+    fontSize: 10,
     fontWeight: '800',
   },
   headerActions: {
