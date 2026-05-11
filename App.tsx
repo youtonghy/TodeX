@@ -1419,6 +1419,7 @@ export default function App() {
               : null;
         if (conversation) {
           updateConversation(conversation.id, { threadId: '' });
+          updateWorkspace(conversation.workspaceId, { threadId: '' });
           appendTimeline(makeSystemEntry(
             '已重置失效 Thread',
             localTurnErrorMessage(protocolError),
@@ -1777,7 +1778,7 @@ export default function App() {
   const ensureThreadId = useCallback(
     (workspace: WorkspaceRecord, conversation: ConversationRecord, forceNewThread = false) => {
       const sessionId = sessionIdForConversation(workspace, conversation);
-      const currentThreadId = normalizeThreadId(conversation.threadId || settings.defaultThreadId);
+      const currentThreadId = normalizeThreadId(conversation.threadId);
       if (!forceNewThread && currentThreadId) {
         return Promise.resolve(currentThreadId);
       }
@@ -1835,7 +1836,7 @@ export default function App() {
         }
       });
     },
-    [sendProtocolMessage, settings.defaultThreadId],
+    [sendProtocolMessage],
   );
 
   const sendLocalTurn = useCallback(
@@ -1847,7 +1848,7 @@ export default function App() {
 
       const activeSessionId = sessionIdForConversation(activeWorkspace, activeConversation);
       const activeCommandWorkspace = commandWorkspaceForConversation(activeWorkspace, activeConversation);
-      const cachedThreadId = normalizeThreadId(activeConversation.threadId || settings.defaultThreadId);
+      const cachedThreadId = normalizeThreadId(activeConversation.threadId);
       try {
         await startLocalAdapter(activeWorkspace, activeConversation);
       } catch (error) {
