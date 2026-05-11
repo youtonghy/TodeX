@@ -930,6 +930,10 @@ function isThinkingProgressEntry(entry: TimelineEntry): boolean {
   return entry.kind === 'system' && entry.title === '思考中';
 }
 
+function isCollapsibleProgressEntry(entry: TimelineEntry): boolean {
+  return isStepProgressEntry(entry) || isThinkingProgressEntry(entry);
+}
+
 function executionGroupId(entries: TimelineEntry[]): string {
   const first = entries[0]?.id ?? 'empty';
   const last = entries[entries.length - 1]?.id ?? first;
@@ -3094,10 +3098,11 @@ function ChatScreen({
               }
 
               const entry = item.entry;
-              const autoCollapsed = isStepProgressEntry(entry) && laterThinkingByEntryId.get(entry.id) === true;
+              const collapsible = isCollapsibleProgressEntry(entry);
+              const autoCollapsed = collapsible && laterThinkingByEntryId.get(entry.id) === true;
               const manuallyExpanded = expandedProgressIds.has(entry.id);
               const manuallyCollapsed = collapsedProgressIds.has(entry.id);
-              const collapsed = isStepProgressEntry(entry)
+              const collapsed = collapsible
                 ? manuallyExpanded
                   ? false
                   : manuallyCollapsed || autoCollapsed
@@ -3107,7 +3112,7 @@ function ChatScreen({
                   key={entry.id}
                   entry={entry}
                   collapsed={collapsed}
-                  collapsible={isStepProgressEntry(entry)}
+                  collapsible={collapsible}
                   pendingRequest={entry.requestId ? pendingRequestById.get(entry.requestId) : undefined}
                   onToggleProgress={toggleProgressEntry}
                   onApprovalResponse={sendApprovalResponse}
