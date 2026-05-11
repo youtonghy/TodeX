@@ -48,6 +48,7 @@ import {
   inferApprovalResponseType,
   normalizeThreadId,
   normalizeServerUrl,
+  sandboxPolicyForMode,
   shortJson,
 } from './src/lib/todex';
 import { loadJson, loadSecret, saveJson, saveSecret } from './src/lib/storage';
@@ -347,6 +348,7 @@ const SLASH_COMMANDS: SlashCommand[] = [
   { command: '/ide', title: 'IDE Context', description: 'include current selection, open files, and other context from your IDE' },
   { command: '/permissions', title: 'Permissions', description: 'choose what Codex is allowed to do' },
   { command: '/permission', title: 'Permissions', description: 'alias for /permissions' },
+  { command: '/fast', title: 'Fast', description: 'toggle Fast service tier for later turns' },
   { command: '/keymap', title: 'Keymap', description: 'remap TUI shortcuts' },
   { command: '/vim', title: 'Vim', description: 'toggle Vim mode for the composer' },
   { command: '/setup-default-sandbox', title: 'Setup Default Sandbox', description: 'set up elevated agent sandbox' },
@@ -394,6 +396,8 @@ const SLASH_COMMANDS: SlashCommand[] = [
   { command: '/realtime', title: 'Realtime', description: 'toggle realtime voice mode' },
   { command: '/settings', title: 'Settings', description: 'configure realtime microphone/speaker' },
   { command: '/test-approval', title: 'Test Approval', description: 'test approval request' },
+  { command: '/debug-m-drop', title: 'Debug Memory Drop', description: 'debug memory drop' },
+  { command: '/debug-m-update', title: 'Debug Memory Update', description: 'debug memory update' },
 ];
 
 const PERMISSION_PRESETS: PermissionPreset[] = [
@@ -1572,6 +1576,7 @@ export default function App() {
         model: settings.defaultModel,
         approvalPolicy: settings.approvalPolicy,
         sandboxMode: settings.sandboxMode,
+        serviceTier: null,
         localAdapterState: 'idle',
         createdAt: Date.now(),
         updatedAt: Date.now(),
@@ -1806,7 +1811,14 @@ export default function App() {
           codexSessionId: sessionId,
           tenantId: workspace.tenantId,
           method: 'thread/start',
-          params: { ephemeral: true },
+          params: {
+            ephemeral: true,
+            cwd: workspace.path,
+            model: workspace.model || settings.defaultModel || undefined,
+            approvalPolicy: workspace.approvalPolicy || settings.approvalPolicy || undefined,
+            sandbox: workspace.sandboxMode || settings.sandboxMode || undefined,
+            serviceTier: workspace.serviceTier || undefined,
+          },
         }, requestId);
 
         if (!sent) {
@@ -1818,7 +1830,7 @@ export default function App() {
         }
       });
     },
-    [sendProtocolMessage],
+    [sendProtocolMessage, settings.approvalPolicy, settings.defaultModel, settings.sandboxMode],
   );
 
   const sendLocalTurn = useCallback(
@@ -1856,6 +1868,9 @@ export default function App() {
         tenantId: activeWorkspace.tenantId,
         threadId,
         input: [{ type: 'text', text }],
+        approvalPolicy: activeWorkspace.approvalPolicy || settings.approvalPolicy || undefined,
+        sandboxPolicy: sandboxPolicyForMode(activeWorkspace.sandboxMode || settings.sandboxMode),
+        serviceTier: activeWorkspace.serviceTier || undefined,
         collaborationMode: {
           mode: 'default',
           settings: {
@@ -1883,7 +1898,7 @@ export default function App() {
         setIsThinking(false);
       }
     },
-    [activeConversation, activeWorkspace, appendTimeline, ensureThreadId, sendProtocolMessage, settings.defaultModel, startLocalAdapter, updateWorkspace],
+    [activeConversation, activeWorkspace, appendTimeline, ensureThreadId, sendProtocolMessage, settings.approvalPolicy, settings.defaultModel, settings.sandboxMode, startLocalAdapter, updateWorkspace],
   );
 
   const sendApprovalResponse = useCallback(
@@ -1950,6 +1965,29 @@ export default function App() {
         return;
       }
 
+      const addCommandNotice = (title: string, detail: string) => {
+        appendTimeline(makeSystemEntry(title, detail, activeWorkspace.id, activeConversation.id));
+      };
+
+      const sendLocalMethod = (method: string, params: Record<string, unknown>, title: string, detail: string) => {
+        if (sendWorkspaceCommand(activeWorkspace, 'codex.local.request', { method, params }, activeConversation)) {
+          addCommandNotice(title, detail);
+        }
+      };
+
+      const sendThreadMethod = (method: string, makeParams: (threadId: string) => Record<string, unknown>, title: string, detail: string) => {
+        void (async () => {
+          try {
+            await startLocalAdapter(activeWorkspace, activeConversation);
+            const threadId = await ensureThreadId(activeWorkspace, activeConversation, !normalizeThreadId(activeConversation.threadId));
+            sendLocalMethod(method, makeParams(threadId), title, detail);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : `${title} 失败`;
+            setLastError(message);
+          }
+        })();
+      };
+
       if (lower === 'permissions' || lower === 'permission') {
         const presetName = rest[0]?.toLowerCase() ?? '';
         const preset = PERMISSION_PRESETS.find((candidate) => candidate.id === presetName || candidate.title.toLowerCase() === presetName);
@@ -1958,6 +1996,34 @@ export default function App() {
           return;
         }
         openPermissionsMenu();
+        return;
+      }
+
+      if (lower === 'model') {
+        const nextModel = rest[0]?.trim() ?? '';
+        if (!nextModel) {
+          Alert.alert('Model', activeWorkspace.model || settings.defaultModel || '未设置模型');
+          return;
+        }
+        updateWorkspace(activeWorkspace.id, { model: nextModel });
+        appendTimeline(makeSystemEntry(
+          `Model updated to ${nextModel}`,
+          '后续新 thread 和 turn 会把该模型作为 Codex app-server 的 model 参数发送。',
+          activeWorkspace.id,
+          activeConversation.id,
+        ));
+        return;
+      }
+
+      if (lower === 'fast') {
+        const enabled = activeWorkspace.serviceTier !== 'priority';
+        updateWorkspace(activeWorkspace.id, { serviceTier: enabled ? 'priority' : null });
+        appendTimeline(makeSystemEntry(
+          enabled ? 'Fast mode enabled' : 'Fast mode disabled',
+          enabled ? '后续新 thread 和 turn 会发送 serviceTier=priority。' : '后续请求会回到默认服务层级。',
+          activeWorkspace.id,
+          activeConversation.id,
+        ));
         return;
       }
 
@@ -1973,6 +2039,70 @@ export default function App() {
         return;
       }
 
+      if (lower === 'skills') {
+        sendLocalMethod('skills/list', { cwds: [activeWorkspace.path], forceReload: /reload|refresh|true|1/i.test(rest[0] ?? '') }, 'Skills requested', '已请求 Codex app-server 扫描当前工作区 Skills。');
+        return;
+      }
+
+      if (lower === 'hooks') {
+        sendLocalMethod('hooks/list', { cwds: [activeWorkspace.path] }, 'Hooks requested', '已请求 Codex app-server 列出当前工作区 hooks。');
+        return;
+      }
+
+      if (lower === 'plugins') {
+        sendLocalMethod('plugin/list', { cwds: [activeWorkspace.path], extraUserRoots: [] }, 'Plugins requested', '已请求 Codex app-server 列出插件。');
+        return;
+      }
+
+      if (lower === 'apps') {
+        sendLocalMethod('app/list', { limit: 50, forceRefetch: /reload|refresh|true|1/i.test(rest[0] ?? '') }, 'Apps requested', '已请求 Codex app-server 列出 apps。');
+        return;
+      }
+
+      if (lower === 'mcp') {
+        sendWorkspaceCommand(activeWorkspace, 'codex.mcp.server.listStatus', {}, activeConversation);
+        addCommandNotice('MCP status requested', rest[0] === 'verbose' ? '已请求 MCP server 状态；详细事件会在时间线中返回。' : '已请求 MCP server 状态。');
+        return;
+      }
+
+      if (lower === 'compact') {
+        sendThreadMethod('thread/compact/start', (threadId) => ({ threadId }), 'Compact started', '已请求 Codex app-server 压缩当前 thread 上下文。');
+        return;
+      }
+
+      if (lower === 'goal') {
+        const subcommand = rest[0]?.toLowerCase() ?? '';
+        const objective = subcommand === 'set' ? rest.slice(1).join(' ').trim() : rest.join(' ').trim();
+        const method = subcommand === 'clear' ? 'thread/goal/clear' : objective ? 'thread/goal/set' : 'thread/goal/get';
+        sendThreadMethod(
+          method,
+          (threadId) => (method === 'thread/goal/set' ? { threadId, objective } : { threadId }),
+          'Goal command sent',
+          `已发送 ${method}。`,
+        );
+        return;
+      }
+
+      if (lower === 'rename') {
+        const nextTitle = rest.join(' ').trim();
+        if (!nextTitle) {
+          Alert.alert('Rename', '请输入新的对话标题。');
+          return;
+        }
+        updateConversation(activeConversation.id, { title: nextTitle });
+        if (activeConversation.threadId) {
+          sendLocalMethod('thread/name/set', { threadId: activeConversation.threadId, name: nextTitle }, 'Thread rename sent', nextTitle);
+        } else {
+          addCommandNotice('Conversation renamed', nextTitle);
+        }
+        return;
+      }
+
+      if (lower === 'logout') {
+        sendLocalMethod('account/logout', {}, 'Logout requested', '已请求 Codex app-server 登出当前账号。');
+        return;
+      }
+
       if (lower === 'start') {
         void startLocalAdapter(activeWorkspace, activeConversation).catch(() => undefined);
         return;
@@ -1984,6 +2114,9 @@ export default function App() {
       }
 
       if (lower === 'stop') {
+        if (activeConversation.threadId) {
+          sendLocalMethod('thread/backgroundTerminals/clean', { threadId: activeConversation.threadId }, 'Background terminals clean requested', '已请求 Codex 清理后台终端。');
+        }
         if (sendWorkspaceCommand(activeWorkspace, 'codex.local.stop', { force: false }, activeConversation)) {
           const pending = pendingLocalStartsRef.current.get(activeConversation.id);
           if (pending) {
@@ -1997,6 +2130,9 @@ export default function App() {
       }
 
       if (lower === 'clean') {
+        if (activeConversation.threadId) {
+          sendLocalMethod('thread/backgroundTerminals/clean', { threadId: activeConversation.threadId }, 'Background terminals clean requested', '已请求 Codex 清理后台终端。');
+        }
         if (sendWorkspaceCommand(activeWorkspace, 'codex.local.stop', { force: false }, activeConversation)) {
           updateConversation(activeConversation.id, { localAdapterState: 'stopped' });
         }
@@ -2039,22 +2175,92 @@ export default function App() {
       }
 
       if (lower === 'review') {
-        sendLocalTurn(rest.length > 0 ? `review ${rest.join(' ')}` : 'review my current changes and find issues');
+        const instructions = rest.join(' ').trim();
+        sendThreadMethod(
+          'review/start',
+          (threadId) => ({
+            threadId,
+            target: instructions ? { type: 'custom', instructions } : { type: 'uncommittedChanges' },
+            delivery: 'inline',
+          }),
+          'Review started',
+          instructions || 'Review uncommitted changes.',
+        );
         return;
       }
 
-      const passthroughCommands = new Set(['compact', 'plan', 'goal', 'diff', 'status', 'mcp', 'ps', 'rollout']);
-      if (passthroughCommands.has(lower)) {
-        sendLocalTurn(trimmed);
+      if (lower === 'init') {
+        sendLocalTurn('create or update an AGENTS.md file with concise project instructions for Codex');
         return;
       }
 
-      appendTimeline(makeSystemEntry(
-        `/${lower} 暂未在移动端实现`,
-        '该命令已按 Codex CLI 名称展示，但当前后端还没有对应的交互协议。',
-        activeWorkspace.id,
-        activeConversation.id,
-      ));
+      if (lower === 'plan') {
+        sendLocalTurn(rest.length > 0 ? `make a plan for: ${rest.join(' ')}` : 'switch into planning mode and create a concise implementation plan');
+        return;
+      }
+
+      if (lower === 'diff') {
+        sendLocalTurn('show and summarize the current git diff, including untracked files when relevant');
+        return;
+      }
+
+      if (lower === 'ps') {
+        addCommandNotice('Background terminals', '当前移动端没有独立后台终端列表；可用 /stop 清理当前 thread 的后台终端。');
+        return;
+      }
+
+      if (lower === 'rollout') {
+        addCommandNotice('Rollout', '移动端不会直接读取 Codex 本地 rollout 路径；后端事件会在时间线中显示。');
+        return;
+      }
+
+      if (lower === 'resume' || lower === 'fork' || lower === 'side' || lower === 'agent' || lower === 'subagents') {
+        addCommandNotice(`/${lower} recognized`, '移动端以工作区和对话列表管理会话；该命令已识别，等价操作请使用当前导航中的对话入口。');
+        return;
+      }
+
+      if (lower === 'copy' || lower === 'raw') {
+        addCommandNotice(`/${lower} recognized`, '移动端使用系统选择和复制；该命令已识别但不需要发送到后端。');
+        return;
+      }
+
+      if (lower === 'ide' || lower === 'keymap' || lower === 'vim' || lower === 'theme' || lower === 'title' || lower === 'statusline') {
+        addCommandNotice(`/${lower} recognized`, '这是 TUI/IDE 展示配置命令；移动端已识别，但当前没有等价 app-server 执行动作。');
+        return;
+      }
+
+      if (
+        lower === 'setup-default-sandbox' ||
+        lower === 'sandbox-add-read-dir' ||
+        lower === 'experimental' ||
+        lower === 'collab' ||
+        lower === 'memories' ||
+        lower === 'personality' ||
+        lower === 'realtime' ||
+        lower === 'settings' ||
+        lower === 'debug-config' ||
+        lower === 'feedback' ||
+        lower === 'debug-m-drop' ||
+        lower === 'debug-m-update'
+      ) {
+        addCommandNotice(`/${lower} recognized`, '该命令已加入移动端命令集；当前移动端没有安全的直接执行协议，未作为普通 prompt 发送。');
+        return;
+      }
+
+      if (lower === 'test-approval') {
+        sendLocalTurn('trigger a harmless approval test if the current Codex environment supports it');
+        return;
+      }
+
+      if (lower === 'quit' || lower === 'exit') {
+        if (sendWorkspaceCommand(activeWorkspace, 'codex.local.stop', { force: false }, activeConversation)) {
+          updateConversation(activeConversation.id, { localAdapterState: 'stopped' });
+          addCommandNotice(`/${lower} recognized`, '已停止当前本地 Codex 会话；移动端应用不会退出。');
+        }
+        return;
+      }
+
+      addCommandNotice(`/${lower} recognized`, '该命令不在当前内置命令清单中，已阻止作为普通 prompt 发送。');
     },
     [
       activeConversation,
@@ -2062,6 +2268,7 @@ export default function App() {
       appendTimeline,
       applyPermissionPreset,
       createConversation,
+      ensureThreadId,
       openPermissionsMenu,
       pendingRequests,
       selectConversation,
@@ -2075,8 +2282,10 @@ export default function App() {
       settings.defaultThreadId,
       setChatDraft,
       setComposerSelection,
+      setLastError,
       turnId,
       updateConversation,
+      updateWorkspace,
     ],
   );
 

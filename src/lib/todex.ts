@@ -23,6 +23,7 @@ export type WorkspaceRecord = {
   model: string;
   approvalPolicy: string;
   sandboxMode: string;
+  serviceTier?: string | null;
   localAdapterState?: LocalAdapterState;
   createdAt: number;
   updatedAt: number;
@@ -293,6 +294,29 @@ export function createMessage(type: string, payload: Record<string, unknown>): S
     type,
     payload,
   };
+}
+
+export function sandboxPolicyForMode(mode: string | null | undefined): Record<string, unknown> | undefined {
+  switch ((mode ?? '').trim().toLowerCase()) {
+    case 'read-only':
+    case 'readonly':
+      return { type: 'readOnly', networkAccess: false };
+    case 'workspace-write':
+    case 'workspacewrite':
+      return {
+        type: 'workspaceWrite',
+        writableRoots: [],
+        networkAccess: false,
+        excludeTmpdirEnvVar: false,
+        excludeSlashTmp: false,
+      };
+    case 'danger-full-access':
+    case 'dangerfullaccess':
+    case 'full-access':
+      return { type: 'dangerFullAccess' };
+    default:
+      return undefined;
+  }
 }
 
 export function approvalResponsePayload(request: PendingRequest, accepted: boolean): Record<string, unknown> {
