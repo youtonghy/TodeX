@@ -107,6 +107,10 @@ function localConversationStateOf(conversation: ConversationRecord | null): Loca
   return conversation?.localAdapterState ?? 'idle';
 }
 
+function isConversationActive(conversation: ConversationRecord): boolean {
+  return conversation.localAdapterState === 'running' || conversation.localAdapterState === 'starting';
+}
+
 function sessionIdForConversation(workspace: WorkspaceRecord, conversation: ConversationRecord): string {
   return conversation.sessionId || workspace.sessionId || createSessionId(workspace.name);
 }
@@ -916,6 +920,11 @@ function isVisibleConversationEntry(entry: TimelineEntry): boolean {
   }
 
   return true;
+}
+
+function conversationPreviewText(latest: TimelineEntry | undefined): string {
+  const text = (latest?.subtitle || latest?.title || '').replace(/\s+/g, ' ').trim();
+  return text || '新的对话';
 }
 
 function isStepProgressEntry(entry: TimelineEntry): boolean {
@@ -1751,7 +1760,7 @@ export default function App() {
     const next: ConversationRecord = {
       id: createRequestId('conversation'),
       workspaceId,
-      title: `对话 ${count + 1}`,
+      title: '',
       sessionId: createSessionId(`${workspace.name}_${count + 1}`),
       threadId: '',
       localAdapterState: 'idle',
@@ -2777,6 +2786,8 @@ function ConversationListScreen({
       ) : (
         workspaceConversations.map((conversation) => {
           const latest = timeline.find((entry) => entry.conversationId === conversation.id && isVisibleConversationEntry(entry));
+          const preview = conversationPreviewText(latest);
+          const active = isConversationActive(conversation);
           return (
             <Pressable
               key={conversation.id}
@@ -2784,20 +2795,24 @@ function ConversationListScreen({
                 selectConversation(workspace.id, conversation.id);
                 navigation.navigate('Chat', { workspaceId: workspace.id, conversationId: conversation.id });
               }}
-              style={styles.listItem}
+              style={[styles.listItem, active && styles.listItemActive]}
             >
-              <View style={styles.conversationAvatar}>
-                <Text style={styles.conversationAvatarText}>对</Text>
+              <View style={[styles.conversationAvatar, active && styles.conversationAvatarActive]}>
+                <Text style={[styles.conversationAvatarText, active && styles.conversationAvatarTextActive]}>
+                  {preview.slice(0, 1).toUpperCase()}
+                </Text>
               </View>
               <View style={styles.itemMain}>
                 <View style={styles.itemHeader}>
-                  <Text style={styles.itemTitle} numberOfLines={1}>
-                    {conversation.title}
+                  <Text style={[styles.itemTitle, active && styles.itemTitleActive]} numberOfLines={1}>
+                    {preview}
                   </Text>
-                  <Text style={styles.itemTag}>{nowLabel(conversation.updatedAt)}</Text>
+                  <Text style={[styles.itemTag, active && styles.itemTagActive]}>
+                    {active ? '运行中' : nowLabel(conversation.updatedAt)}
+                  </Text>
                 </View>
                 <Text style={styles.itemBody} numberOfLines={1}>
-                  {latest?.subtitle || '点进去开始完整对话'}
+                  {active ? '正在处理当前对话' : nowLabel(conversation.updatedAt)}
                 </Text>
               </View>
             </Pressable>
@@ -2868,6 +2883,7 @@ function ChatScreen({
     .filter(isVisibleConversationEntry)
     .slice()
     .reverse();
+  const chatHeaderTitle = conversationPreviewText(conversationMessages[conversationMessages.length - 1]);
   const conversationRenderItems = useMemo(
     () => buildConversationRenderItems(conversationMessages),
     [conversationMessages],
@@ -3032,7 +3048,7 @@ function ChatScreen({
     navigation.setOptions({
       headerTitle: () => (
         <ConversationHeaderTitle
-          title={conversation?.title ?? '对话'}
+          title={chatHeaderTitle}
           mode={conversation?.mode ?? 'implement'}
           goalLabel={conversation ? compactGoalLabel(conversation) : 'No goal'}
           localState={conversation?.localAdapterState ?? 'idle'}
@@ -3045,7 +3061,7 @@ function ChatScreen({
     conversation?.goalStatus,
     conversation?.localAdapterState,
     conversation?.mode,
-    conversation?.title,
+    chatHeaderTitle,
     navigation,
   ]);
 
@@ -3743,6 +3759,10 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#e7ecef',
   },
+  listItemActive: {
+    backgroundColor: '#f0fbf5',
+    borderBottomColor: '#bfe8cf',
+  },
   itemAvatar: {
     width: 46,
     height: 46,
@@ -3764,10 +3784,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  conversationAvatarActive: {
+    backgroundColor: '#19a463',
+  },
   conversationAvatarText: {
     color: '#244641',
     fontSize: 15,
     fontWeight: '800',
+  },
+  conversationAvatarTextActive: {
+    color: '#ffffff',
   },
   itemMain: {
     flex: 1,
@@ -3786,10 +3812,16 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     minWidth: 0,
   },
+  itemTitleActive: {
+    color: '#168451',
+  },
   itemTag: {
     color: '#7a8391',
     fontSize: 11,
     fontWeight: '800',
+  },
+  itemTagActive: {
+    color: '#168451',
   },
   itemBody: {
     color: '#66717c',
