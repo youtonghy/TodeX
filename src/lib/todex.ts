@@ -208,6 +208,8 @@ export function inferApprovalResponseType(requestType: string): string {
       return 'codex.tool.requestUserInput.respond';
     case 'codex.tool.call.request':
       return 'codex.tool.call.respond';
+    case 'codex.mcp.elicitation.request':
+      return 'codex.mcp.elicitation.respond';
     case 'codex.account.chatgptAuthTokens.refresh':
       return 'codex.account.chatgptAuthTokens.refresh.respond';
     default:
@@ -319,6 +321,26 @@ export function sandboxPolicyForMode(mode: string | null | undefined): Record<st
 }
 
 export function approvalResponsePayload(request: PendingRequest, accepted: boolean): Record<string, unknown> {
+  if (request.requestType === 'codex.approval.permissions.request') {
+    const requestedPermissions = isObject(request.data.permissions) ? request.data.permissions : {};
+    const permissions = accepted ? requestedPermissions : {};
+
+    return {
+      permissions,
+      scope: 'turn',
+      strictAutoReview: false,
+    };
+  }
+
+  if (
+    request.requestType === 'codex.approval.commandExecution.request' ||
+    request.requestType === 'codex.approval.fileChange.request'
+  ) {
+    return {
+      decision: accepted ? 'accept' : 'decline',
+    };
+  }
+
   if (request.requestType === 'codex.tool.requestUserInput.request') {
     const questions = Array.isArray(request.data.questions) ? request.data.questions : [];
     const answers = questions.reduce<Record<string, { answers: string[] }>>((acc, question) => {
@@ -335,18 +357,26 @@ export function approvalResponsePayload(request: PendingRequest, accepted: boole
 
   if (request.requestType === 'codex.tool.call.request') {
     return {
-      decision: accepted ? 'accept' : 'deny',
+      decision: accepted ? 'accept' : 'decline',
+    };
+  }
+
+  if (request.requestType === 'codex.mcp.elicitation.request') {
+    return {
+      action: accepted ? 'accept' : 'decline',
+      content: {},
+      _meta: null,
     };
   }
 
   if (request.requestType === 'codex.account.chatgptAuthTokens.refresh') {
     return {
-      decision: accepted ? 'accept' : 'deny',
+      decision: accepted ? 'accept' : 'decline',
     };
   }
 
   return {
-    decision: accepted ? 'accept' : 'deny',
+    decision: accepted ? 'accept' : 'decline',
   };
 }
 
