@@ -31,7 +31,6 @@ import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-cont
 import { enableScreens } from 'react-native-screens';
 
 import {
-  COMMAND_PRESETS,
   ConnectionSettings,
   LocalAdapterState,
   PendingRequest,
@@ -241,6 +240,12 @@ type SlashCommand = {
   description: string;
 };
 
+type WorkspaceEntry = {
+  name: string;
+  path: string;
+  kind: 'directory' | 'file';
+};
+
 type MentionTrigger = {
   start: number;
   end: number;
@@ -252,6 +257,16 @@ type MentionSuggestion = {
   title: string;
   description: string;
   insertText: string;
+};
+
+type PermissionPresetId = 'read-only' | 'default' | 'full-access';
+
+type PermissionPreset = {
+  id: PermissionPresetId;
+  title: string;
+  description: string;
+  approvalPolicy: string;
+  sandboxMode: string;
 };
 
 type MentionReference = {
@@ -328,19 +343,81 @@ const RECONNECT_DELAY_MS = 2500;
 const RECONNECT_REPLAY_LIMIT = 5000;
 
 const SLASH_COMMANDS: SlashCommand[] = [
-  { command: '/start', title: '启动本地会话', description: '启动当前目录的 Codex CLI adapter' },
-  { command: '/status', title: '查看状态', description: '读取当前本地会话状态' },
-  { command: '/interrupt', title: '停止当前思考', description: '对应 CLI 里的 ESC 中断' },
-  { command: '/stop', title: '停止本地会话', description: '关闭当前 Codex adapter' },
-  { command: '/attach', title: '附加会话', description: '重新附加并回放最近事件' },
-  { command: '/replay', title: '回放事件', description: '从后端回放最近的协议事件' },
-  { command: '/permission', title: '同意审批', description: '回复当前待处理的权限/工具请求' },
-  { command: '/permission deny', title: '拒绝审批', description: '拒绝当前待处理的权限/工具请求' },
-  ...COMMAND_PRESETS.map((preset) => ({
-    command: `/${preset.type}`,
-    title: preset.label,
-    description: preset.description,
-  })),
+  { command: '/model', title: 'Model', description: 'choose what model and reasoning effort to use' },
+  { command: '/ide', title: 'IDE Context', description: 'include current selection, open files, and other context from your IDE' },
+  { command: '/permissions', title: 'Permissions', description: 'choose what Codex is allowed to do' },
+  { command: '/permission', title: 'Permissions', description: 'alias for /permissions' },
+  { command: '/keymap', title: 'Keymap', description: 'remap TUI shortcuts' },
+  { command: '/vim', title: 'Vim', description: 'toggle Vim mode for the composer' },
+  { command: '/setup-default-sandbox', title: 'Setup Default Sandbox', description: 'set up elevated agent sandbox' },
+  { command: '/sandbox-add-read-dir', title: 'Sandbox Read Root', description: 'let sandbox read a directory' },
+  { command: '/experimental', title: 'Experimental', description: 'toggle experimental features' },
+  { command: '/approve', title: 'Approve', description: 'approve one retry of a recent auto-review denial' },
+  { command: '/memories', title: 'Memories', description: 'configure memory use and generation' },
+  { command: '/skills', title: 'Skills', description: 'use skills to improve how Codex performs specific tasks' },
+  { command: '/hooks', title: 'Hooks', description: 'view and manage lifecycle hooks' },
+  { command: '/review', title: 'Review', description: 'review my current changes and find issues' },
+  { command: '/rename', title: 'Rename', description: 'rename the current thread' },
+  { command: '/new', title: 'New', description: 'start a new chat during a conversation' },
+  { command: '/resume', title: 'Resume', description: 'resume a saved chat' },
+  { command: '/fork', title: 'Fork', description: 'fork the current chat' },
+  { command: '/init', title: 'Init', description: 'create an AGENTS.md file with instructions for Codex' },
+  { command: '/compact', title: 'Compact', description: 'summarize conversation to prevent hitting the context limit' },
+  { command: '/plan', title: 'Plan', description: 'switch to Plan mode' },
+  { command: '/goal', title: 'Goal', description: 'set or view the goal for a long-running task' },
+  { command: '/collab', title: 'Collab', description: 'change collaboration mode' },
+  { command: '/agent', title: 'Agent', description: 'switch the active agent thread' },
+  { command: '/subagents', title: 'Subagents', description: 'switch the active agent thread' },
+  { command: '/side', title: 'Side', description: 'start a side conversation in an ephemeral fork' },
+  { command: '/copy', title: 'Copy', description: 'copy last response as markdown' },
+  { command: '/raw', title: 'Raw', description: 'toggle raw scrollback mode for copy-friendly selection' },
+  { command: '/diff', title: 'Diff', description: 'show git diff including untracked files' },
+  { command: '/mention', title: 'Mention', description: 'mention a file' },
+  { command: '/status', title: 'Status', description: 'show current session configuration and token usage' },
+  { command: '/debug-config', title: 'Debug Config', description: 'show config layers and requirement sources' },
+  { command: '/title', title: 'Title', description: 'configure terminal title items' },
+  { command: '/statusline', title: 'Statusline', description: 'configure status line items' },
+  { command: '/theme', title: 'Theme', description: 'choose a syntax highlighting theme' },
+  { command: '/mcp', title: 'MCP', description: 'list configured MCP tools; use /mcp verbose for details' },
+  { command: '/apps', title: 'Apps', description: 'manage apps' },
+  { command: '/plugins', title: 'Plugins', description: 'browse plugins' },
+  { command: '/logout', title: 'Logout', description: 'log out of Codex' },
+  { command: '/quit', title: 'Quit', description: 'exit Codex' },
+  { command: '/exit', title: 'Exit', description: 'exit Codex' },
+  { command: '/feedback', title: 'Feedback', description: 'send logs to maintainers' },
+  { command: '/rollout', title: 'Rollout', description: 'print the rollout file path' },
+  { command: '/ps', title: 'PS', description: 'list background terminals' },
+  { command: '/stop', title: 'Stop', description: 'stop all background terminals' },
+  { command: '/clean', title: 'Clean', description: 'alias for /stop' },
+  { command: '/clear', title: 'Clear', description: 'clear the terminal and start a new chat' },
+  { command: '/personality', title: 'Personality', description: 'choose a communication style for Codex' },
+  { command: '/realtime', title: 'Realtime', description: 'toggle realtime voice mode' },
+  { command: '/settings', title: 'Settings', description: 'configure realtime microphone/speaker' },
+  { command: '/test-approval', title: 'Test Approval', description: 'test approval request' },
+];
+
+const PERMISSION_PRESETS: PermissionPreset[] = [
+  {
+    id: 'read-only',
+    title: 'Read Only',
+    description: 'Codex can read files. Approval is required to edit files or access the internet.',
+    approvalPolicy: 'on-request',
+    sandboxMode: 'read-only',
+  },
+  {
+    id: 'default',
+    title: 'Default',
+    description: 'Codex can read and edit files in the current workspace. Approval is required for network or outside edits.',
+    approvalPolicy: 'on-request',
+    sandboxMode: 'workspace-write',
+  },
+  {
+    id: 'full-access',
+    title: 'Full Access',
+    description: 'Codex can edit files outside this workspace and access the internet without asking.',
+    approvalPolicy: 'never',
+    sandboxMode: 'danger-full-access',
+  },
 ];
 
 const defaultSettings: ConnectionSettings = {
@@ -436,119 +513,24 @@ function findMentionTrigger(text: string, cursor: number): MentionTrigger | null
   };
 }
 
-function pathFileName(path: string): string {
-  const parts = path.trim().split(/[\\/]/).filter(Boolean);
-  return parts[parts.length - 1] || path.trim();
-}
-
 function buildMentionSuggestions(
   trigger: MentionTrigger | null,
-  workspace: WorkspaceRecord | null,
-  conversation: ConversationRecord | null,
-  selectedRequest: PendingRequest | null,
-  mentionHistory: WorkspaceMentionHistory[],
+  entries: WorkspaceEntry[],
 ): MentionSuggestion[] {
   if (!trigger) {
     return [];
   }
 
-  const query = trigger.query.trim();
-  const normalizedQuery = query.toLowerCase();
-  const suggestions: MentionSuggestion[] = [];
-  const recentFiles = workspace
-    ? mentionHistory.find((item) => item.workspaceId === workspace.id)?.files ?? []
-    : [];
-
-  if (query) {
-    suggestions.push({
-      id: `file-${query}`,
-      title: `文件 ${pathFileName(query)}`,
-      description: query,
-      insertText: `@${query} `,
-    });
-
-    for (const path of recentFiles) {
-      if (!path.toLowerCase().includes(normalizedQuery)) {
-        continue;
-      }
-      suggestions.push({
-        id: `recent-file-${path}`,
-        title: `最近文件 ${pathFileName(path)}`,
-        description: path,
-        insertText: `@${path} `,
-      });
-    }
-  } else {
-    for (const path of recentFiles.slice(0, 4)) {
-      suggestions.push({
-        id: `recent-file-${path}`,
-        title: `最近文件 ${pathFileName(path)}`,
-        description: path,
-        insertText: `@${path} `,
-      });
-    }
-
-    for (const path of ['README.md', 'package.json', 'src/']) {
-      suggestions.push({
-        id: `file-template-${path}`,
-        title: `文件 ${path}`,
-        description: '输入 @ 后继续补相对路径也可以',
-        insertText: `@${path}`,
-      });
-    }
-  }
-
-  if (workspace) {
-    suggestions.push({
-      id: 'workspace-current',
-      title: '当前目录',
-      description: workspace.path,
-      insertText: `@workspace:${workspace.path} `,
-    });
-  }
-
-  if (conversation) {
-    suggestions.push({
-      id: 'conversation-current',
-      title: '当前对话',
-      description: conversation.title,
-      insertText: `@conversation:${conversation.title} `,
-    });
-  }
-
-  if (selectedRequest) {
-    suggestions.push({
-      id: `request-${selectedRequest.requestId}`,
-      title: '待处理请求',
-      description: selectedRequest.title,
-      insertText: `@request:${selectedRequest.requestId} `,
-    });
-  }
-
-  if (!normalizedQuery) {
-    return suggestions.filter((item, index, list) => list.findIndex((candidate) => candidate.insertText === item.insertText) === index).slice(0, 6);
-  }
-
-  return suggestions
-    .filter((item) => (
-      item.title.toLowerCase().includes(normalizedQuery) ||
-      item.description.toLowerCase().includes(normalizedQuery) ||
-      item.insertText.toLowerCase().includes(normalizedQuery)
-    ))
-    .filter((item, index, list) => list.findIndex((candidate) => candidate.insertText === item.insertText) === index)
-    .slice(0, 6);
+  return entries.slice(0, 8).map((entry) => ({
+    id: `${entry.kind}-${entry.path}`,
+    title: entry.kind === 'directory' ? `${entry.name}/` : entry.name,
+    description: entry.path,
+    insertText: entry.kind === 'directory' ? `@${entry.path}` : `@${entry.path} `,
+  }));
 }
 
 function insertMention(text: string, trigger: MentionTrigger, insertText: string): string {
   return `${text.slice(0, trigger.start)}${insertText}${text.slice(trigger.end)}`;
-}
-
-function insertTextAtSelection(
-  text: string,
-  selection: { start: number; end: number },
-  insertText: string,
-): string {
-  return `${text.slice(0, selection.start)}${insertText}${text.slice(selection.end)}`;
 }
 
 function parseMentionReferences(text: string): MentionReference[] {
@@ -1921,6 +1903,37 @@ export default function App() {
     [activeConversation, activeWorkspace, sendProtocolMessage],
   );
 
+  const applyPermissionPreset = useCallback(
+    (preset: PermissionPreset) => {
+      if (!activeWorkspace || !activeConversation) {
+        Alert.alert('未选择工作区', '请先选择一个工作区。');
+        return;
+      }
+      updateWorkspace(activeWorkspace.id, {
+        approvalPolicy: preset.approvalPolicy,
+        sandboxMode: preset.sandboxMode,
+      });
+      appendTimeline(makeSystemEntry(
+        `Permissions updated to ${preset.title}`,
+        preset.description,
+        activeWorkspace.id,
+        activeConversation.id,
+      ));
+    },
+    [activeConversation, activeWorkspace, appendTimeline, updateWorkspace],
+  );
+
+  const openPermissionsMenu = useCallback(() => {
+    Alert.alert(
+      'Update Model Permissions',
+      '选择 Codex 可以执行的操作范围。',
+      PERMISSION_PRESETS.map((preset) => ({
+        text: preset.title,
+        onPress: () => applyPermissionPreset(preset),
+      })),
+    );
+  }, [applyPermissionPreset]);
+
   const sendSlashCommand = useCallback(
     (input: string) => {
       const trimmed = input.trim();
@@ -1937,7 +1950,18 @@ export default function App() {
         return;
       }
 
-      if (lower === 'permission' || lower === 'approve' || lower === 'approval') {
+      if (lower === 'permissions' || lower === 'permission') {
+        const presetName = rest[0]?.toLowerCase() ?? '';
+        const preset = PERMISSION_PRESETS.find((candidate) => candidate.id === presetName || candidate.title.toLowerCase() === presetName);
+        if (preset) {
+          applyPermissionPreset(preset);
+          return;
+        }
+        openPermissionsMenu();
+        return;
+      }
+
+      if (lower === 'approve' || lower === 'approval') {
         const deny = /^(deny|decline|reject|no)$/i.test(rest[0] ?? '');
         const requestId = rest[1] || selectedRequest?.requestId || '';
         const target = pendingRequests.find((request) => request.requestId === requestId) ?? selectedRequest;
@@ -1972,6 +1996,27 @@ export default function App() {
         return;
       }
 
+      if (lower === 'clean') {
+        if (sendWorkspaceCommand(activeWorkspace, 'codex.local.stop', { force: false }, activeConversation)) {
+          updateConversation(activeConversation.id, { localAdapterState: 'stopped' });
+        }
+        return;
+      }
+
+      if (lower === 'clear' || lower === 'new') {
+        const conversation = createConversation(activeWorkspace.id);
+        if (conversation) {
+          selectConversation(activeWorkspace.id, conversation.id);
+        }
+        return;
+      }
+
+      if (lower === 'mention') {
+        setChatDraft('@');
+        setComposerSelection({ start: 1, end: 1 });
+        return;
+      }
+
       if (lower === 'attach') {
         attachWorkspaceConversation(activeWorkspace, activeConversation);
         return;
@@ -1993,42 +2038,43 @@ export default function App() {
         return;
       }
 
-      const preset = COMMAND_PRESETS.find((candidate) => (
-        candidate.type.toLowerCase() === lower ||
-        candidate.label.toLowerCase() === lower ||
-        candidate.type.toLowerCase() === trimmed.slice(1).toLowerCase()
-      ));
-      if (preset) {
-        const prompt = rest.join(' ');
-        const commandWorkspace = commandWorkspaceForConversation(activeWorkspace, activeConversation);
-        const threadId = normalizeThreadId(activeConversation.threadId || settings.defaultThreadId);
-        const payload = preset.build({
-          settings,
-          workspace: commandWorkspace,
-          threadId,
-          turnId,
-          prompt,
-          selectedRequest,
-        });
-        sendProtocolMessage(preset.type, payload);
+      if (lower === 'review') {
+        sendLocalTurn(rest.length > 0 ? `review ${rest.join(' ')}` : 'review my current changes and find issues');
         return;
       }
 
-      sendLocalTurn(trimmed);
+      const passthroughCommands = new Set(['compact', 'plan', 'goal', 'diff', 'status', 'mcp', 'ps', 'rollout']);
+      if (passthroughCommands.has(lower)) {
+        sendLocalTurn(trimmed);
+        return;
+      }
+
+      appendTimeline(makeSystemEntry(
+        `/${lower} 暂未在移动端实现`,
+        '该命令已按 Codex CLI 名称展示，但当前后端还没有对应的交互协议。',
+        activeWorkspace.id,
+        activeConversation.id,
+      ));
     },
     [
       activeConversation,
       activeWorkspace,
+      appendTimeline,
+      applyPermissionPreset,
+      createConversation,
+      openPermissionsMenu,
       pendingRequests,
+      selectConversation,
       selectedRequest,
       sendApprovalResponse,
       sendLocalTurn,
-      sendProtocolMessage,
       startLocalAdapter,
       sendWorkspaceCommand,
       attachWorkspaceConversation,
       settings,
       settings.defaultThreadId,
+      setChatDraft,
+      setComposerSelection,
       turnId,
       updateConversation,
     ],
@@ -2152,10 +2198,10 @@ export default function App() {
               {(props) => (
                 <ChatScreen
                   {...props}
+                  settings={settings}
                   workspaces={workspaces}
                   conversations={conversations}
                   timeline={timeline}
-                  mentionHistory={mentionHistory}
                   pendingRequests={pendingRequests}
                   selectedRequest={selectedRequest}
                   chatDraft={chatDraft}
@@ -2410,10 +2456,10 @@ function ConversationListScreen({
 function ChatScreen({
   navigation,
   route,
+  settings,
   workspaces,
   conversations,
   timeline,
-  mentionHistory,
   pendingRequests,
   selectedRequest,
   chatDraft,
@@ -2429,10 +2475,10 @@ function ChatScreen({
   runWorkspaceCommand,
   removeWorkspace,
 }: NativeStackScreenProps<RootStackParamList, 'Chat'> & {
+  settings: ConnectionSettings;
   workspaces: WorkspaceRecord[];
   conversations: ConversationRecord[];
   timeline: TimelineEntry[];
-  mentionHistory: WorkspaceMentionHistory[];
   pendingRequests: PendingRequest[];
   selectedRequest: PendingRequest | null;
   chatDraft: string;
@@ -2449,6 +2495,7 @@ function ChatScreen({
   removeWorkspace: (workspaceId: string) => void;
 }) {
   const [menuVisible, setMenuVisible] = useState(false);
+  const [mentionEntries, setMentionEntries] = useState<WorkspaceEntry[]>([]);
   const [expandedProgressIds, setExpandedProgressIds] = useState<Set<string>>(() => new Set());
   const [collapsedProgressIds, setCollapsedProgressIds] = useState<Set<string>>(() => new Set());
   const composerInputRef = useRef<TextInput | null>(null);
@@ -2497,14 +2544,45 @@ function ChatScreen({
       }).slice(0, 6)
     : [];
   const mentionTrigger = slashSuggestions.length === 0 ? findMentionTrigger(chatDraft, composerSelection.start) : null;
-  const mentionSuggestions = buildMentionSuggestions(mentionTrigger, workspace, conversation, selectedRequest, mentionHistory);
+  const mentionSuggestions = buildMentionSuggestions(mentionTrigger, mentionEntries);
 
-  const appendMentionTrigger = useCallback(() => {
-    setChatDraft((current) => insertTextAtSelection(current, composerSelection, '@'));
-    const nextCursor = composerSelection.start + 1;
-    setComposerSelection({ start: nextCursor, end: nextCursor });
-    requestAnimationFrame(() => composerInputRef.current?.focus());
-  }, [composerSelection, setChatDraft]);
+  useEffect(() => {
+    if (!mentionTrigger || !workspace) {
+      setMentionEntries([]);
+      return;
+    }
+
+    const controller = new AbortController();
+    const url = new URL(buildHttpUrl(settings.serverUrl, '/v1/workspace/entries'));
+    url.searchParams.set('cwd', workspace.path);
+    url.searchParams.set('query', mentionTrigger.query);
+    url.searchParams.set('limit', '40');
+
+    const headers = settings.authToken
+      ? { Authorization: `Bearer ${settings.authToken}` }
+      : undefined;
+
+    fetch(url.toString(), { headers, signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`workspace entries returned ${response.status}`);
+        }
+        return response.json() as Promise<{ entries?: WorkspaceEntry[] }>;
+      })
+      .then((json) => {
+        if (!controller.signal.aborted) {
+          setMentionEntries(Array.isArray(json.entries) ? json.entries : []);
+        }
+      })
+      .catch((error) => {
+        if (!controller.signal.aborted) {
+          setMentionEntries([]);
+          console.warn(error);
+        }
+      });
+
+    return () => controller.abort();
+  }, [mentionTrigger?.query, mentionTrigger?.start, settings.authToken, settings.serverUrl, workspace]);
 
   const selectMention = useCallback((item: MentionSuggestion) => {
     if (!mentionTrigger) {
@@ -2626,16 +2704,13 @@ function ChatScreen({
             ))}
           </View>
         ) : null}
-        <Pressable onPress={appendMentionTrigger} style={styles.mentionButton}>
-          <Text style={styles.mentionButtonText}>@</Text>
-        </Pressable>
         <TextInput
           ref={composerInputRef}
           value={chatDraft}
           onChangeText={setChatDraft}
           onSelectionChange={(event) => setComposerSelection(event.nativeEvent.selection)}
           selection={composerSelection}
-          placeholder="输入消息，@ 引用文件"
+          placeholder="输入消息，@ 引用文件，/ 输入命令"
           placeholderTextColor="#7a8391"
           style={styles.composerInput}
           multiline
@@ -3440,21 +3515,6 @@ const styles = StyleSheet.create({
     color: '#66717c',
     fontSize: 12,
     marginTop: 2,
-  },
-  mentionButton: {
-    width: 44,
-    minHeight: 44,
-    backgroundColor: '#ffffff',
-    borderWidth: 1,
-    borderColor: '#cfd5da',
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  mentionButtonText: {
-    color: '#17202a',
-    fontSize: 18,
-    fontWeight: '800',
   },
   composerInput: {
     flex: 1,
