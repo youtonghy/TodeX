@@ -165,7 +165,7 @@ function isThreadNotFound(text: string): boolean {
 
 function localTurnErrorMessage(text: string): string {
   if (isThreadNotFound(text)) {
-    return '缓存的 thread 已失效，下一次发送会自动创建新的 thread。';
+    return '当前对话的 thread 已失效，下一次发送会为该对话自动创建新的 thread。';
   }
   if (isLocalAdapterFailed(text)) {
     return '本地会话状态已失效，请重新发送消息以启动新的会话。';
@@ -1468,7 +1468,18 @@ export default function App() {
     const threadId = threadIdFromEventData(event, data);
     const conversations = conversationsRef.current;
     const bySession = sessionId ? conversations.find((conversation) => conversation.sessionId === sessionId) : null;
-    const byThread = threadId ? conversations.find((conversation) => normalizeThreadId(conversation.threadId) === threadId) : null;
+    if (sessionId && !bySession) {
+      return {
+        workspaceId: '',
+        conversationId: '',
+        conversation: null,
+        sessionId,
+        threadId,
+      };
+    }
+    const byThread = !sessionId && threadId
+      ? conversations.find((conversation) => normalizeThreadId(conversation.threadId) === threadId)
+      : null;
     const conversation = bySession ?? byThread ?? conversations.find((item) => item.id === activeConversationRef.current) ?? null;
 
     return {
@@ -2339,7 +2350,7 @@ export default function App() {
       const { workspace, conversation } = context;
       const sessionId = sessionIdForConversation(workspace, conversation);
       const commandWorkspace = commandWorkspaceForConversation(workspace, conversation);
-      const cachedThreadId = normalizeThreadId(conversation.threadId);
+      const conversationThreadId = normalizeThreadId(conversation.threadId);
       try {
         await startLocalAdapter(workspace, conversation);
       } catch (error) {
@@ -2350,7 +2361,7 @@ export default function App() {
 
       let threadId = '';
       try {
-        threadId = await ensureThreadId(workspace, conversation, !cachedThreadId);
+        threadId = await ensureThreadId(workspace, conversation, !conversationThreadId);
       } catch (error) {
         const message = error instanceof Error ? error.message : '创建 thread 失败';
         setLastError(message);
