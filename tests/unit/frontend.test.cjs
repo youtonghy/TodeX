@@ -8,7 +8,7 @@ const transportCrypto = require(path.join(compiledDir, 'transportCrypto.js'));
 let executedTests = 0;
 
 process.on('exit', () => {
-  assert.equal(executedTests, 6);
+  assert.equal(executedTests, 7);
 });
 
 function baseSettings(overrides = {}) {
@@ -179,6 +179,29 @@ test('resolves pairing links through the configured authenticated endpoint', asy
       encryptionProtocol: 'x25519',
       encryptionPublicKey: 'x-key',
     });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('explains unreachable local-only pairing links', async () => {
+  executedTests += 1;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new TypeError('Network request failed');
+  };
+
+  try {
+    await assert.rejects(
+      () => transportCrypto.resolvePairingPayload(JSON.stringify({
+        kind: 'todex-pairing-link',
+        version: 1,
+        serverUrl: 'http://127.0.0.1:7345',
+        pairingUrl: 'http://127.0.0.1:7345/v1/pairing',
+        authToken: 'secret',
+      })),
+      /地址只在后端本机可用/,
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }

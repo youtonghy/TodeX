@@ -62,9 +62,7 @@ export async function resolvePairingPayload(raw: string): Promise<ParsedPairing>
   if (parsed.version !== 1 || !parsed.pairingUrl) {
     throw new Error('不是有效的 TodeX 配对链接二维码');
   }
-  const response = await fetch(parsed.pairingUrl, {
-    headers: parsed.authToken ? { Authorization: `Bearer ${parsed.authToken}` } : undefined,
-  });
+  const response = await fetchPairingLink(parsed);
   if (!response.ok) {
     throw new Error(`读取后端配对密钥失败: HTTP ${response.status}`);
   }
@@ -130,6 +128,34 @@ export function applyPairingToSettings(
     encryptionProtocol: pairing.encryptionProtocol,
     encryptionPublicKey: pairing.encryptionPublicKey,
   };
+}
+
+async function fetchPairingLink(parsed: Partial<PairingLinkPayload>): Promise<Response> {
+  try {
+    return await fetch(parsed.pairingUrl!, {
+      headers: parsed.authToken ? { Authorization: `Bearer ${parsed.authToken}` } : undefined,
+    });
+  } catch (error) {
+    throw new Error(pairingNetworkErrorMessage(parsed.pairingUrl!, error));
+  }
+}
+
+function pairingNetworkErrorMessage(pairingUrl: string, error: unknown): string {
+  const detail = error instanceof Error && error.message ? ` (${error.message})` : '';
+  const hint =
+    pairingUrlHasLocalOnlyHost(pairingUrl)
+      ? '二维码里的地址只在后端本机可用。请用 `cargo run -- tui --host 0.0.0.0` 或在 TUI 里把 listen IP 改成 0.0.0.0 后重启服务，再重新扫码。'
+      : '请确认手机和后端在同一网络、后端监听的是 0.0.0.0 或局域网 IP，并且移动端构建已允许 HTTP 明文访问。';
+  return `无法连接后端配对接口${detail}。${hint}`;
+}
+
+function pairingUrlHasLocalOnlyHost(pairingUrl: string): boolean {
+  try {
+    const host = new URL(pairingUrl).hostname.toLowerCase();
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '0.0.0.0' || host === '::';
+  } catch {
+    return false;
+  }
 }
 
 export function createTransportCryptoSession(settings: ConnectionSettings): TransportCryptoSession | null {
