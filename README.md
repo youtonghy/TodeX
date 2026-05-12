@@ -13,7 +13,8 @@ TodeX App is the mobile client for connecting to `todex-agentd`, managing worksp
 - `/` 命令：内置命令补全和命令路由，不是 shell 执行
 - 审批处理：支持命令执行、权限、工具请求等审批卡片
 - 运行控制：启动、状态、附加、中断、停止本地 Codex 会话
-- 设置保存：连接地址、token、tenant、默认目录、默认模型、权限和沙盒模式
+- 设置保存：连接地址、token、tenant、可选传输加密、默认目录、默认模型、权限和沙盒模式
+- 配对连接：扫描后端 TUI 二维码，一键导入地址、端口、token 和 X25519/ML-KEM-768 公钥
 
 - Workspace management: add, rename, fork, and delete directories
 - Conversation management: multiple conversations per workspace
@@ -22,7 +23,8 @@ TodeX App is the mobile client for connecting to `todex-agentd`, managing worksp
 - `/` commands: built-in command completion and routing, not shell execution
 - Approval handling: command, permission, and tool request cards
 - Runtime controls: start, status, attach, interrupt, and stop local Codex sessions
-- Settings persistence: server URL, token, tenant, default path, default model, approval policy, and sandbox mode
+- Settings persistence: server URL, token, tenant, optional transport encryption, default path, default model, approval policy, and sandbox mode
+- Pairing connection: scan the backend TUI QR to import address, port, token, and X25519/ML-KEM-768 public keys
 
 ## 快速开始 / Quick Start
 
@@ -57,7 +59,7 @@ npm run web
 ## 使用方式 / How to Use
 
 1. 先启动 `TodeX_backend`。
-2. 打开 App，在设置里填写后端地址和 `Auth token`。
+2. 打开 App，在设置里扫描后端 TUI 的配对二维码，或手动填写后端地址和 `Auth token`。
 3. 新建一个工作区，选择本地目录。
 4. 进入对话，开始发送消息。
 5. 输入 `@` 选择文件，输入 `/` 选择内置命令。
@@ -147,4 +149,3 @@ The app persists settings, workspaces, conversations, timeline data, mention his
 - Default model: `gpt-5.5`
 - Default approval policy: `on-request`
 - Default sandbox: `workspace-write`
-
