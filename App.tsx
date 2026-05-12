@@ -108,6 +108,28 @@ type PendingThreadStart = {
   timeoutId: ReturnType<typeof setTimeout>;
 };
 
+type ConversationContext = {
+  workspace: WorkspaceRecord;
+  conversation: ConversationRecord;
+};
+
+type TimelineTarget = {
+  workspaceId: string;
+  conversationId: string;
+};
+
+type ConnectionState = 'idle' | 'connecting' | 'open' | 'closed' | 'error';
+
+type ConnectionHealth = {
+  status: 'unknown' | 'checking' | 'online' | 'offline';
+  latencyMs: number | null;
+  lastCheckedAt: number | null;
+  error: string;
+};
+
+const CONNECTION_HEALTH_INTERVAL_MS = 5000;
+const CONNECTION_HEALTH_TIMEOUT_MS = 3500;
+
 function localConversationStateOf(conversation: ConversationRecord | null): LocalAdapterState {
   return conversation?.localAdapterState ?? 'idle';
 }
@@ -452,6 +474,13 @@ const defaultSettings: ConnectionSettings = {
   sandboxMode: 'workspace-write',
 };
 
+const defaultConnectionHealth: ConnectionHealth = {
+  status: 'unknown',
+  latencyMs: null,
+  lastCheckedAt: null,
+  error: '',
+};
+
 function toPersistedSettings(settings: ConnectionSettings): PersistedSettings {
   const { authToken: _authToken, ...rest } = settings;
   return rest;
@@ -487,6 +516,40 @@ function nowLabel(timestamp: number): string {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+function connectionStateLabel(state: ConnectionState): string {
+  switch (state) {
+    case 'open':
+      return '已连接';
+    case 'connecting':
+      return '连接中';
+    case 'closed':
+      return '已断开';
+    case 'error':
+      return '连接异常';
+    case 'idle':
+    default:
+      return '未连接';
+  }
+}
+
+function latencyLabelOf(latencyMs: number | null): string {
+  return latencyMs === null ? '未检测' : `${latencyMs} ms`;
+}
+
+function healthLabelOf(health: ConnectionHealth): string {
+  switch (health.status) {
+    case 'online':
+      return `后端在线 · ${latencyLabelOf(health.latencyMs)}`;
+    case 'checking':
+      return health.latencyMs === null ? '检测中' : `检测中 · ${latencyLabelOf(health.latencyMs)}`;
+    case 'offline':
+      return health.error || '后端不可达';
+    case 'unknown':
+    default:
+      return '等待检测';
+  }
 }
 
 function modeLabelOf(mode: ConversationRecord['mode']): string {
@@ -1024,6 +1087,7 @@ export default function App() {
   const sessionCursorsRef = useRef(new Map<string, number>());
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const manualDisconnectRef = useRef(false);
+  const healthProbeSeqRef = useRef(0);
 
   const [hydrated, setHydrated] = useState(false);
   const [autoConnectEnabled, setAutoConnectEnabled] = useState(false);
@@ -1032,7 +1096,8 @@ export default function App() {
   const [conversations, setConversations] = useState<ConversationRecord[]>([]);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState('');
   const [activeConversationId, setActiveConversationId] = useState('');
-  const [connectionState, setConnectionState] = useState<'idle' | 'connecting' | 'open' | 'closed' | 'error'>('idle');
+  const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
+  const [connectionHealth, setConnectionHealth] = useState<ConnectionHealth>(defaultConnectionHealth);
   const [lastError, setLastError] = useState('');
   const [serverVersion, setServerVersion] = useState<ServerVersion | null>(null);
   const [events, setEvents] = useState<ServerEvent[]>([]);
@@ -1046,7 +1111,7 @@ export default function App() {
   const [thinkingConversations, setThinkingConversations] = useState<Record<string, boolean>>({});
   const queuedChatDraftsRef = useRef<Record<string, string[]>>({});
   const queuedChatDispatchingRef = useRef(new Set<string>());
-  const sendQueuedChatDraftRef = useRef<(text: string) => Promise<boolean>>(async () => false);
+  const sendQueuedChatDraftRef = useRef<(text: string, conversationId: string) => Promise<boolean>>(async () => false);
 
   const activeTurnId = activeConversationId ? turnIds[activeConversationId] ?? '' : '';
 
@@ -1115,6 +1180,7 @@ export default function App() {
     if (manual) {
       manualDisconnectRef.current = true;
       setAutoConnectEnabled(false);
+      setConnectionState('closed');
     }
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
@@ -1297,6 +1363,14 @@ export default function App() {
     () => conversations.find((item) => item.id === activeConversationId) ?? null,
     [activeConversationId, conversations],
   );
+
+  const getConversationContext = useCallback((conversationId = activeConversationRef.current): ConversationContext | null => {
+    const conversation = conversationsRef.current.find((item) => item.id === conversationId) ?? null;
+    const workspace = conversation
+      ? workspacesRef.current.find((item) => item.id === conversation.workspaceId) ?? null
+      : null;
+    return workspace && conversation ? { workspace, conversation } : null;
+  }, []);
 
   const pendingRequests = useMemo<PendingRequest[]>(() => {
     const open = new Map<string, PendingRequest>();
@@ -1553,13 +1627,12 @@ export default function App() {
         const nextQueuedDraft = queuedDrafts[0]?.trim() ?? '';
         if (
           nextQueuedDraft &&
-          activeConversationRef.current === targetConversationId &&
           !queuedChatDispatchingRef.current.has(targetConversationId)
         ) {
           queuedChatDispatchingRef.current.add(targetConversationId);
           void (async () => {
             try {
-              const sent = await sendQueuedChatDraftRef.current(nextQueuedDraft);
+              const sent = await sendQueuedChatDraftRef.current(nextQueuedDraft, targetConversationId);
               if (sent) {
                 setQueuedChatDrafts((current) => {
                   const queue = current[targetConversationId] ?? [];
@@ -1697,6 +1770,70 @@ export default function App() {
     }
   }, [settings.serverUrl]);
 
+  const checkConnectionHealth = useCallback(async () => {
+    const probeId = healthProbeSeqRef.current + 1;
+    healthProbeSeqRef.current = probeId;
+    const startedAt = Date.now();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), CONNECTION_HEALTH_TIMEOUT_MS);
+
+    setConnectionHealth((current) => ({
+      ...current,
+      status: current.status === 'online' ? 'online' : 'checking',
+      error: '',
+    }));
+
+    try {
+      const response = await fetch(buildHttpUrl(settings.serverUrl, '/health'), {
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+      const latencyMs = Date.now() - startedAt;
+      if (healthProbeSeqRef.current !== probeId) {
+        return;
+      }
+      if (!response.ok) {
+        throw new Error(`health endpoint returned ${response.status}`);
+      }
+      setConnectionHealth({
+        status: 'online',
+        latencyMs,
+        lastCheckedAt: Date.now(),
+        error: '',
+      });
+    } catch (error) {
+      if (healthProbeSeqRef.current !== probeId) {
+        return;
+      }
+      const isAbort = error instanceof Error && error.name === 'AbortError';
+      setConnectionHealth({
+        status: 'offline',
+        latencyMs: null,
+        lastCheckedAt: Date.now(),
+        error: isAbort ? '健康检查超时' : error instanceof Error ? error.message : '健康检查失败',
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }, [settings.serverUrl]);
+
+  useEffect(() => {
+    if (!hydrated) {
+      return;
+    }
+
+    setConnectionHealth(defaultConnectionHealth);
+    void checkConnectionHealth();
+
+    const intervalId = setInterval(() => {
+      void checkConnectionHealth();
+    }, CONNECTION_HEALTH_INTERVAL_MS);
+
+    return () => {
+      clearInterval(intervalId);
+    };
+  }, [checkConnectionHealth, hydrated]);
+
   const connect = useCallback(() => {
     manualDisconnectRef.current = false;
     autoConnectAttemptedRef.current = true;
@@ -1720,6 +1857,7 @@ export default function App() {
         attachedSessionIdsRef.current.clear();
         setConnectionState('open');
         pushSystem('已连接', wsUrl);
+        void checkConnectionHealth();
         void refreshServerVersion();
       };
 
@@ -1738,14 +1876,14 @@ export default function App() {
       };
 
       socket.onclose = () => {
-        setConnectionState((current) => (current === 'open' ? 'closed' : current));
+        setConnectionState((current) => (current === 'open' || current === 'connecting' ? 'closed' : current));
         pushSystem('已断开', wsUrl);
       };
     } catch (error) {
       setConnectionState('error');
       setLastError(error instanceof Error ? error.message : 'failed to connect');
     }
-  }, [appendEvent, closeSocket, pushSystem, refreshServerVersion, settings.authToken, settings.serverUrl]);
+  }, [appendEvent, checkConnectionHealth, closeSocket, pushSystem, refreshServerVersion, settings.authToken, settings.serverUrl]);
 
   useEffect(() => {
     if (!hydrated || !autoConnectEnabled || manualDisconnectRef.current) {
@@ -1781,7 +1919,12 @@ export default function App() {
   }, [autoConnectEnabled, connect, hydrated]);
 
   const sendProtocolMessage = useCallback(
-    (type: string, payload: Record<string, unknown>, requestId = createRequestId('msg')) => {
+    (
+      type: string,
+      payload: Record<string, unknown>,
+      requestId = createRequestId('msg'),
+      target?: TimelineTarget,
+    ) => {
       const socket = socketRef.current;
       if (!socket || socket.readyState !== WebSocket.OPEN) {
         setLastError('请先在设置里连接后端。');
@@ -1791,7 +1934,11 @@ export default function App() {
       const message = { id: requestId, type, payload };
       socket.send(JSON.stringify(message));
       if (type === 'codex.local.turn') {
-        appendTimeline(makeOutgoingEntry(message, activeWorkspaceRef.current, activeConversationRef.current));
+        appendTimeline(makeOutgoingEntry(
+          message,
+          target?.workspaceId ?? activeWorkspaceRef.current,
+          target?.conversationId ?? activeConversationRef.current,
+        ));
       }
       return true;
     },
@@ -2182,17 +2329,19 @@ export default function App() {
   );
 
   const sendLocalTurn = useCallback(
-    async (text: string, mode: ConversationRecord['mode'] = 'implement') => {
-      if (!activeWorkspace || !activeConversation) {
+    async (text: string, mode: ConversationRecord['mode'] = 'implement', conversationId = activeConversationRef.current) => {
+      const context = getConversationContext(conversationId);
+      if (!context) {
         Alert.alert('未选择对话', '请先选择工作区和对话。');
         return false;
       }
 
-      const activeSessionId = sessionIdForConversation(activeWorkspace, activeConversation);
-      const activeCommandWorkspace = commandWorkspaceForConversation(activeWorkspace, activeConversation);
-      const cachedThreadId = normalizeThreadId(activeConversation.threadId);
+      const { workspace, conversation } = context;
+      const sessionId = sessionIdForConversation(workspace, conversation);
+      const commandWorkspace = commandWorkspaceForConversation(workspace, conversation);
+      const cachedThreadId = normalizeThreadId(conversation.threadId);
       try {
-        await startLocalAdapter(activeWorkspace, activeConversation);
+        await startLocalAdapter(workspace, conversation);
       } catch (error) {
         const message = error instanceof Error ? error.message : '本地会话未启动';
         setLastError(localTurnErrorMessage(message));
@@ -2201,40 +2350,43 @@ export default function App() {
 
       let threadId = '';
       try {
-        threadId = await ensureThreadId(activeWorkspace, activeConversation, !cachedThreadId);
+        threadId = await ensureThreadId(workspace, conversation, !cachedThreadId);
       } catch (error) {
         const message = error instanceof Error ? error.message : '创建 thread 失败';
         setLastError(message);
         return false;
       }
 
-      setConversationThinking(activeConversation.id, true);
-      appendTimeline(makeSystemEntry('正在思考', '请求已发出，等待 Codex 返回中间步骤...', activeWorkspace.id, activeConversation.id));
+      setConversationThinking(conversation.id, true);
+      appendTimeline(makeSystemEntry('正在思考', '请求已发出，等待 Codex 返回中间步骤...', workspace.id, conversation.id));
 
       const payload = {
-        codexSessionId: activeSessionId,
-        tenantId: activeWorkspace.tenantId,
+        codexSessionId: sessionId,
+        tenantId: workspace.tenantId,
         threadId,
         input: [{ type: 'text', text }],
-        approvalPolicy: activeWorkspace.approvalPolicy || settings.approvalPolicy || undefined,
-        sandboxPolicy: sandboxPolicyForMode(activeWorkspace.sandboxMode || settings.sandboxMode),
-        serviceTier: activeWorkspace.serviceTier || undefined,
+        approvalPolicy: workspace.approvalPolicy || settings.approvalPolicy || undefined,
+        sandboxPolicy: sandboxPolicyForMode(workspace.sandboxMode || settings.sandboxMode),
+        serviceTier: workspace.serviceTier || undefined,
         collaborationMode: {
           mode: 'default',
           settings: {
-            model: activeWorkspace.model || settings.defaultModel,
+            model: workspace.model || settings.defaultModel,
             developerInstructions: null,
           },
         },
       };
 
-      if (sendProtocolMessage('codex.local.turn', payload)) {
+      if (sendProtocolMessage('codex.local.turn', payload, createRequestId('msg'), {
+        workspaceId: workspace.id,
+        conversationId: conversation.id,
+      })) {
         setConversations((current) =>
           current.map((conversation) =>
-            conversation.id === activeConversation.id
+            conversation.id === context.conversation.id
               ? {
                   ...conversation,
-                  sessionId: activeCommandWorkspace.sessionId,
+                  sessionId: commandWorkspace.sessionId,
                   threadId,
                   mode,
                   title: conversation.title === '默认对话' ? text.slice(0, 18) || conversation.title : conversation.title,
@@ -2246,31 +2398,43 @@ export default function App() {
         return true;
       }
 
-      setConversationThinking(activeConversation.id, false);
+      setConversationThinking(conversation.id, false);
       return false;
     },
-    [activeConversation, activeWorkspace, appendTimeline, ensureThreadId, sendProtocolMessage, setConversationThinking, settings.approvalPolicy, settings.defaultModel, settings.sandboxMode, startLocalAdapter],
+    [appendTimeline, ensureThreadId, getConversationContext, sendProtocolMessage, setConversationThinking, settings.approvalPolicy, settings.defaultModel, settings.sandboxMode, startLocalAdapter],
   );
 
   useEffect(() => {
-    sendQueuedChatDraftRef.current = sendLocalTurn;
+    sendQueuedChatDraftRef.current = (text, conversationId) => sendLocalTurn(text, 'implement', conversationId);
   }, [sendLocalTurn]);
 
   const sendApprovalResponse = useCallback(
     (accepted: boolean, request: PendingRequest) => {
-      if (!activeWorkspace || !activeConversation) {
+      const data = eventPayloadData(request.event);
+      const requestSessionId = sessionIdFromEvent(request.event, data);
+      const conversation = requestSessionId
+        ? conversationsRef.current.find((item) => item.sessionId === requestSessionId) ?? null
+        : null;
+      const workspace = conversation
+        ? workspacesRef.current.find((item) => item.id === conversation.workspaceId) ?? null
+        : null;
+
+      if (!requestSessionId || !workspace || !conversation) {
         Alert.alert('未选择工作区', '请先选择一个工作区。');
         return;
       }
       sendProtocolMessage('codex.local.approval.respond', {
-        codexSessionId: sessionIdForConversation(activeWorkspace, activeConversation),
-        tenantId: activeWorkspace.tenantId,
+        codexSessionId: requestSessionId,
+        tenantId: workspace.tenantId,
         requestId: request.requestId,
         responseType: inferApprovalResponseType(request.requestType),
         response: approvalResponsePayload(request, accepted),
+      }, createRequestId('msg'), {
+        workspaceId: workspace.id,
+        conversationId: conversation.id,
       });
     },
-    [activeConversation, activeWorkspace, sendProtocolMessage],
+    [sendProtocolMessage],
   );
 
   const applyPermissionPreset = useCallback(
@@ -2305,27 +2469,29 @@ export default function App() {
   }, [applyPermissionPreset]);
 
   const sendSlashCommand = useCallback(
-    (input: string) => {
+    (input: string, conversationId = activeConversationRef.current) => {
       const trimmed = input.trim();
       if (!trimmed.startsWith('/')) {
-        sendLocalTurn(trimmed);
+        sendLocalTurn(trimmed, 'implement', conversationId);
         return;
       }
 
       const [command, ...rest] = trimmed.slice(1).trim().split(/\s+/);
       const lower = command.toLowerCase();
+      const context = getConversationContext(conversationId);
 
-      if (!activeWorkspace || !activeConversation) {
+      if (!context) {
         Alert.alert('未选择工作区', '请先选择一个工作区。');
         return;
       }
 
+      const { workspace, conversation } = context;
       const addCommandNotice = (title: string, detail: string) => {
-        appendTimeline(makeSystemEntry(title, detail, activeWorkspace.id, activeConversation.id));
+        appendTimeline(makeSystemEntry(title, detail, workspace.id, conversation.id));
       };
 
       const sendLocalMethod = (method: string, params: Record<string, unknown>, title: string, detail: string) => {
-        if (sendWorkspaceCommand(activeWorkspace, 'codex.local.request', { method, params }, activeConversation)) {
+        if (sendWorkspaceCommand(workspace, 'codex.local.request', { method, params }, conversation)) {
           addCommandNotice(title, detail);
         }
       };
@@ -2333,8 +2499,8 @@ export default function App() {
       const sendThreadMethod = (method: string, makeParams: (threadId: string) => Record<string, unknown>, title: string, detail: string) => {
         void (async () => {
           try {
-            await startLocalAdapter(activeWorkspace, activeConversation);
-            const threadId = await ensureThreadId(activeWorkspace, activeConversation, !normalizeThreadId(activeConversation.threadId));
+            await startLocalAdapter(workspace, conversation);
+            const threadId = await ensureThreadId(workspace, conversation, !normalizeThreadId(conversation.threadId));
             sendLocalMethod(method, makeParams(threadId), title, detail);
           } catch (error) {
             const message = error instanceof Error ? error.message : `${title} 失败`;
@@ -2347,7 +2513,11 @@ export default function App() {
         const presetName = rest[0]?.toLowerCase() ?? '';
         const preset = PERMISSION_PRESETS.find((candidate) => candidate.id === presetName || candidate.title.toLowerCase() === presetName);
         if (preset) {
-          applyPermissionPreset(preset);
+          updateWorkspace(workspace.id, {
+            approvalPolicy: preset.approvalPolicy,
+            sandboxMode: preset.sandboxMode,
+          });
+          addCommandNotice(`Permissions updated to ${preset.title}`, preset.description);
           return;
         }
         openPermissionsMenu();
@@ -2357,27 +2527,27 @@ export default function App() {
       if (lower === 'model') {
         const nextModel = rest[0]?.trim() ?? '';
         if (!nextModel) {
-          Alert.alert('Model', activeWorkspace.model || settings.defaultModel || '未设置模型');
+          Alert.alert('Model', workspace.model || settings.defaultModel || '未设置模型');
           return;
         }
-        updateWorkspace(activeWorkspace.id, { model: nextModel });
+        updateWorkspace(workspace.id, { model: nextModel });
         appendTimeline(makeSystemEntry(
           `Model updated to ${nextModel}`,
           '后续新 thread 和 turn 会把该模型作为 Codex app-server 的 model 参数发送。',
-          activeWorkspace.id,
-          activeConversation.id,
+          workspace.id,
+          conversation.id,
         ));
         return;
       }
 
       if (lower === 'fast') {
-        const enabled = activeWorkspace.serviceTier !== 'priority';
-        updateWorkspace(activeWorkspace.id, { serviceTier: enabled ? 'priority' : null });
+        const enabled = workspace.serviceTier !== 'priority';
+        updateWorkspace(workspace.id, { serviceTier: enabled ? 'priority' : null });
         appendTimeline(makeSystemEntry(
           enabled ? 'Fast mode enabled' : 'Fast mode disabled',
           enabled ? '后续新 thread 和 turn 会发送 serviceTier=priority。' : '后续请求会回到默认服务层级。',
-          activeWorkspace.id,
-          activeConversation.id,
+          workspace.id,
+          conversation.id,
         ));
         return;
       }
@@ -2395,17 +2565,17 @@ export default function App() {
       }
 
       if (lower === 'skills') {
-        sendLocalMethod('skills/list', { cwds: [activeWorkspace.path], forceReload: /reload|refresh|true|1/i.test(rest[0] ?? '') }, 'Skills requested', '已请求 Codex app-server 扫描当前工作区 Skills。');
+        sendLocalMethod('skills/list', { cwds: [workspace.path], forceReload: /reload|refresh|true|1/i.test(rest[0] ?? '') }, 'Skills requested', '已请求 Codex app-server 扫描当前工作区 Skills。');
         return;
       }
 
       if (lower === 'hooks') {
-        sendLocalMethod('hooks/list', { cwds: [activeWorkspace.path] }, 'Hooks requested', '已请求 Codex app-server 列出当前工作区 hooks。');
+        sendLocalMethod('hooks/list', { cwds: [workspace.path] }, 'Hooks requested', '已请求 Codex app-server 列出当前工作区 hooks。');
         return;
       }
 
       if (lower === 'plugins') {
-        sendLocalMethod('plugin/list', { cwds: [activeWorkspace.path], extraUserRoots: [] }, 'Plugins requested', '已请求 Codex app-server 列出插件。');
+        sendLocalMethod('plugin/list', { cwds: [workspace.path], extraUserRoots: [] }, 'Plugins requested', '已请求 Codex app-server 列出插件。');
         return;
       }
 
@@ -2415,7 +2585,7 @@ export default function App() {
       }
 
       if (lower === 'mcp') {
-        sendWorkspaceCommand(activeWorkspace, 'codex.mcp.server.listStatus', {}, activeConversation);
+        sendWorkspaceCommand(workspace, 'codex.mcp.server.listStatus', {}, conversation);
         addCommandNotice('MCP status requested', rest[0] === 'verbose' ? '已请求 MCP server 状态；详细事件会在时间线中返回。' : '已请求 MCP server 状态。');
         return;
       }
@@ -2430,12 +2600,12 @@ export default function App() {
         const objective = subcommand === 'set' ? rest.slice(1).join(' ').trim() : rest.join(' ').trim();
         const method = subcommand === 'clear' ? 'thread/goal/clear' : objective ? 'thread/goal/set' : 'thread/goal/get';
         if (method === 'thread/goal/set') {
-          updateConversation(activeConversation.id, {
+          updateConversation(conversation.id, {
             goalStatus: 'active',
             goalObjective: objective,
           });
         } else if (method === 'thread/goal/clear') {
-          updateConversation(activeConversation.id, {
+          updateConversation(conversation.id, {
             goalStatus: '',
             goalObjective: '',
           });
@@ -2455,9 +2625,9 @@ export default function App() {
           Alert.alert('Rename', '请输入新的对话标题。');
           return;
         }
-        updateConversation(activeConversation.id, { title: nextTitle });
-        if (activeConversation.threadId) {
-          sendLocalMethod('thread/name/set', { threadId: activeConversation.threadId, name: nextTitle }, 'Thread rename sent', nextTitle);
+        updateConversation(conversation.id, { title: nextTitle });
+        if (conversation.threadId) {
+          sendLocalMethod('thread/name/set', { threadId: conversation.threadId, name: nextTitle }, 'Thread rename sent', nextTitle);
         } else {
           addCommandNotice('Conversation renamed', nextTitle);
         }
@@ -2470,78 +2640,78 @@ export default function App() {
       }
 
       if (lower === 'start') {
-        void startLocalAdapter(activeWorkspace, activeConversation).catch(() => undefined);
+        void startLocalAdapter(workspace, conversation).catch(() => undefined);
         return;
       }
 
       if (lower === 'status') {
-        sendWorkspaceCommand(activeWorkspace, 'codex.local.status', {}, activeConversation);
+        sendWorkspaceCommand(workspace, 'codex.local.status', {}, conversation);
         return;
       }
 
       if (lower === 'stop') {
-        if (activeConversation.threadId) {
-          sendLocalMethod('thread/backgroundTerminals/clean', { threadId: activeConversation.threadId }, 'Background terminals clean requested', '已请求 Codex 清理后台终端。');
+        if (conversation.threadId) {
+          sendLocalMethod('thread/backgroundTerminals/clean', { threadId: conversation.threadId }, 'Background terminals clean requested', '已请求 Codex 清理后台终端。');
         }
-        if (sendWorkspaceCommand(activeWorkspace, 'codex.local.stop', { force: false }, activeConversation)) {
-          const pending = pendingLocalStartsRef.current.get(activeConversation.id);
+        if (sendWorkspaceCommand(workspace, 'codex.local.stop', { force: false }, conversation)) {
+          const pending = pendingLocalStartsRef.current.get(conversation.id);
           if (pending) {
             clearTimeout(pending.timeoutId);
-            pendingLocalStartsRef.current.delete(activeConversation.id);
+            pendingLocalStartsRef.current.delete(conversation.id);
             pending.reject(new Error('本地会话已停止'));
           }
-          updateConversation(activeConversation.id, { localAdapterState: 'stopped' });
+          updateConversation(conversation.id, { localAdapterState: 'stopped' });
         }
         return;
       }
 
       if (lower === 'clean') {
-        if (activeConversation.threadId) {
-          sendLocalMethod('thread/backgroundTerminals/clean', { threadId: activeConversation.threadId }, 'Background terminals clean requested', '已请求 Codex 清理后台终端。');
+        if (conversation.threadId) {
+          sendLocalMethod('thread/backgroundTerminals/clean', { threadId: conversation.threadId }, 'Background terminals clean requested', '已请求 Codex 清理后台终端。');
         }
-        if (sendWorkspaceCommand(activeWorkspace, 'codex.local.stop', { force: false }, activeConversation)) {
-          updateConversation(activeConversation.id, { localAdapterState: 'stopped' });
+        if (sendWorkspaceCommand(workspace, 'codex.local.stop', { force: false }, conversation)) {
+          updateConversation(conversation.id, { localAdapterState: 'stopped' });
         }
         return;
       }
 
       if (lower === 'clear' || lower === 'new') {
-        const conversation = createConversation(activeWorkspace.id);
-        if (conversation) {
-          selectConversation(activeWorkspace.id, conversation.id);
+        const nextConversation = createConversation(workspace.id);
+        if (nextConversation) {
+          selectConversation(workspace.id, nextConversation.id);
         }
         return;
       }
 
       if (lower === 'mention') {
-        setConversationChatDraft(activeConversation.id, '@');
-        setConversationComposerSelection(activeConversation.id, { start: 1, end: 1 });
+        setConversationChatDraft(conversation.id, '@');
+        setConversationComposerSelection(conversation.id, { start: 1, end: 1 });
         return;
       }
 
       if (lower === 'attach') {
-        attachWorkspaceConversation(activeWorkspace, activeConversation);
+        attachWorkspaceConversation(workspace, conversation);
         return;
       }
 
       if (lower === 'replay') {
-        sendWorkspaceCommand(activeWorkspace, 'codex.local.replay', {
+        sendWorkspaceCommand(workspace, 'codex.local.replay', {
           afterCursor: null,
           limit: 200,
-        }, activeConversation);
+        }, conversation);
         return;
       }
 
       if (lower === 'interrupt') {
-        const threadId = normalizeThreadId(activeConversation.threadId);
+        const threadId = normalizeThreadId(conversation.threadId);
         if (!threadId) {
           setLastError('当前对话还没有可中断的 thread。');
           return;
         }
-        sendWorkspaceCommand(activeWorkspace, 'codex.local.interrupt', {
+        sendWorkspaceCommand(workspace, 'codex.local.interrupt', {
           threadId,
-          turnId: activeTurnId || '',
-        }, activeConversation);
+          turnId: turnIds[conversation.id] || '',
+        }, conversation);
         return;
       }
 
@@ -2561,17 +2731,17 @@ export default function App() {
       }
 
       if (lower === 'init') {
-        sendLocalTurn('create or update an AGENTS.md file with concise project instructions for Codex');
+        sendLocalTurn('create or update an AGENTS.md file with concise project instructions for Codex', 'implement', conversation.id);
         return;
       }
 
       if (lower === 'plan') {
-        sendLocalTurn(rest.length > 0 ? `make a plan for: ${rest.join(' ')}` : 'switch into planning mode and create a concise implementation plan', 'plan');
+        sendLocalTurn(rest.length > 0 ? `make a plan for: ${rest.join(' ')}` : 'switch into planning mode and create a concise implementation plan', 'plan', conversation.id);
         return;
       }
 
       if (lower === 'diff') {
-        sendLocalTurn('show and summarize the current git diff, including untracked files when relevant');
+        sendLocalTurn('show and summarize the current git diff, including untracked files when relevant', 'implement', conversation.id);
         return;
       }
 
@@ -2619,13 +2789,13 @@ export default function App() {
       }
 
       if (lower === 'test-approval') {
-        sendLocalTurn('trigger a harmless approval test if the current Codex environment supports it');
+        sendLocalTurn('trigger a harmless approval test if the current Codex environment supports it', 'implement', conversation.id);
         return;
       }
 
       if (lower === 'quit' || lower === 'exit') {
-        if (sendWorkspaceCommand(activeWorkspace, 'codex.local.stop', { force: false }, activeConversation)) {
-          updateConversation(activeConversation.id, { localAdapterState: 'stopped' });
+        if (sendWorkspaceCommand(workspace, 'codex.local.stop', { force: false }, conversation)) {
+          updateConversation(conversation.id, { localAdapterState: 'stopped' });
           addCommandNotice(`/${lower} recognized`, '已停止当前本地 Codex 会话；移动端应用不会退出。');
         }
         return;
@@ -2634,12 +2804,10 @@ export default function App() {
       addCommandNotice(`/${lower} recognized`, '该命令不在当前内置命令清单中，已阻止作为普通 prompt 发送。');
     },
     [
-      activeConversation,
-      activeWorkspace,
       appendTimeline,
-      applyPermissionPreset,
       createConversation,
       ensureThreadId,
+      getConversationContext,
       openPermissionsMenu,
       pendingRequests,
       selectConversation,
@@ -2653,7 +2821,7 @@ export default function App() {
       setConversationChatDraft,
       setConversationComposerSelection,
       setLastError,
-      activeTurnId,
+      turnIds,
       updateConversation,
       updateWorkspace,
     ],
@@ -2683,13 +2851,19 @@ export default function App() {
     if (!text) {
       return;
     }
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择工作区', '请先选择一个工作区。');
+      return;
+    }
+    const { workspace } = context;
     const isThinking = thinkingConversations[conversationId] === true;
     const mentionReferences = parseMentionReferences(text);
-    if (activeWorkspace && mentionReferences.length > 0) {
-      rememberMentionReferences(activeWorkspace.id, mentionReferences);
+    if (mentionReferences.length > 0) {
+      rememberMentionReferences(workspace.id, mentionReferences);
       const mentionSummary = summarizeMentionReferences(mentionReferences);
       if (mentionSummary) {
-        appendTimeline(makeSystemEntry('已引用文件', mentionSummary, activeWorkspace.id, activeConversationId));
+        appendTimeline(makeSystemEntry('已引用文件', mentionSummary, workspace.id, conversationId));
       }
     }
     setConversationChatDraft(conversationId, '');
@@ -2699,13 +2873,11 @@ export default function App() {
         ...current,
         [conversationId]: [...(current[conversationId] ?? []), text],
       }));
-      if (activeWorkspace && activeConversationId === conversationId) {
-        appendTimeline(makeSystemEntry('消息已加入候选', '当前任务完成后会自动继续发送。', activeWorkspace.id, activeConversationId));
-      }
+      appendTimeline(makeSystemEntry('消息已加入候选', '当前任务完成后会自动继续发送。', workspace.id, conversationId));
       return;
     }
-    sendSlashCommand(text);
-  }, [activeConversationId, activeWorkspace, appendTimeline, chatDrafts, thinkingConversations, rememberMentionReferences, sendSlashCommand, setConversationChatDraft, setConversationComposerSelection]);
+    sendSlashCommand(text, conversationId);
+  }, [appendTimeline, chatDrafts, getConversationContext, thinkingConversations, rememberMentionReferences, sendSlashCommand, setConversationChatDraft, setConversationComposerSelection]);
 
   const runWorkspaceCommand = useCallback((workspace: WorkspaceRecord, conversation: ConversationRecord, command: 'start' | 'status' | 'attach' | 'stop' | 'interrupt') => {
     if (command === 'start') {
@@ -2835,6 +3007,7 @@ export default function App() {
                   pendingRequestCount={pendingRequests.length}
                   turnId={activeTurnId}
                   connectionState={connectionState}
+                  connectionHealth={connectionHealth}
                   lastError={lastError}
                   connect={connect}
                   closeSocket={closeSocket}
@@ -3573,6 +3746,7 @@ function SettingsScreen({
   pendingRequestCount,
   turnId,
   connectionState,
+  connectionHealth,
   lastError,
   connect,
   closeSocket,
@@ -3584,18 +3758,57 @@ function SettingsScreen({
   activeWorkspace: WorkspaceRecord | null;
   pendingRequestCount: number;
   turnId: string;
-  connectionState: string;
+  connectionState: ConnectionState;
+  connectionHealth: ConnectionHealth;
   lastError: string;
   connect: () => void;
   closeSocket: (manual?: boolean) => void;
   refreshServerVersion: () => void;
 }) {
+  const isConnected = connectionState === 'open';
+  const isConnecting = connectionState === 'connecting';
+  const connectionActionTitle = isConnected || isConnecting ? '中断' : '连接';
+  const connectionAction = isConnected || isConnecting ? () => closeSocket(true) : connect;
+  const statusStyle =
+    connectionState === 'open'
+      ? styles.connectionCardOnline
+      : connectionState === 'connecting'
+        ? styles.connectionCardChecking
+        : connectionState === 'error' || connectionHealth.status === 'offline'
+          ? styles.connectionCardOffline
+          : styles.connectionCardIdle;
+  const dotStyle =
+    connectionState === 'open'
+      ? styles.connectionDotOnline
+      : connectionState === 'connecting'
+        ? styles.connectionDotChecking
+        : connectionState === 'error' || connectionHealth.status === 'offline'
+          ? styles.connectionDotOffline
+          : styles.connectionDotIdle;
+
   return (
     <ScrollView contentContainerStyle={styles.pageContent}>
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>连接</Text>
         <View style={styles.formBlock}>
-          <Diagnostic label="状态" value={connectionState} />
+          <View style={[styles.connectionCard, statusStyle]}>
+            <View style={styles.connectionHeader}>
+              <View style={[styles.connectionDot, dotStyle]} />
+              <View style={styles.connectionSummary}>
+                <Text style={styles.connectionTitle}>{connectionStateLabel(connectionState)}</Text>
+                <Text style={styles.connectionSubtitle} numberOfLines={1}>
+                  {healthLabelOf(connectionHealth)}
+                </Text>
+              </View>
+              <Text style={styles.connectionLatency}>{latencyLabelOf(connectionHealth.latencyMs)}</Text>
+            </View>
+            <View style={styles.connectionMetaRow}>
+              <Text style={styles.connectionMeta}>WebSocket: {connectionState}</Text>
+              <Text style={styles.connectionMeta}>
+                {connectionHealth.lastCheckedAt ? `检测: ${nowLabel(connectionHealth.lastCheckedAt)}` : '检测: --'}
+              </Text>
+            </View>
+          </View>
           <Field
             label="Server URL"
             value={settings.serverUrl}
@@ -3617,9 +3830,12 @@ function SettingsScreen({
             placeholder="local"
           />
           <Row>
-            <ActionButton title="连接" onPress={connect} />
+            <ActionButton
+              title={connectionActionTitle}
+              onPress={connectionAction}
+              tone={isConnected || isConnecting ? 'danger' : 'solid'}
+            />
             <ActionButton title="刷新版本" onPress={refreshServerVersion} tone="ghost" />
-            <ActionButton title="断开" onPress={closeSocket} tone="ghost" />
           </Row>
           {lastError ? <Text style={styles.errorText}>{lastError}</Text> : null}
         </View>
@@ -3856,14 +4072,33 @@ function ActionButton({
   title,
   onPress,
   tone = 'solid',
+  disabled = false,
 }: {
   title: string;
   onPress: () => void;
-  tone?: 'solid' | 'ghost';
+  tone?: 'solid' | 'ghost' | 'danger';
+  disabled?: boolean;
 }) {
   return (
-    <Pressable onPress={onPress} style={[styles.actionButton, tone === 'ghost' && styles.actionButtonGhost]}>
-      <Text style={[styles.actionButtonText, tone === 'ghost' && styles.actionButtonTextGhost]}>{title}</Text>
+    <Pressable
+      disabled={disabled}
+      onPress={onPress}
+      style={[
+        styles.actionButton,
+        tone === 'ghost' && styles.actionButtonGhost,
+        tone === 'danger' && styles.actionButtonDanger,
+        disabled && styles.actionButtonDisabled,
+      ]}
+    >
+      <Text
+        style={[
+          styles.actionButtonText,
+          tone === 'ghost' && styles.actionButtonTextGhost,
+          tone === 'danger' && styles.actionButtonTextDanger,
+        ]}
+      >
+        {title}
+      </Text>
     </Pressable>
   );
 }
@@ -4299,6 +4534,80 @@ const styles = StyleSheet.create({
     padding: 14,
     gap: 12,
   },
+  connectionCard: {
+    borderRadius: 8,
+    borderWidth: 1,
+    padding: 12,
+    gap: 10,
+  },
+  connectionCardOnline: {
+    backgroundColor: '#f0fbf5',
+    borderColor: '#65b98d',
+  },
+  connectionCardChecking: {
+    backgroundColor: '#fff8e6',
+    borderColor: '#d6a83d',
+  },
+  connectionCardOffline: {
+    backgroundColor: '#fff1f1',
+    borderColor: '#d17979',
+  },
+  connectionCardIdle: {
+    backgroundColor: '#f7f9fa',
+    borderColor: '#d8e0e7',
+  },
+  connectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  connectionDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+  },
+  connectionDotOnline: {
+    backgroundColor: '#19a463',
+  },
+  connectionDotChecking: {
+    backgroundColor: '#d89b19',
+  },
+  connectionDotOffline: {
+    backgroundColor: '#c75757',
+  },
+  connectionDotIdle: {
+    backgroundColor: '#9aa3ad',
+  },
+  connectionSummary: {
+    flex: 1,
+    minWidth: 0,
+  },
+  connectionTitle: {
+    color: '#17202a',
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  connectionSubtitle: {
+    marginTop: 2,
+    color: '#52606b',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  connectionLatency: {
+    color: '#17202a',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  connectionMetaRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  connectionMeta: {
+    color: '#66717c',
+    fontSize: 11,
+    fontWeight: '800',
+  },
   field: {
     gap: 6,
   },
@@ -4345,6 +4654,14 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#cfd5da',
   },
+  actionButtonDanger: {
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#c75757',
+  },
+  actionButtonDisabled: {
+    opacity: 0.6,
+  },
   actionButtonText: {
     color: '#ffffff',
     fontWeight: '800',
@@ -4352,6 +4669,9 @@ const styles = StyleSheet.create({
   },
   actionButtonTextGhost: {
     color: '#17202a',
+  },
+  actionButtonTextDanger: {
+    color: '#a23b3b',
   },
   miniButton: {
     backgroundColor: '#ffffff',
