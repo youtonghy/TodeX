@@ -4032,35 +4032,35 @@ function SettingsScreen({
             secureTextEntry
           />
           <View style={styles.encryptionBlock}>
-            <Text style={styles.fieldLabel}>Transport encryption</Text>
+            <Text style={styles.fieldLabel}>编辑加密</Text>
             <Row>
               <ActionButton
-                title="明文"
+                title="无"
                 onPress={() => setSettings((current) => ({ ...current, encryptionProtocol: 'none' }))}
                 tone={settings.encryptionProtocol === 'none' ? 'solid' : 'ghost'}
+              />
+              <ActionButton
+                title="后量子"
+                onPress={() => setSettings((current) => ({ ...current, encryptionProtocol: 'ml-kem-768' }))}
+                tone={settings.encryptionProtocol === 'ml-kem-768' ? 'solid' : 'ghost'}
               />
               <ActionButton
                 title="X25519"
                 onPress={() => setSettings((current) => ({ ...current, encryptionProtocol: 'x25519' }))}
                 tone={settings.encryptionProtocol === 'x25519' ? 'solid' : 'ghost'}
               />
-              <ActionButton
-                title="ML-KEM-768"
-                onPress={() => setSettings((current) => ({ ...current, encryptionProtocol: 'ml-kem-768' }))}
-                tone={settings.encryptionProtocol === 'ml-kem-768' ? 'solid' : 'ghost'}
-              />
             </Row>
             <Text style={styles.connectionMeta}>当前: {encryptionLabel}</Text>
             <Field
-              label="Encryption public key"
+              label="Key 密钥"
               value={settings.encryptionPublicKey}
               onChangeText={(value) => setSettings((current) => ({ ...current, encryptionPublicKey: value }))}
-              placeholder="Scan backend QR to fill"
+              placeholder="扫描一键配对二维码后自动填充"
               multiline
             />
             <Row>
-              <ActionButton title="扫描后端二维码" onPress={openPairingScanner} tone="solid" />
-              <ActionButton title="粘贴配对 JSON" onPress={pastePairingFromClipboard} tone="ghost" />
+              <ActionButton title="扫码一键配对" onPress={openPairingScanner} tone="solid" />
+              <ActionButton title="粘贴配对内容" onPress={pastePairingFromClipboard} tone="ghost" />
             </Row>
           </View>
           <Field
@@ -4094,7 +4094,7 @@ function SettingsScreen({
             onBarcodeScanned={pairingScannerArmed ? handlePairingScan : undefined}
           />
           <View style={styles.scannerFooter}>
-            <Text style={styles.scannerTitle}>扫描 TodeX 后端配对二维码</Text>
+            <Text style={styles.scannerTitle}>扫描 TodeX 一键配对二维码</Text>
             <ActionButton title="关闭" onPress={() => setPairingScannerVisible(false)} tone="ghost" />
           </View>
         </View>

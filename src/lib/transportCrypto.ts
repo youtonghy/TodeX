@@ -21,6 +21,7 @@ export type PairingPayload = {
   host?: string;
   port?: number;
   authToken?: string;
+  preferredEncryption?: TransportEncryptionProtocol;
   protocols: PairingProtocol[];
 };
 
@@ -30,6 +31,7 @@ type PairingLinkPayload = {
   serverUrl: string;
   pairingUrl: string;
   authToken?: string;
+  preferredEncryption?: TransportEncryptionProtocol;
 };
 
 export type ParsedPairing = {
@@ -66,7 +68,11 @@ export async function resolvePairingPayload(raw: string): Promise<ParsedPairing>
   if (!response.ok) {
     throw new Error(`读取后端配对密钥失败: HTTP ${response.status}`);
   }
-  const pairing = parsePairingObject((await response.json()) as Partial<PairingPayload>);
+  const pairingPayload = (await response.json()) as Partial<PairingPayload>;
+  const pairing = parsePairingObject({
+    ...pairingPayload,
+    preferredEncryption: parsed.preferredEncryption ?? pairingPayload.preferredEncryption,
+  });
   return {
     ...pairing,
     serverUrl: parsed.serverUrl || pairing.serverUrl,
@@ -78,8 +84,21 @@ function parsePairingObject(parsed: Partial<PairingPayload>): ParsedPairing {
   if (parsed.kind !== 'todex-pairing' || parsed.version !== 1) {
     throw new Error('不是有效的 TodeX 配对二维码');
   }
+  if (parsed.preferredEncryption === 'none') {
+    if (!parsed.serverUrl) {
+      throw new Error('配对二维码缺少后端地址');
+    }
+    return {
+      serverUrl: parsed.serverUrl,
+      authToken: parsed.authToken ?? '',
+      encryptionProtocol: 'none',
+      encryptionPublicKey: '',
+    };
+  }
   const protocols = Array.isArray(parsed.protocols) ? parsed.protocols : [];
+  const preferred = parsed.preferredEncryption;
   const selected =
+    (preferred ? protocols.find((protocol) => protocol.id === preferred) : undefined) ??
     protocols.find((protocol) => protocol.id === 'ml-kem-768') ??
     protocols.find((protocol) => protocol.id === 'x25519');
   if (!selected?.publicKey) {

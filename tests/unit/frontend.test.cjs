@@ -115,6 +115,7 @@ test('parses pairing payloads and applies encrypted settings', () => {
     version: 1,
     serverUrl: 'http://127.0.0.1:7345',
     authToken: 'token',
+    preferredEncryption: 'x25519',
     protocols: [
       { id: 'x25519', publicKey: 'x-key' },
       { id: 'ml-kem-768', publicKey: 'kem-key' },
@@ -124,15 +125,15 @@ test('parses pairing payloads and applies encrypted settings', () => {
   assert.deepEqual(pairing, {
     serverUrl: 'http://127.0.0.1:7345',
     authToken: 'token',
-    encryptionProtocol: 'ml-kem-768',
-    encryptionPublicKey: 'kem-key',
+    encryptionProtocol: 'x25519',
+    encryptionPublicKey: 'x-key',
   });
   assert.deepEqual(transportCrypto.applyPairingToSettings(baseSettings(), pairing), {
     ...baseSettings(),
     serverUrl: 'http://127.0.0.1:7345',
     authToken: 'token',
-    encryptionProtocol: 'ml-kem-768',
-    encryptionPublicKey: 'kem-key',
+    encryptionProtocol: 'x25519',
+    encryptionPublicKey: 'x-key',
   });
 });
 
@@ -149,7 +150,10 @@ test('resolves pairing links through the configured authenticated endpoint', asy
           kind: 'todex-pairing',
           version: 1,
           serverUrl: 'http://backend-internal:7345',
-          protocols: [{ id: 'x25519', publicKey: 'x-key' }],
+          protocols: [
+            { id: 'x25519', publicKey: 'x-key' },
+            { id: 'ml-kem-768', publicKey: 'kem-key' },
+          ],
         };
       },
     };
@@ -162,6 +166,7 @@ test('resolves pairing links through the configured authenticated endpoint', asy
       serverUrl: 'http://phone-visible:7345',
       pairingUrl: 'http://backend-internal:7345/v1/pairing',
       authToken: 'secret',
+      preferredEncryption: 'x25519',
     }));
 
     assert.deepEqual(requests, [{
