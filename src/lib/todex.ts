@@ -4,6 +4,8 @@ export type ConnectionSettings = {
   serverUrl: string;
   authToken: string;
   tenantId: string;
+  encryptionProtocol: 'none' | 'x25519' | 'ml-kem-768';
+  encryptionPublicKey: string;
   defaultWorkspacePath: string;
   defaultModel: string;
   approvalPolicy: string;
@@ -104,15 +106,21 @@ export function buildHttpUrl(serverUrl: string, pathname: string): string {
   return new URL(pathname, normalized).toString();
 }
 
-export function buildWebSocketUrl(serverUrl: string): string {
+export function buildWebSocketUrl(serverUrl: string, queryString = ''): string {
   const url = normalizeServerUrl(serverUrl);
-  if (url.startsWith('ws://') || url.startsWith('wss://')) {
-    return new URL('/v1/ws', url).toString();
+  const wsUrl =
+    url.startsWith('ws://') || url.startsWith('wss://')
+      ? new URL('/v1/ws', url)
+      : new URL(
+          '/v1/ws',
+          url.startsWith('https://')
+            ? url.replace(/^https:\/\//i, 'wss://')
+            : url.replace(/^http:\/\//i, 'ws://'),
+        );
+  if (queryString) {
+    wsUrl.search = queryString.startsWith('?') ? queryString.slice(1) : queryString;
   }
-  const normalized = url.startsWith('https://')
-    ? url.replace(/^https:\/\//i, 'wss://')
-    : url.replace(/^http:\/\//i, 'ws://');
-  return new URL('/v1/ws', normalized).toString();
+  return wsUrl.toString();
 }
 
 export function displayNameFromPath(path: string): string {

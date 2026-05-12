@@ -1,3 +1,4 @@
+import 'react-native-get-random-values';
 import {
   useCallback,
   useEffect,
@@ -26,6 +27,7 @@ import {
   View,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
+import { CameraView, useCameraPermissions, type BarcodeScanningResult } from 'expo-camera';
 import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator, type NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -55,6 +57,12 @@ import {
   shortJson,
 } from './src/lib/todex';
 import { loadJson, loadSecret, saveJson, saveSecret } from './src/lib/storage';
+import {
+  applyPairingToSettings,
+  createTransportCryptoSession,
+  resolvePairingPayload,
+  type TransportCryptoSession,
+} from './src/lib/transportCrypto';
 
 type RootStackParamList = {
   Workspaces: undefined;
@@ -468,6 +476,8 @@ const defaultSettings: ConnectionSettings = {
   serverUrl: 'http://127.0.0.1:7345',
   authToken: '',
   tenantId: 'local',
+  encryptionProtocol: 'none',
+  encryptionPublicKey: '',
   defaultWorkspacePath: '/home/dev/projects',
   defaultModel: 'gpt-5.5',
   approvalPolicy: 'on-request',
@@ -1076,6 +1086,7 @@ function forkConversationRecord(conversation: ConversationRecord, title?: string
 
 export default function App() {
   const socketRef = useRef<WebSocket | null>(null);
+  const socketCryptoRef = useRef<TransportCryptoSession | null>(null);
   const activeWorkspaceRef = useRef('');
   const activeConversationRef = useRef('');
   const workspacesRef = useRef<WorkspaceRecord[]>([]);
@@ -1194,6 +1205,7 @@ export default function App() {
       }
       socketRef.current = null;
     }
+    socketCryptoRef.current = null;
     attachedSessionIdsRef.current.clear();
   }, []);
 
@@ -1853,7 +1865,16 @@ export default function App() {
     setLastError('');
     setConnectionState('connecting');
 
-    const wsUrl = buildWebSocketUrl(settings.serverUrl);
+    let crypto: TransportCryptoSession | null = null;
+    try {
+      crypto = createTransportCryptoSession(settings);
+    } catch (error) {
+      setConnectionState('error');
+      setLastError(error instanceof Error ? error.message : '无法初始化加密连接');
+      return;
+    }
+
+    const wsUrl = buildWebSocketUrl(settings.serverUrl, crypto?.queryString);
     const options = settings.authToken
       ? { headers: { Authorization: `Bearer ${settings.authToken}` } }
       : undefined;
@@ -1863,18 +1884,20 @@ export default function App() {
         new (uri: string, protocols?: string | string[] | null, options?: { headers?: Record<string, string> }): WebSocket;
       })(wsUrl, undefined, options);
       socketRef.current = socket;
+      socketCryptoRef.current = crypto;
 
       socket.onopen = () => {
         attachedSessionIdsRef.current.clear();
         setConnectionState('open');
-        pushSystem('已连接', wsUrl);
+        pushSystem('已连接', crypto ? `${wsUrl} · ${crypto.protocol}` : wsUrl);
         void checkConnectionHealth();
         void refreshServerVersion();
       };
 
       socket.onmessage = (event) => {
         try {
-          const data = JSON.parse(String(event.data)) as ServerEvent;
+          const text = socketCryptoRef.current?.decryptServerText(String(event.data)) ?? String(event.data);
+          const data = JSON.parse(text) as ServerEvent;
           appendEvent(data);
         } catch (error) {
           setLastError(error instanceof Error ? error.message : 'failed to parse websocket message');
@@ -1888,13 +1911,15 @@ export default function App() {
 
       socket.onclose = () => {
         setConnectionState((current) => (current === 'open' || current === 'connecting' ? 'closed' : current));
+        socketCryptoRef.current = null;
         pushSystem('已断开', wsUrl);
       };
     } catch (error) {
       setConnectionState('error');
+      socketCryptoRef.current = null;
       setLastError(error instanceof Error ? error.message : 'failed to connect');
     }
-  }, [appendEvent, checkConnectionHealth, closeSocket, pushSystem, refreshServerVersion, settings.authToken, settings.serverUrl]);
+  }, [appendEvent, checkConnectionHealth, closeSocket, pushSystem, refreshServerVersion, settings]);
 
   useEffect(() => {
     if (!hydrated || !autoConnectEnabled || manualDisconnectRef.current) {
@@ -1943,7 +1968,8 @@ export default function App() {
       }
 
       const message = { id: requestId, type, payload };
-      socket.send(JSON.stringify(message));
+      const json = JSON.stringify(message);
+      socket.send(socketCryptoRef.current?.encryptClientText(json) ?? json);
       if (type === 'codex.local.turn') {
         appendTimeline(makeOutgoingEntry(
           message,
@@ -3897,6 +3923,9 @@ function SettingsScreen({
   closeSocket: (manual?: boolean) => void;
   refreshServerVersion: () => void;
 }) {
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+  const [pairingScannerVisible, setPairingScannerVisible] = useState(false);
+  const [pairingScannerArmed, setPairingScannerArmed] = useState(true);
   const isConnected = connectionState === 'open';
   const isConnecting = connectionState === 'connecting';
   const connectionActionTitle = isConnected || isConnecting ? '中断' : '连接';
@@ -3917,6 +3946,53 @@ function SettingsScreen({
         : connectionState === 'error' || connectionHealth.status === 'offline'
           ? styles.connectionDotOffline
           : styles.connectionDotIdle;
+  const encryptionLabel =
+    settings.encryptionProtocol === 'none'
+      ? '明文'
+      : settings.encryptionProtocol === 'x25519'
+        ? 'X25519'
+        : 'ML-KEM-768';
+
+  const openPairingScanner = useCallback(async () => {
+    if (Platform.OS === 'web') {
+      Alert.alert('当前平台不支持扫码', '请在移动端使用扫码，或手动粘贴二维码里的 JSON。');
+      return;
+    }
+    if (!cameraPermission?.granted) {
+      const next = await requestCameraPermission();
+      if (!next.granted) {
+        Alert.alert('需要相机权限', '允许相机权限后才能扫描后端配对二维码。');
+        return;
+      }
+    }
+    setPairingScannerArmed(true);
+    setPairingScannerVisible(true);
+  }, [cameraPermission?.granted, requestCameraPermission]);
+
+  const applyPairingText = useCallback(async (raw: string) => {
+    try {
+      const pairing = await resolvePairingPayload(raw);
+      setSettings((current) => applyPairingToSettings(current, pairing));
+      setPairingScannerVisible(false);
+      setPairingScannerArmed(false);
+      Alert.alert('已导入连接', `${pairing.serverUrl} · ${pairing.encryptionProtocol}`);
+    } catch (error) {
+      Alert.alert('配对失败', error instanceof Error ? error.message : '二维码内容无效');
+    }
+  }, [setSettings]);
+
+  const pastePairingFromClipboard = useCallback(async () => {
+    const raw = await Clipboard.getStringAsync();
+    await applyPairingText(raw);
+  }, [applyPairingText]);
+
+  const handlePairingScan = useCallback((result: BarcodeScanningResult) => {
+    if (!pairingScannerArmed) {
+      return;
+    }
+    setPairingScannerArmed(false);
+    void applyPairingText(result.data);
+  }, [applyPairingText, pairingScannerArmed]);
 
   return (
     <ScrollView contentContainerStyle={styles.pageContent}>
@@ -3955,6 +4031,38 @@ function SettingsScreen({
             placeholder="Bearer token"
             secureTextEntry
           />
+          <View style={styles.encryptionBlock}>
+            <Text style={styles.fieldLabel}>Transport encryption</Text>
+            <Row>
+              <ActionButton
+                title="明文"
+                onPress={() => setSettings((current) => ({ ...current, encryptionProtocol: 'none' }))}
+                tone={settings.encryptionProtocol === 'none' ? 'solid' : 'ghost'}
+              />
+              <ActionButton
+                title="X25519"
+                onPress={() => setSettings((current) => ({ ...current, encryptionProtocol: 'x25519' }))}
+                tone={settings.encryptionProtocol === 'x25519' ? 'solid' : 'ghost'}
+              />
+              <ActionButton
+                title="ML-KEM-768"
+                onPress={() => setSettings((current) => ({ ...current, encryptionProtocol: 'ml-kem-768' }))}
+                tone={settings.encryptionProtocol === 'ml-kem-768' ? 'solid' : 'ghost'}
+              />
+            </Row>
+            <Text style={styles.connectionMeta}>当前: {encryptionLabel}</Text>
+            <Field
+              label="Encryption public key"
+              value={settings.encryptionPublicKey}
+              onChangeText={(value) => setSettings((current) => ({ ...current, encryptionPublicKey: value }))}
+              placeholder="Scan backend QR to fill"
+              multiline
+            />
+            <Row>
+              <ActionButton title="扫描后端二维码" onPress={openPairingScanner} tone="solid" />
+              <ActionButton title="粘贴配对 JSON" onPress={pastePairingFromClipboard} tone="ghost" />
+            </Row>
+          </View>
           <Field
             label="Tenant id"
             value={settings.tenantId}
@@ -3972,6 +4080,25 @@ function SettingsScreen({
           {lastError ? <Text style={styles.errorText}>{lastError}</Text> : null}
         </View>
       </View>
+
+      <Modal
+        visible={pairingScannerVisible}
+        animationType="slide"
+        onRequestClose={() => setPairingScannerVisible(false)}
+      >
+        <View style={styles.scannerScreen}>
+          <CameraView
+            style={styles.scannerCamera}
+            facing="back"
+            barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
+            onBarcodeScanned={pairingScannerArmed ? handlePairingScan : undefined}
+          />
+          <View style={styles.scannerFooter}>
+            <Text style={styles.scannerTitle}>扫描 TodeX 后端配对二维码</Text>
+            <ActionButton title="关闭" onPress={() => setPairingScannerVisible(false)} tone="ghost" />
+          </View>
+        </View>
+      </Modal>
 
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>默认参数</Text>
@@ -4644,6 +4771,23 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '800',
   },
+  scannerScreen: {
+    flex: 1,
+    backgroundColor: '#111820',
+  },
+  scannerCamera: {
+    flex: 1,
+  },
+  scannerFooter: {
+    backgroundColor: '#ffffff',
+    padding: 18,
+    gap: 12,
+  },
+  scannerTitle: {
+    color: '#17202a',
+    fontSize: 16,
+    fontWeight: '800',
+  },
   pageContent: {
     padding: 18,
     paddingBottom: 28,
@@ -4665,6 +4809,9 @@ const styles = StyleSheet.create({
     borderColor: '#d8e0e7',
     padding: 14,
     gap: 12,
+  },
+  encryptionBlock: {
+    gap: 10,
   },
   connectionCard: {
     borderRadius: 8,
