@@ -24,6 +24,8 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  type StyleProp,
+  type TextStyle,
   type TextInputSelectionChangeEventData,
   View,
 } from 'react-native';
@@ -4595,6 +4597,7 @@ function SettingsScreen({
               onChangeText={(value) => setSettings((current) => ({ ...current, encryptionPublicKey: value }))}
               placeholder="扫描一键配对二维码后自动填充"
               multiline
+              inputStyle={styles.encryptionKeyInput}
             />
             <Row>
               <ActionButton title="扫码一键配对" onPress={openPairingScanner} tone="solid" />
@@ -4952,6 +4955,7 @@ function Field({
   multiline = false,
   editable = true,
   secureTextEntry = false,
+  inputStyle,
 }: {
   label: string;
   value: string;
@@ -4961,6 +4965,7 @@ function Field({
   multiline?: boolean;
   editable?: boolean;
   secureTextEntry?: boolean;
+  inputStyle?: StyleProp<TextStyle>;
 }) {
   return (
     <View style={styles.field}>
@@ -4971,7 +4976,7 @@ function Field({
         onBlur={onBlur}
         placeholder={placeholder}
         placeholderTextColor="#8a93a1"
-        style={[styles.input, multiline && styles.inputMultiline, !editable && styles.inputDisabled]}
+        style={[styles.input, multiline && styles.inputMultiline, !editable && styles.inputDisabled, inputStyle]}
         multiline={multiline}
         editable={editable}
         secureTextEntry={secureTextEntry}
@@ -5448,6 +5453,16 @@ const styles = StyleSheet.create({
   inputMultiline: {
     minHeight: 110,
     textAlignVertical: 'top',
+  },
+  encryptionKeyInput: {
+    height: 156,
+    fontFamily: Platform.select({
+      ios: 'Menlo',
+      android: 'monospace',
+      default: 'monospace',
+    }),
+    fontSize: 13,
+    lineHeight: 18,
   },
   inputDisabled: {
     opacity: 0.7,
