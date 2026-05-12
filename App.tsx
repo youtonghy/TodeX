@@ -2432,9 +2432,9 @@ export default function App() {
 
       if (!requestSessionId || !workspace || !conversation) {
         Alert.alert('未选择工作区', '请先选择一个工作区。');
-        return;
+        return false;
       }
-      sendProtocolMessage('codex.local.approval.respond', {
+      return sendProtocolMessage('codex.local.approval.respond', {
         codexSessionId: requestSessionId,
         tenantId: workspace.tenantId,
         requestId: request.requestId,
@@ -3385,7 +3385,7 @@ function ChatScreen({
   setComposerSelection: Dispatch<SetStateAction<TextInputSelectionChangeEventData['selection']>>;
   submitChat: (conversationId: string) => void;
   stopThinking: (conversationId: string) => void;
-  sendApprovalResponse: (accepted: boolean, request: PendingRequest) => void;
+  sendApprovalResponse: (accepted: boolean, request: PendingRequest) => boolean;
   selectConversation: (workspaceId: string, conversationId: string) => void;
   runWorkspaceCommand: (workspace: WorkspaceRecord, conversation: ConversationRecord, command: 'start' | 'status' | 'attach' | 'stop' | 'interrupt') => void;
   removeWorkspace: (workspaceId: string) => void;
@@ -3398,6 +3398,8 @@ function ChatScreen({
   const shouldFollowLatestRef = useRef(true);
   const initialLatestScrollRef = useRef(true);
   const composerInputRef = useRef<TextInput | null>(null);
+  const autoExpandedProgressIdsRef = useRef<Set<string>>(new Set());
+  const autoExpandedRequestIdsRef = useRef<Map<string, string[]>>(new Map());
   const insets = useSafeAreaInsets();
   const keyboardInset = useKeyboardInset();
   const composerPaddingBottom = 12 + (keyboardInset > 0 ? 0 : insets.bottom);
@@ -3418,6 +3420,26 @@ function ChatScreen({
     pendingRequests.forEach((request) => result.set(request.requestId, request));
     return result;
   }, [pendingRequests]);
+  const pendingRequestExpansionTargets = useMemo(() => {
+    const result = new Map<string, string[]>();
+
+    for (const item of conversationRenderItems) {
+      if (item.type === 'executionGroup') {
+        for (const entry of item.entries) {
+          if (entry.requestId) {
+            result.set(entry.requestId, [item.id, entry.id]);
+          }
+        }
+        continue;
+      }
+
+      if (item.entry.requestId) {
+        result.set(item.entry.requestId, [item.entry.id]);
+      }
+    }
+
+    return result;
+  }, [conversationRenderItems]);
   const slashQuery = chatDraft.startsWith('/') ? chatDraft.slice(1).trim().toLowerCase() : '';
   const slashSuggestions = chatDraft.startsWith('/')
     ? SLASH_COMMANDS.filter((item, index, list) => {
@@ -3532,6 +3554,105 @@ function ChatScreen({
   }, [toggleProgressId]);
 
   useEffect(() => {
+    const activeTargets = new Map<string, string[]>();
+    for (const request of pendingRequests) {
+      const targetIds = pendingRequestExpansionTargets.get(request.requestId);
+      if (targetIds?.length) {
+        activeTargets.set(request.requestId, targetIds);
+      }
+    }
+
+    setExpandedProgressIds((current) => {
+      let next = current;
+      const ensureNext = () => {
+        if (next === current) {
+          next = new Set(current);
+        }
+      };
+
+      for (const [requestId, expandedIds] of Array.from(autoExpandedRequestIdsRef.current.entries())) {
+        const targetIds = activeTargets.get(requestId) ?? [];
+        const targetIdSet = new Set(targetIds);
+        const keptIds: string[] = [];
+
+        for (const id of expandedIds) {
+          if (targetIdSet.has(id)) {
+            keptIds.push(id);
+            continue;
+          }
+
+          if (autoExpandedProgressIdsRef.current.has(id)) {
+            ensureNext();
+            next.delete(id);
+            autoExpandedProgressIdsRef.current.delete(id);
+          }
+        }
+
+        if (targetIds.length) {
+          autoExpandedRequestIdsRef.current.set(requestId, keptIds);
+        } else {
+          autoExpandedRequestIdsRef.current.delete(requestId);
+        }
+      }
+
+      for (const [requestId, targetIds] of activeTargets) {
+        const trackedIds = new Set(autoExpandedRequestIdsRef.current.get(requestId) ?? []);
+
+        for (const id of targetIds) {
+          if (!next.has(id)) {
+            ensureNext();
+            next.add(id);
+            autoExpandedProgressIdsRef.current.add(id);
+            trackedIds.add(id);
+          } else if (autoExpandedProgressIdsRef.current.has(id)) {
+            trackedIds.add(id);
+          }
+        }
+
+        if (trackedIds.size) {
+          autoExpandedRequestIdsRef.current.set(requestId, [...trackedIds]);
+        }
+      }
+
+      return next === current ? current : next;
+    });
+  }, [pendingRequestExpansionTargets, pendingRequests]);
+
+  const collapseAutoExpandedRequest = useCallback((requestId: string) => {
+    const expandedIds = autoExpandedRequestIdsRef.current.get(requestId) ?? [];
+    autoExpandedRequestIdsRef.current.delete(requestId);
+
+    if (!expandedIds.length) {
+      return;
+    }
+
+    setExpandedProgressIds((current) => {
+      const next = new Set(current);
+      let changed = false;
+
+      for (const id of expandedIds) {
+        if (!autoExpandedProgressIdsRef.current.has(id)) {
+          continue;
+        }
+        autoExpandedProgressIdsRef.current.delete(id);
+        changed = next.delete(id) || changed;
+      }
+
+      return changed ? next : current;
+    });
+  }, []);
+
+  const handleApprovalResponse = useCallback(
+    (accepted: boolean, request: PendingRequest) => {
+      const sent = sendApprovalResponse(accepted, request);
+      if (sent) {
+        collapseAutoExpandedRequest(request.requestId);
+      }
+    },
+    [collapseAutoExpandedRequest, sendApprovalResponse],
+  );
+
+  useEffect(() => {
     selectConversation(route.params.workspaceId, route.params.conversationId);
   }, [route.params.conversationId, route.params.workspaceId, selectConversation]);
 
@@ -3609,7 +3730,7 @@ function ChatScreen({
                     pendingRequestById={pendingRequestById}
                     onToggleGroup={toggleProgressId}
                     onToggleProgress={toggleProgressEntry}
-                    onApprovalResponse={sendApprovalResponse}
+                    onApprovalResponse={handleApprovalResponse}
                   />
                 );
               }
@@ -3626,7 +3747,7 @@ function ChatScreen({
                   collapsible={collapsible}
                   pendingRequest={entry.requestId ? pendingRequestById.get(entry.requestId) : undefined}
                   onToggleProgress={toggleProgressEntry}
-                  onApprovalResponse={sendApprovalResponse}
+                  onApprovalResponse={handleApprovalResponse}
                 />
               );
             })
