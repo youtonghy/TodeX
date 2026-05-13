@@ -4512,14 +4512,15 @@ function ChatScreen({
                 onPress={() => stopThinking(route.params.conversationId)}
                 style={styles.stopButton}
               >
-                <Text style={styles.stopButtonText}>ESC</Text>
+                <Text style={styles.stopButtonText}>■</Text>
               </Pressable>
             ) : null}
             <Pressable
+              accessibilityLabel="发送消息"
               onPress={() => submitChat(route.params.conversationId)}
               style={styles.sendButton}
             >
-              <Text style={styles.sendButtonText}>发送</Text>
+              <Text style={styles.sendButtonText}>↑</Text>
             </Pressable>
           </View>
         </View>
@@ -5960,12 +5961,12 @@ const styles = StyleSheet.create({
   composerInputRow: {
     flexDirection: 'row',
     flexWrap: 'nowrap',
-    alignItems: 'flex-end',
-    gap: 10,
+    alignItems: 'center',
+    gap: 8,
   },
   attachmentButton: {
-    width: 44,
-    height: 44,
+    width: 40,
+    height: 40,
     borderRadius: 8,
     borderWidth: 1,
     borderColor: '#d7dce0',
@@ -5975,9 +5976,9 @@ const styles = StyleSheet.create({
   },
   attachmentButtonText: {
     color: '#17202a',
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '800',
-    lineHeight: 22,
+    lineHeight: 20,
   },
   attachmentMenuSheet: {
     width: 240,
@@ -6060,14 +6061,14 @@ const styles = StyleSheet.create({
   composerInput: {
     flex: 1,
     minWidth: 0,
-    maxHeight: 110,
-    minHeight: 44,
+    maxHeight: 96,
+    minHeight: 40,
     backgroundColor: '#ffffff',
     borderWidth: 1,
     borderColor: '#d7dce0',
     borderRadius: 8,
     paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingVertical: 8,
     color: '#17202a',
     fontSize: 14,
     textAlignVertical: 'top',
@@ -6075,35 +6076,37 @@ const styles = StyleSheet.create({
   composerActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 8,
   },
   sendButton: {
-    minHeight: 44,
+    width: 40,
+    height: 40,
     backgroundColor: '#17202a',
     borderRadius: 8,
-    paddingHorizontal: 16,
     alignItems: 'center',
     justifyContent: 'center',
   },
   sendButtonText: {
     color: '#ffffff',
-    fontSize: 14,
+    fontSize: 22,
     fontWeight: '800',
+    lineHeight: 24,
   },
   stopButton: {
-    minHeight: 44,
+    width: 40,
+    height: 40,
     backgroundColor: '#ffffff',
     borderWidth: 1,
     borderColor: '#c75757',
     borderRadius: 8,
-    paddingHorizontal: 14,
     alignItems: 'center',
     justifyContent: 'center',
   },
   stopButtonText: {
     color: '#a23b3b',
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: '800',
+    lineHeight: 18,
   },
   menuBackdrop: {
     flex: 1,
