@@ -12,6 +12,7 @@ import {
 } from 'react';
 import {
   Alert,
+  Image,
   Keyboard,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
@@ -28,6 +29,9 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { CameraView, useCameraPermissions, type BarcodeScanningResult } from 'expo-camera';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as ImagePicker from 'expo-image-picker';
 import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator, type NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -96,6 +100,23 @@ type ComposerSelection = TextInputSelectionChangeEventData['selection'];
 
 const DEFAULT_COMPOSER_SELECTION: ComposerSelection = { start: 0, end: 0 };
 
+type ComposerAttachmentDraft = {
+  id: string;
+  kind: 'image' | 'file';
+  name: string;
+  mimeType: string;
+  sizeBytes: number | null;
+  dataUrl: string;
+  textContent?: string;
+  source: 'clipboard' | 'library' | 'file';
+};
+
+type QueuedChatSubmission = {
+  id: string;
+  text: string;
+  attachments: ComposerAttachmentDraft[];
+};
+
 type PendingLocalStart = {
   workspaceId: string;
   conversationId: string;
@@ -137,6 +158,9 @@ type ConnectionHealth = {
 
 const CONNECTION_HEALTH_INTERVAL_MS = 5000;
 const CONNECTION_HEALTH_TIMEOUT_MS = 3500;
+const MAX_COMPOSER_ATTACHMENTS = 8;
+const MAX_IMAGE_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+const MAX_FILE_ATTACHMENT_BYTES = 512 * 1024;
 
 function localConversationStateOf(conversation: ConversationRecord | null): LocalAdapterState {
   return conversation?.localAdapterState ?? 'idle';
@@ -185,6 +209,208 @@ function localTurnErrorMessage(text: string): string {
     return '本地会话还没启动，先执行 start 再发送消息。';
   }
   return text;
+}
+
+function attachmentId(): string {
+  return createRequestId('att');
+}
+
+function formatBytes(bytes: number | null | undefined): string {
+  if (!bytes || bytes <= 0) {
+    return 'unknown';
+  }
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${Math.round(bytes / 102.4) / 10} KB`;
+  }
+  return `${Math.round(bytes / (1024 * 102.4)) / 10} MB`;
+}
+
+function fileNameFromUri(uri: string, fallback: string): string {
+  const clean = uri.split('?')[0]?.split('#')[0] ?? uri;
+  const part = clean.split('/').filter(Boolean).pop();
+  return part ? decodeURIComponent(part) : fallback;
+}
+
+function inferMimeType(name: string, fallback = 'application/octet-stream'): string {
+  const extension = name.split('.').pop()?.toLowerCase() ?? '';
+  switch (extension) {
+    case 'png':
+      return 'image/png';
+    case 'jpg':
+    case 'jpeg':
+      return 'image/jpeg';
+    case 'gif':
+      return 'image/gif';
+    case 'webp':
+      return 'image/webp';
+    case 'svg':
+      return 'image/svg+xml';
+    case 'txt':
+      return 'text/plain';
+    case 'md':
+    case 'markdown':
+      return 'text/markdown';
+    case 'json':
+      return 'application/json';
+    case 'csv':
+      return 'text/csv';
+    case 'pdf':
+      return 'application/pdf';
+    default:
+      return fallback;
+  }
+}
+
+function isImageMimeType(mimeType: string): boolean {
+  return mimeType.toLowerCase().startsWith('image/');
+}
+
+function isTextAttachment(name: string, mimeType: string): boolean {
+  const lowerMime = mimeType.toLowerCase();
+  const lowerName = name.toLowerCase();
+  return (
+    lowerMime.startsWith('text/') ||
+    lowerMime === 'application/json' ||
+    lowerMime === 'application/xml' ||
+    lowerName.endsWith('.md') ||
+    lowerName.endsWith('.json') ||
+    lowerName.endsWith('.csv') ||
+    lowerName.endsWith('.xml') ||
+    lowerName.endsWith('.yaml') ||
+    lowerName.endsWith('.yml')
+  );
+}
+
+function mimeTypeFromDataUrl(dataUrl: string): string | null {
+  const match = /^data:([^;,]+)[;,]/i.exec(dataUrl.trim());
+  return match?.[1] ?? null;
+}
+
+function base64FromDataUrl(dataUrl: string): string {
+  const marker = ';base64,';
+  const index = dataUrl.indexOf(marker);
+  return index >= 0 ? dataUrl.slice(index + marker.length) : '';
+}
+
+function dataUrlFromBase64(base64: string, mimeType: string): string {
+  const trimmed = base64.trim();
+  if (trimmed.startsWith('data:')) {
+    return trimmed;
+  }
+  return `data:${mimeType};base64,${trimmed}`;
+}
+
+function estimatedBytesFromBase64(base64: string): number {
+  const normalized = base64.replace(/\s/g, '');
+  const padding = normalized.endsWith('==') ? 2 : normalized.endsWith('=') ? 1 : 0;
+  return Math.max(0, Math.floor((normalized.length * 3) / 4) - padding);
+}
+
+async function readBase64DataUrl(uri: string, mimeType: string, base64?: string | null): Promise<{ dataUrl: string; sizeBytes: number | null }> {
+  if (base64) {
+    const dataUrl = dataUrlFromBase64(base64, mimeType);
+    return {
+      dataUrl,
+      sizeBytes: estimatedBytesFromBase64(base64FromDataUrl(dataUrl) || base64),
+    };
+  }
+  if (uri.startsWith('data:')) {
+    return {
+      dataUrl: uri,
+      sizeBytes: estimatedBytesFromBase64(base64FromDataUrl(uri)),
+    };
+  }
+  const encoded = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
+  return {
+    dataUrl: dataUrlFromBase64(encoded, mimeType),
+    sizeBytes: estimatedBytesFromBase64(encoded),
+  };
+}
+
+async function resolveFileSizeBytes(uri: string, fallbackSizeBytes: number | null | undefined): Promise<number | null> {
+  if (typeof fallbackSizeBytes === 'number') {
+    return fallbackSizeBytes;
+  }
+  try {
+    const info = await FileSystem.getInfoAsync(uri);
+    if (!info.exists) {
+      return null;
+    }
+    return 'size' in info && typeof info.size === 'number' ? info.size : null;
+  } catch {
+    return null;
+  }
+}
+
+async function readTextAttachmentContent(uri: string, name: string, mimeType: string, sizeBytes: number | null): Promise<string | undefined> {
+  if (!isTextAttachment(name, mimeType) || (sizeBytes ?? 0) > MAX_FILE_ATTACHMENT_BYTES) {
+    return undefined;
+  }
+  if (uri.startsWith('data:')) {
+    return undefined;
+  }
+  try {
+    return await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.UTF8 });
+  } catch {
+    return undefined;
+  }
+}
+
+function attachmentPrompt(attachments: ComposerAttachmentDraft[]): string {
+  if (attachments.length === 0) {
+    return '';
+  }
+  const imageCount = attachments.filter((item) => item.kind === 'image').length;
+  const fileCount = attachments.length - imageCount;
+  if (imageCount > 0 && fileCount > 0) {
+    return `请查看这 ${attachments.length} 个附件。`;
+  }
+  if (imageCount > 0) {
+    return imageCount === 1 ? '请查看这张图片。' : `请查看这 ${imageCount} 张图片。`;
+  }
+  return fileCount === 1 ? '请查看这个文件。' : `请查看这 ${fileCount} 个文件。`;
+}
+
+function attachmentTextBlock(attachment: ComposerAttachmentDraft): string {
+  const header = [
+    `[附件: ${attachment.name}]`,
+    `MIME: ${attachment.mimeType}`,
+    `Size: ${formatBytes(attachment.sizeBytes)}`,
+  ].join('\n');
+  if (attachment.textContent) {
+    return `${header}\nContent:\n${attachment.textContent}`;
+  }
+  return `${header}\nData URL:\n${attachment.dataUrl}`;
+}
+
+function codexInputFromComposer(text: string, attachments: ComposerAttachmentDraft[]): Record<string, unknown>[] {
+  const trimmed = text.trim();
+  const items: Record<string, unknown>[] = [
+    { type: 'text', text: trimmed || attachmentPrompt(attachments) },
+  ];
+  attachments.forEach((attachment) => {
+    if (attachment.kind === 'image') {
+      items.push({
+        type: 'image',
+        url: attachment.dataUrl,
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        sizeBytes: attachment.sizeBytes ?? undefined,
+      });
+      return;
+    }
+    items.push({ type: 'text', text: attachmentTextBlock(attachment) });
+  });
+  return items;
+}
+
+function attachmentSummary(attachments: ComposerAttachmentDraft[]): string {
+  return attachments
+    .map((item) => `${item.kind === 'image' ? '图片' : '文件'} ${item.name} (${formatBytes(item.sizeBytes)})`)
+    .join('\n');
 }
 
 function extractProtocolError(eventType: string, data: Record<string, unknown>): string {
@@ -611,8 +837,19 @@ function textFromLocalTurnPayload(payload: Record<string, unknown>): string {
 
   const text = input
     .map((item) => {
-      if (item && typeof item === 'object' && 'text' in item) {
-        return String((item as { text?: unknown }).text ?? '');
+      if (!item || typeof item !== 'object') {
+        return '';
+      }
+      const record = item as Record<string, unknown>;
+      if (typeof record.text === 'string' && record.text) {
+        if (record.text.startsWith('[附件:')) {
+          return '';
+        }
+        return record.text;
+      }
+      if (record.type === 'image') {
+        const name = typeof record.name === 'string' && record.name ? record.name : 'image';
+        return `[图片附件: ${name}]`;
       }
       return '';
     })
@@ -1116,13 +1353,14 @@ export default function App() {
   const [mentionHistory, setMentionHistory] = useState<WorkspaceMentionHistory[]>([]);
   const [selectedRequestId, setSelectedRequestId] = useState('');
   const [chatDrafts, setChatDrafts] = useState<Record<string, string>>({});
-  const [queuedChatDrafts, setQueuedChatDrafts] = useState<Record<string, string[]>>({});
+  const [queuedChatDrafts, setQueuedChatDrafts] = useState<Record<string, QueuedChatSubmission[]>>({});
+  const [composerAttachments, setComposerAttachments] = useState<Record<string, ComposerAttachmentDraft[]>>({});
   const [composerSelections, setComposerSelections] = useState<Record<string, ComposerSelection>>({});
   const [turnIds, setTurnIds] = useState<Record<string, string>>({});
   const [thinkingConversations, setThinkingConversations] = useState<Record<string, boolean>>({});
-  const queuedChatDraftsRef = useRef<Record<string, string[]>>({});
+  const queuedChatDraftsRef = useRef<Record<string, QueuedChatSubmission[]>>({});
   const queuedChatDispatchingRef = useRef(new Set<string>());
-  const sendQueuedChatDraftRef = useRef<(text: string, conversationId: string) => Promise<boolean>>(async () => false);
+  const sendQueuedChatDraftRef = useRef<(submission: QueuedChatSubmission, conversationId: string) => Promise<boolean>>(async () => false);
 
   const activeTurnId = activeConversationId ? turnIds[activeConversationId] ?? '' : '';
 
@@ -1135,6 +1373,24 @@ export default function App() {
       const next = typeof value === 'function' ? value(previous) : value;
       if (next === previous) {
         return current;
+      }
+      return { ...current, [conversationId]: next };
+    });
+  }, []);
+
+  const setConversationAttachments = useCallback((conversationId: string, value: SetStateAction<ComposerAttachmentDraft[]>) => {
+    if (!conversationId) {
+      return;
+    }
+    setComposerAttachments((current) => {
+      const previous = current[conversationId] ?? [];
+      const next = typeof value === 'function' ? value(previous) : value;
+      if (next === previous) {
+        return current;
+      }
+      if (next.length === 0) {
+        const { [conversationId]: _removed, ...rest } = current;
+        return rest;
       }
       return { ...current, [conversationId]: next };
     });
@@ -1647,9 +1903,10 @@ export default function App() {
       if (isTurnTerminalEvent(event)) {
         setConversationThinking(targetConversationId, false);
         const queuedDrafts = queuedChatDraftsRef.current[targetConversationId] ?? [];
-        const nextQueuedDraft = queuedDrafts[0]?.trim() ?? '';
+        const nextQueuedDraft = queuedDrafts[0] ?? null;
         if (
           nextQueuedDraft &&
+          (nextQueuedDraft.text.trim() || nextQueuedDraft.attachments.length > 0) &&
           !queuedChatDispatchingRef.current.has(targetConversationId)
         ) {
           queuedChatDispatchingRef.current.add(targetConversationId);
@@ -1659,7 +1916,7 @@ export default function App() {
               if (sent) {
                 setQueuedChatDrafts((current) => {
                   const queue = current[targetConversationId] ?? [];
-                  if (queue.length === 0 || queue[0]?.trim() !== nextQueuedDraft) {
+                  if (queue.length === 0 || queue[0]?.id !== nextQueuedDraft.id) {
                     return current;
                   }
                   const nextQueue = queue.slice(1);
@@ -2366,7 +2623,12 @@ export default function App() {
   );
 
   const sendLocalTurn = useCallback(
-    async (text: string, mode: ConversationRecord['mode'] = 'implement', conversationId = activeConversationRef.current) => {
+    async (
+      text: string,
+      mode: ConversationRecord['mode'] = 'implement',
+      conversationId = activeConversationRef.current,
+      attachments: ComposerAttachmentDraft[] = [],
+    ) => {
       const context = getConversationContext(conversationId);
       if (!context) {
         Alert.alert('未选择对话', '请先选择工作区和对话。');
@@ -2401,7 +2663,7 @@ export default function App() {
         codexSessionId: sessionId,
         tenantId: workspace.tenantId,
         threadId,
-        input: [{ type: 'text', text }],
+        input: codexInputFromComposer(text, attachments),
         approvalPolicy: workspace.approvalPolicy || settings.approvalPolicy || undefined,
         sandboxPolicy: sandboxPolicyForMode(workspace.sandboxMode || settings.sandboxMode),
         serviceTier: workspace.serviceTier || undefined,
@@ -2426,7 +2688,7 @@ export default function App() {
                   sessionId: commandWorkspace.sessionId,
                   threadId,
                   mode,
-                  title: conversation.title === '默认对话' ? text.slice(0, 18) || conversation.title : conversation.title,
+                  title: conversation.title === '默认对话' ? text.slice(0, 18) || attachmentPrompt(attachments).slice(0, 18) || conversation.title : conversation.title,
                   updatedAt: Date.now(),
                 }
               : conversation,
@@ -2442,7 +2704,8 @@ export default function App() {
   );
 
   useEffect(() => {
-    sendQueuedChatDraftRef.current = (text, conversationId) => sendLocalTurn(text, 'implement', conversationId);
+    sendQueuedChatDraftRef.current = (submission, conversationId) =>
+      sendLocalTurn(submission.text, 'implement', conversationId, submission.attachments);
   }, [sendLocalTurn]);
 
   const sendApprovalResponse = useCallback(
@@ -2885,7 +3148,8 @@ export default function App() {
 
   const submitChat = useCallback((conversationId: string) => {
     const text = (chatDrafts[conversationId] ?? '').trim();
-    if (!text) {
+    const attachments = composerAttachments[conversationId] ?? [];
+    if (!text && attachments.length === 0) {
       return;
     }
     const context = getConversationContext(conversationId);
@@ -2903,18 +3167,33 @@ export default function App() {
         appendTimeline(makeSystemEntry('已引用文件', mentionSummary, workspace.id, conversationId));
       }
     }
+    if (attachments.length > 0) {
+      appendTimeline(makeSystemEntry('已附加附件', attachmentSummary(attachments), workspace.id, conversationId));
+    }
     setConversationChatDraft(conversationId, '');
     setConversationComposerSelection(conversationId, DEFAULT_COMPOSER_SELECTION);
+    setConversationAttachments(conversationId, []);
     if (isThinking) {
       setQueuedChatDrafts((current) => ({
         ...current,
-        [conversationId]: [...(current[conversationId] ?? []), text],
+        [conversationId]: [
+          ...(current[conversationId] ?? []),
+          {
+            id: createRequestId('queued'),
+            text,
+            attachments,
+          },
+        ],
       }));
       appendTimeline(makeSystemEntry('消息已加入候选', '当前任务完成后会自动继续发送。', workspace.id, conversationId));
       return;
     }
+    if (attachments.length > 0) {
+      void sendLocalTurn(text, 'implement', conversationId, attachments);
+      return;
+    }
     sendSlashCommand(text, conversationId);
-  }, [appendTimeline, chatDrafts, getConversationContext, thinkingConversations, rememberMentionReferences, sendSlashCommand, setConversationChatDraft, setConversationComposerSelection]);
+  }, [appendTimeline, chatDrafts, composerAttachments, getConversationContext, rememberMentionReferences, sendLocalTurn, sendSlashCommand, setConversationAttachments, setConversationChatDraft, setConversationComposerSelection, thinkingConversations]);
 
   const runWorkspaceCommand = useCallback((workspace: WorkspaceRecord, conversation: ConversationRecord, command: 'start' | 'status' | 'attach' | 'stop' | 'interrupt') => {
     if (command === 'start') {
@@ -3019,10 +3298,12 @@ export default function App() {
                   pendingRequests={pendingRequests}
                   selectedRequest={selectedRequest}
                   chatDraft={chatDrafts[props.route.params.conversationId] ?? ''}
+                  composerAttachments={composerAttachments[props.route.params.conversationId] ?? []}
                   composerSelection={composerSelections[props.route.params.conversationId] ?? DEFAULT_COMPOSER_SELECTION}
                   isThinking={thinkingConversations[props.route.params.conversationId] === true}
                   lastError={lastError}
                   setChatDraft={(value) => setConversationChatDraft(props.route.params.conversationId, value)}
+                  setComposerAttachments={(value) => setConversationAttachments(props.route.params.conversationId, value)}
                   setComposerSelection={(value) => setConversationComposerSelection(props.route.params.conversationId, value)}
                   submitChat={submitChat}
                   stopThinking={stopThinking}
@@ -3385,10 +3666,12 @@ function ChatScreen({
   pendingRequests,
   selectedRequest,
   chatDraft,
+  composerAttachments,
   composerSelection,
   isThinking,
   lastError,
   setChatDraft,
+  setComposerAttachments,
   setComposerSelection,
   submitChat,
   stopThinking,
@@ -3404,10 +3687,12 @@ function ChatScreen({
   pendingRequests: PendingRequest[];
   selectedRequest: PendingRequest | null;
   chatDraft: string;
+  composerAttachments: ComposerAttachmentDraft[];
   composerSelection: TextInputSelectionChangeEventData['selection'];
   isThinking: boolean;
   lastError: string;
   setChatDraft: Dispatch<SetStateAction<string>>;
+  setComposerAttachments: Dispatch<SetStateAction<ComposerAttachmentDraft[]>>;
   setComposerSelection: Dispatch<SetStateAction<TextInputSelectionChangeEventData['selection']>>;
   submitChat: (conversationId: string) => void;
   stopThinking: (conversationId: string) => void;
@@ -3420,6 +3705,7 @@ function ChatScreen({
   const [mentionEntries, setMentionEntries] = useState<WorkspaceEntry[]>([]);
   const [expandedProgressIds, setExpandedProgressIds] = useState<Set<string>>(() => new Set());
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [attachmentMenuVisible, setAttachmentMenuVisible] = useState(false);
   const messageScrollRef = useRef<ScrollView | null>(null);
   const shouldFollowLatestRef = useRef(true);
   const initialLatestScrollRef = useRef(true);
@@ -3563,6 +3849,191 @@ function ChatScreen({
     setComposerSelection({ start: nextCursor, end: nextCursor });
     requestAnimationFrame(() => composerInputRef.current?.focus());
   }, [mentionTrigger, setChatDraft]);
+
+  const appendComposerAttachments = useCallback((items: ComposerAttachmentDraft[]) => {
+    if (items.length === 0) {
+      return;
+    }
+
+    let rejected = 0;
+    setComposerAttachments((current) => {
+      const next = [...current];
+      let fileBytes = next.reduce((total, attachment) => total + (attachment.kind === 'file' ? (attachment.sizeBytes ?? 0) : 0), 0);
+
+      for (const item of items) {
+        if (next.length >= MAX_COMPOSER_ATTACHMENTS) {
+          rejected += 1;
+          continue;
+        }
+        const sizeBytes = item.sizeBytes ?? 0;
+        if (item.kind === 'image' && sizeBytes > MAX_IMAGE_ATTACHMENT_BYTES) {
+          rejected += 1;
+          continue;
+        }
+        if (item.kind === 'file' && sizeBytes > 0 && fileBytes + sizeBytes > MAX_FILE_ATTACHMENT_BYTES) {
+          rejected += 1;
+          continue;
+        }
+        next.push(item);
+        if (item.kind === 'file') {
+          fileBytes += sizeBytes;
+        }
+      }
+
+      return next;
+    });
+
+    if (rejected > 0) {
+      Alert.alert(
+        '附件已部分忽略',
+        `最多 ${MAX_COMPOSER_ATTACHMENTS} 个附件，图片单个不超过 ${formatBytes(MAX_IMAGE_ATTACHMENT_BYTES)}，非图片文件总大小不超过 ${formatBytes(MAX_FILE_ATTACHMENT_BYTES)}。`,
+      );
+    }
+    requestAnimationFrame(() => composerInputRef.current?.focus());
+  }, [setComposerAttachments]);
+
+  const removeComposerAttachment = useCallback((attachmentIdValue: string) => {
+    setComposerAttachments((current) => current.filter((item) => item.id !== attachmentIdValue));
+    requestAnimationFrame(() => composerInputRef.current?.focus());
+  }, [setComposerAttachments]);
+
+  const addClipboardAttachment = useCallback(async () => {
+    try {
+      if (await Clipboard.hasImageAsync()) {
+        const image = await Clipboard.getImageAsync({ format: 'png' });
+        if (!image?.data) {
+          Alert.alert('读取剪贴板失败', '没有拿到图片数据。');
+          return;
+        }
+
+        appendComposerAttachments([
+          {
+            id: attachmentId(),
+            kind: 'image',
+            name: `clipboard-${Date.now()}.png`,
+            mimeType: 'image/png',
+            sizeBytes: null,
+            dataUrl: image.data,
+            source: 'clipboard',
+          },
+        ]);
+        setAttachmentMenuVisible(false);
+        return;
+      }
+
+      const raw = (await Clipboard.getStringAsync()).trim();
+      if (raw.startsWith('data:image/')) {
+        const mimeType = mimeTypeFromDataUrl(raw) || 'image/png';
+        appendComposerAttachments([
+          {
+            id: attachmentId(),
+            kind: 'image',
+            name: `clipboard-${Date.now()}.${mimeType.split('/').pop() || 'png'}`,
+            mimeType,
+            sizeBytes: estimatedBytesFromBase64(base64FromDataUrl(raw)),
+            dataUrl: raw,
+            source: 'clipboard',
+          },
+        ]);
+        setAttachmentMenuVisible(false);
+        return;
+      }
+
+      Alert.alert('剪贴板里没有可用图片', '请先复制一张图片后再粘贴。');
+      setAttachmentMenuVisible(false);
+    } catch (error) {
+      Alert.alert('粘贴失败', error instanceof Error ? error.message : '无法从剪贴板读取图片。');
+    }
+  }, [appendComposerAttachments]);
+
+  const pickLibraryAttachments = useCallback(async () => {
+    try {
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert('需要相册权限', '允许相册权限后才能从相册选择图片。');
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        allowsMultipleSelection: true,
+        base64: true,
+        quality: 1,
+      });
+
+      if (result.canceled || !result.assets?.length) {
+        return;
+      }
+
+      const drafts: ComposerAttachmentDraft[] = [];
+      for (const asset of result.assets) {
+        const name = asset.fileName || `photo-${Date.now()}.jpg`;
+        const mimeType = asset.mimeType || inferMimeType(name, 'image/jpeg');
+        const sizeBytes = await resolveFileSizeBytes(asset.uri, asset.fileSize);
+        if ((sizeBytes ?? 0) > MAX_IMAGE_ATTACHMENT_BYTES) {
+          continue;
+        }
+        const { dataUrl } = await readBase64DataUrl(asset.uri, mimeType, asset.base64 ?? null);
+        drafts.push({
+          id: attachmentId(),
+          kind: 'image',
+          name,
+          mimeType,
+          sizeBytes,
+          dataUrl,
+          source: 'library',
+        });
+      }
+
+      appendComposerAttachments(drafts);
+      setAttachmentMenuVisible(false);
+    } catch (error) {
+      Alert.alert('选择图片失败', error instanceof Error ? error.message : '无法从相册导入图片。');
+    }
+  }, [appendComposerAttachments]);
+
+  const pickFileAttachments = useCallback(async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: '*/*',
+        multiple: true,
+        copyToCacheDirectory: true,
+      });
+
+      if (result.canceled || !result.assets?.length) {
+        return;
+      }
+
+      const drafts: ComposerAttachmentDraft[] = [];
+      for (const asset of result.assets) {
+        const name = asset.name || fileNameFromUri(asset.uri, 'attachment');
+        const mimeType = asset.mimeType || inferMimeType(name);
+        const sizeBytes = await resolveFileSizeBytes(asset.uri, asset.size);
+        const attachmentKind = isImageMimeType(mimeType) ? 'image' : 'file';
+        const sizeLimit = attachmentKind === 'image' ? MAX_IMAGE_ATTACHMENT_BYTES : MAX_FILE_ATTACHMENT_BYTES;
+        if ((sizeBytes ?? 0) > sizeLimit) {
+          continue;
+        }
+        const textContent = await readTextAttachmentContent(asset.uri, name, mimeType, sizeBytes);
+        const { dataUrl, sizeBytes: dataSizeBytes } = await readBase64DataUrl(asset.uri, mimeType, asset.base64 ?? null);
+        drafts.push({
+          id: attachmentId(),
+          kind: attachmentKind,
+          name,
+          mimeType,
+          sizeBytes: sizeBytes ?? dataSizeBytes,
+          dataUrl,
+          textContent,
+          source: 'file',
+        });
+      }
+
+      appendComposerAttachments(drafts);
+      setAttachmentMenuVisible(false);
+    } catch (error) {
+      Alert.alert('选择文件失败', error instanceof Error ? error.message : '无法打开文件选择器。');
+    }
+  }, [appendComposerAttachments]);
 
   const toggleProgressId = useCallback((id: string, collapsed: boolean) => {
     setExpandedProgressIds((current) => {
@@ -3829,40 +4300,79 @@ function ChatScreen({
             ))}
           </View>
         ) : null}
-        <TextInput
-          ref={composerInputRef}
-          value={chatDraft}
-          onChangeText={setChatDraft}
-          onSelectionChange={(event) => setComposerSelection(event.nativeEvent.selection)}
-          onKeyPress={(event) => {
-            if (event.nativeEvent.key === 'Escape' && isThinking) {
-              stopThinking(route.params.conversationId);
-            }
-          }}
-          selection={composerSelection}
-          placeholder="输入消息，@ 引用文件，/ 输入命令"
-          placeholderTextColor="#7a8391"
-          style={styles.composerInput}
-          multiline
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
-        <View style={styles.composerActions}>
-          {isThinking ? (
-            <Pressable
-              accessibilityLabel="中断当前任务"
-              onPress={() => stopThinking(route.params.conversationId)}
-              style={styles.stopButton}
-            >
-              <Text style={styles.stopButtonText}>ESC</Text>
-            </Pressable>
-          ) : null}
+        {composerAttachments.length > 0 ? (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.attachmentRail}>
+            {composerAttachments.map((attachment) => (
+              <View key={attachment.id} style={styles.attachmentChip}>
+                <View style={styles.attachmentPreview}>
+                  {attachment.kind === 'image' ? (
+                    <Image source={{ uri: attachment.dataUrl }} style={styles.attachmentPreviewImage} />
+                  ) : (
+                    <Text style={styles.attachmentPreviewText}>FILE</Text>
+                  )}
+                </View>
+                <View style={styles.attachmentChipMain}>
+                  <Text style={styles.attachmentChipName} numberOfLines={1}>
+                    {attachment.name}
+                  </Text>
+                  <Text style={styles.attachmentChipMeta} numberOfLines={1}>
+                    {attachment.kind === 'image' ? '图片' : '文件'} · {formatBytes(attachment.sizeBytes)}
+                  </Text>
+                </View>
+                <Pressable
+                  accessibilityLabel={`移除附件 ${attachment.name}`}
+                  onPress={() => removeComposerAttachment(attachment.id)}
+                  style={styles.attachmentRemoveButton}
+                >
+                  <Text style={styles.attachmentRemoveText}>×</Text>
+                </Pressable>
+              </View>
+            ))}
+          </ScrollView>
+        ) : null}
+        <View style={styles.composerInputRow}>
           <Pressable
-            onPress={() => submitChat(route.params.conversationId)}
-            style={styles.sendButton}
+            accessibilityLabel="添加附件"
+            onPress={() => setAttachmentMenuVisible(true)}
+            style={styles.attachmentButton}
           >
-            <Text style={styles.sendButtonText}>发送</Text>
+            <Text style={styles.attachmentButtonText}>📎</Text>
           </Pressable>
+          <TextInput
+            ref={composerInputRef}
+            value={chatDraft}
+            onChangeText={setChatDraft}
+            onSelectionChange={(event) => setComposerSelection(event.nativeEvent.selection)}
+            onKeyPress={(event) => {
+              if (event.nativeEvent.key === 'Escape' && isThinking) {
+                stopThinking(route.params.conversationId);
+              }
+            }}
+            selection={composerSelection}
+            placeholder="输入消息，@ 引用文件，/ 输入命令"
+            placeholderTextColor="#7a8391"
+            style={styles.composerInput}
+            multiline
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <View style={styles.composerActions}>
+            {isThinking ? (
+              <Pressable
+                accessibilityLabel="中断当前任务"
+                onPress={() => stopThinking(route.params.conversationId)}
+                style={styles.stopButton}
+              >
+                <Text style={styles.stopButtonText}>ESC</Text>
+              </Pressable>
+            ) : null}
+            <Pressable
+              onPress={() => submitChat(route.params.conversationId)}
+              style={styles.sendButton}
+            >
+              <Text style={styles.sendButtonText}>发送</Text>
+            </Pressable>
+          </View>
         </View>
       </View>
 
@@ -3888,6 +4398,34 @@ function ChatScreen({
                 navigation.popToTop();
               }}
               close={() => setMenuVisible(false)}
+            />
+          </View>
+        </Pressable>
+      </Modal>
+
+      <Modal
+        visible={attachmentMenuVisible}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setAttachmentMenuVisible(false)}
+      >
+        <Pressable style={styles.menuBackdrop} onPress={() => setAttachmentMenuVisible(false)}>
+          <View style={styles.attachmentMenuSheet}>
+            <Text style={styles.menuTitle}>添加附件</Text>
+            <MenuItem
+              title="从剪贴板粘贴"
+              onPress={() => void addClipboardAttachment()}
+              close={() => setAttachmentMenuVisible(false)}
+            />
+            <MenuItem
+              title="从相册选择"
+              onPress={() => void pickLibraryAttachments()}
+              close={() => setAttachmentMenuVisible(false)}
+            />
+            <MenuItem
+              title="选择文件"
+              onPress={() => void pickFileAttachments()}
+              close={() => setAttachmentMenuVisible(false)}
             />
           </View>
         </Pressable>
@@ -5113,10 +5651,101 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: '#d8e0e7',
     backgroundColor: '#ffffff',
+    gap: 10,
+  },
+  attachmentRail: {
+    gap: 8,
+    paddingBottom: 2,
+  },
+  attachmentChip: {
+    width: 210,
     flexDirection: 'row',
-    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d7dce0',
+    backgroundColor: '#f7f9fa',
+    padding: 8,
+  },
+  attachmentPreview: {
+    width: 38,
+    height: 38,
+    borderRadius: 6,
+    backgroundColor: '#e9edf1',
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  attachmentPreviewImage: {
+    width: '100%',
+    height: '100%',
+  },
+  attachmentPreviewText: {
+    color: '#52606d',
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  attachmentChipMain: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  attachmentChipName: {
+    color: '#17202a',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  attachmentChipMeta: {
+    color: '#66717c',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  attachmentRemoveButton: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#cfd5da',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  attachmentRemoveText: {
+    color: '#52606d',
+    fontSize: 16,
+    fontWeight: '800',
+    lineHeight: 16,
+  },
+  composerInputRow: {
+    flexDirection: 'row',
+    flexWrap: 'nowrap',
     alignItems: 'flex-end',
     gap: 10,
+  },
+  attachmentButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d7dce0',
+    backgroundColor: '#ffffff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  attachmentButtonText: {
+    color: '#17202a',
+    fontSize: 20,
+    fontWeight: '800',
+    lineHeight: 22,
+  },
+  attachmentMenuSheet: {
+    width: 240,
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d8e0e7',
+    overflow: 'hidden',
   },
   slashPanel: {
     width: '100%',
