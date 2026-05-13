@@ -19,8 +19,8 @@
     "@noble/post-quantum": "^0.6.1",
     "@react-native-async-storage/async-storage": "2.2.0",
     "@react-navigation/native": "^7.2.4",
-    "@react-navigation/native-stack": "^7.14.14",
-    "expo": "~54.0.33",
+    "@react-navigation/native-stack": "^7.15.0",
+    "expo": "~54.0.34",
     "expo-camera": "^55.0.18",
     "expo-clipboard": "~8.0.8",
     "expo-document-picker": "~14.0.8",
@@ -39,7 +39,7 @@
   },
   "devDependencies": {
     "@types/react": "~19.1.0",
-    "typescript": "~5.9.2"
+    "typescript": "~5.9.3"
   },
   "private": true
 }
