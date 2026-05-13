@@ -4653,7 +4653,11 @@ function SettingsScreen({
       setSettings((current) => applyPairingToSettings(current, pairing));
       setPairingScannerVisible(false);
       setPairingScannerArmed(false);
-      Alert.alert('已导入连接', `${pairing.serverUrl} · ${pairing.encryptionProtocol}`);
+      const summary = `${pairing.serverUrl} · ${pairing.encryptionProtocol}`;
+      const manualHint = pairing.importWarning
+        ? `\n\n已先填写二维码中的基础信息，密钥或地址可手动调整后再连接。\n${pairing.importWarning}`
+        : '\n\n可在连接前继续手动调整配置。';
+      Alert.alert('已填写配对信息', `${summary}${manualHint}`);
     } catch (error) {
       Alert.alert('配对失败', error instanceof Error ? error.message : '二维码内容无效');
     }
@@ -4738,7 +4742,7 @@ function SettingsScreen({
               inputStyle={styles.encryptionKeyInput}
             />
             <Row>
-              <ActionButton title="扫码一键配对" onPress={openPairingScanner} tone="solid" />
+              <ActionButton title="扫码填写配对" onPress={openPairingScanner} tone="solid" />
               <ActionButton title="粘贴配对内容" onPress={pastePairingFromClipboard} tone="ghost" />
             </Row>
           </View>
@@ -4773,7 +4777,7 @@ function SettingsScreen({
             onBarcodeScanned={pairingScannerArmed ? handlePairingScan : undefined}
           />
           <View style={styles.scannerFooter}>
-            <Text style={styles.scannerTitle}>扫描 TodeX 一键配对二维码</Text>
+            <Text style={styles.scannerTitle}>扫描 TodeX 配对二维码</Text>
             <ActionButton title="关闭" onPress={() => setPairingScannerVisible(false)} tone="ghost" />
           </View>
         </View>

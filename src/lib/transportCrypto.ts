@@ -39,6 +39,7 @@ export type ParsedPairing = {
   authToken: string;
   encryptionProtocol: TransportEncryptionProtocol;
   encryptionPublicKey: string;
+  importWarning?: string;
 };
 
 export type TransportCryptoSession = {
@@ -62,19 +63,46 @@ export async function resolvePairingPayload(raw: string): Promise<ParsedPairing>
   if (parsed.version !== 1 || !parsed.pairingUrl) {
     throw new Error('不是有效的 TodeX 配对链接二维码');
   }
-  const response = await fetchPairingLink(parsed);
-  if (!response.ok) {
-    throw new Error(`读取后端配对密钥失败: HTTP ${response.status}`);
+  const linkPairing = parsePairingLinkObject(parsed);
+  try {
+    const response = await fetchPairingLink(parsed);
+    if (!response.ok) {
+      return {
+        ...linkPairing,
+        importWarning: `读取后端配对密钥失败: HTTP ${response.status}`,
+      };
+    }
+    const pairingPayload = (await response.json()) as Partial<PairingPayload>;
+    const pairing = parsePairingObject({
+      ...pairingPayload,
+      preferredEncryption: parsed.preferredEncryption ?? pairingPayload.preferredEncryption,
+    });
+    return {
+      ...pairing,
+      serverUrl: parsed.serverUrl || pairing.serverUrl,
+      authToken: parsed.authToken ?? pairing.authToken,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '读取后端配对密钥失败';
+    return {
+      ...linkPairing,
+      importWarning: message,
+    };
   }
-  const pairingPayload = (await response.json()) as Partial<PairingPayload>;
-  const pairing = parsePairingObject({
-    ...pairingPayload,
-    preferredEncryption: parsed.preferredEncryption ?? pairingPayload.preferredEncryption,
-  });
+}
+
+function parsePairingLinkObject(parsed: Partial<PairingLinkPayload>): ParsedPairing {
+  if (parsed.kind !== 'todex-pairing-link' || parsed.version !== 1) {
+    throw new Error('不是有效的 TodeX 配对链接二维码');
+  }
+  if (!parsed.serverUrl) {
+    throw new Error('配对二维码缺少后端地址');
+  }
   return {
-    ...pairing,
-    serverUrl: parsed.serverUrl || pairing.serverUrl,
-    authToken: parsed.authToken ?? pairing.authToken,
+    serverUrl: parsed.serverUrl,
+    authToken: parsed.authToken ?? '',
+    encryptionProtocol: normalizePairingProtocol(parsed.preferredEncryption) ?? 'none',
+    encryptionPublicKey: '',
   };
 }
 
@@ -115,6 +143,10 @@ function parsePairingObject(parsed: Partial<PairingPayload>): ParsedPairing {
     encryptionProtocol: selected.id,
     encryptionPublicKey: selected.publicKey,
   };
+}
+
+function normalizePairingProtocol(protocol: unknown): TransportEncryptionProtocol | null {
+  return protocol === 'none' || protocol === 'x25519' || protocol === 'ml-kem-768' ? protocol : null;
 }
 
 export function applyPairingToSettings(

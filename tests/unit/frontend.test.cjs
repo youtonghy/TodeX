@@ -193,7 +193,7 @@ test('resolves pairing links through the configured authenticated endpoint', asy
   }
 });
 
-test('explains unreachable local-only pairing links', async () => {
+test('imports pairing link settings even when the key endpoint is unreachable', async () => {
   executedTests += 1;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => {
@@ -201,16 +201,22 @@ test('explains unreachable local-only pairing links', async () => {
   };
 
   try {
-    await assert.rejects(
-      () => transportCrypto.resolvePairingPayload(JSON.stringify({
-        kind: 'todex-pairing-link',
-        version: 1,
-        serverUrl: 'http://127.0.0.1:7345',
-        pairingUrl: 'http://127.0.0.1:7345/v1/pairing',
-        authToken: 'secret',
-      })),
-      /地址只在后端本机可用/,
-    );
+    const pairing = await transportCrypto.resolvePairingPayload(JSON.stringify({
+      kind: 'todex-pairing-link',
+      version: 1,
+      serverUrl: 'http://127.0.0.1:7345',
+      pairingUrl: 'http://127.0.0.1:7345/v1/pairing',
+      authToken: 'secret',
+      preferredEncryption: 'x25519',
+    }));
+    assert.match(pairing.importWarning, /地址只在后端本机可用/);
+    assert.deepEqual(pairing, {
+      serverUrl: 'http://127.0.0.1:7345',
+      authToken: 'secret',
+      encryptionProtocol: 'x25519',
+      encryptionPublicKey: '',
+      importWarning: pairing.importWarning,
+    });
   } finally {
     globalThis.fetch = originalFetch;
   }
