@@ -13,23 +13,10 @@ type PairingProtocol = {
   publicKey: string;
 };
 
-export type PairingPayload = {
-  kind: 'todex-pairing';
-  version: number;
-  serverUrl: string;
-  wsUrl?: string;
-  host?: string;
-  port?: number;
-  authToken?: string;
-  preferredEncryption?: TransportEncryptionProtocol;
-  protocols: PairingProtocol[];
-};
-
 type PairingLinkPayload = {
   kind: 'todex-pairing-link';
   version: number;
   serverUrl: string;
-  pairingUrl: string;
   authToken?: string;
   preferredEncryption?: TransportEncryptionProtocol;
   protocol?: PairingProtocol;
@@ -52,47 +39,9 @@ export type TransportCryptoSession = {
 
 const AAD = utf8('todex-ws-transport-crypto-v1');
 
-export function parsePairingPayload(raw: string): ParsedPairing {
-  return parsePairingObject(JSON.parse(raw) as Partial<PairingPayload>);
-}
-
 export async function resolvePairingPayload(raw: string): Promise<ParsedPairing> {
-  const parsed = JSON.parse(raw) as Partial<PairingPayload | PairingLinkPayload>;
-  if (parsed.kind !== 'todex-pairing-link') {
-    return parsePairingObject(parsed as Partial<PairingPayload>);
-  }
-  if (parsed.version !== 1 || !parsed.pairingUrl) {
-    throw new Error('不是有效的 TodeX 配对链接二维码');
-  }
-  const linkPairing = parsePairingLinkObject(parsed);
-  if (linkPairing.encryptionProtocol === 'none' || linkPairing.encryptionPublicKey) {
-    return linkPairing;
-  }
-  try {
-    const response = await fetchPairingLink(parsed);
-    if (!response.ok) {
-      return {
-        ...linkPairing,
-        importWarning: `读取后端配对密钥失败: HTTP ${response.status}`,
-      };
-    }
-    const pairingPayload = (await response.json()) as Partial<PairingPayload>;
-    const pairing = parsePairingObject({
-      ...pairingPayload,
-      preferredEncryption: parsed.preferredEncryption ?? pairingPayload.preferredEncryption,
-    });
-    return {
-      ...pairing,
-      serverUrl: parsed.serverUrl || pairing.serverUrl,
-      authToken: parsed.authToken ?? pairing.authToken,
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : '读取后端配对密钥失败';
-    return {
-      ...linkPairing,
-      importWarning: message,
-    };
-  }
+  const parsed = JSON.parse(raw) as Partial<PairingLinkPayload>;
+  return parsePairingLinkObject(parsed);
 }
 
 function parsePairingLinkObject(parsed: Partial<PairingLinkPayload>): ParsedPairing {
@@ -124,51 +73,7 @@ function parsePairingLinkObject(parsed: Partial<PairingLinkPayload>): ParsedPair
       encryptionPublicKey: protocol.publicKey,
     };
   }
-  return {
-    serverUrl: parsed.serverUrl,
-    authToken: parsed.authToken ?? '',
-    encryptionProtocol: selectedProtocol,
-    encryptionPublicKey: '',
-  };
-}
-
-function parsePairingObject(parsed: Partial<PairingPayload>): ParsedPairing {
-  if (parsed.kind !== 'todex-pairing' || parsed.version !== 1) {
-    throw new Error('不是有效的 TodeX 配对二维码');
-  }
-  if (parsed.preferredEncryption === 'none') {
-    if (!parsed.serverUrl) {
-      throw new Error('配对二维码缺少后端地址');
-    }
-    return {
-      serverUrl: parsed.serverUrl,
-      authToken: parsed.authToken ?? '',
-      encryptionProtocol: 'none',
-      encryptionPublicKey: '',
-    };
-  }
-  const protocols = Array.isArray(parsed.protocols) ? parsed.protocols : [];
-  const preferred = parsed.preferredEncryption;
-  const selected =
-    (preferred ? protocols.find((protocol) => protocol.id === preferred) : undefined) ??
-    protocols.find((protocol) => protocol.id === 'ml-kem-768') ??
-    protocols.find((protocol) => protocol.id === 'x25519');
-  if (!selected?.publicKey) {
-    throw new Error('配对二维码缺少可用加密公钥');
-  }
-  if (selected.id !== 'x25519' && selected.id !== 'ml-kem-768') {
-    throw new Error(`不支持的加密协议: ${selected.id}`);
-  }
-  if (!parsed.serverUrl) {
-    throw new Error('配对二维码缺少后端地址');
-  }
-
-  return {
-    serverUrl: parsed.serverUrl,
-    authToken: parsed.authToken ?? '',
-    encryptionProtocol: selected.id,
-    encryptionPublicKey: selected.publicKey,
-  };
+  throw new Error('配对二维码缺少当前加密方式的公钥');
 }
 
 function normalizePairingProtocol(protocol: unknown): TransportEncryptionProtocol | null {
@@ -186,34 +91,6 @@ export function applyPairingToSettings(
     encryptionProtocol: pairing.encryptionProtocol,
     encryptionPublicKey: pairing.encryptionPublicKey,
   };
-}
-
-async function fetchPairingLink(parsed: Partial<PairingLinkPayload>): Promise<Response> {
-  try {
-    return await fetch(parsed.pairingUrl!, {
-      headers: parsed.authToken ? { Authorization: `Bearer ${parsed.authToken}` } : undefined,
-    });
-  } catch (error) {
-    throw new Error(pairingNetworkErrorMessage(parsed.pairingUrl!, error));
-  }
-}
-
-function pairingNetworkErrorMessage(pairingUrl: string, error: unknown): string {
-  const detail = error instanceof Error && error.message ? ` (${error.message})` : '';
-  const hint =
-    pairingUrlHasLocalOnlyHost(pairingUrl)
-      ? '二维码里的地址只在后端本机可用。请用 `cargo run -- tui --host 0.0.0.0` 或在 TUI 里把 listen IP 改成 0.0.0.0 后重启服务，再重新扫码。'
-      : '请确认手机和后端在同一网络、后端监听的是 0.0.0.0 或局域网 IP，并且移动端构建已允许 HTTP 明文访问。';
-  return `无法连接后端配对接口${detail}。${hint}`;
-}
-
-function pairingUrlHasLocalOnlyHost(pairingUrl: string): boolean {
-  try {
-    const host = new URL(pairingUrl).hostname.toLowerCase();
-    return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '0.0.0.0' || host === '::';
-  } catch {
-    return false;
-  }
 }
 
 export function createTransportCryptoSession(settings: ConnectionSettings): TransportCryptoSession | null {

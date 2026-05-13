@@ -8,7 +8,7 @@ const transportCrypto = require(path.join(compiledDir, 'transportCrypto.js'));
 let executedTests = 0;
 
 process.on('exit', () => {
-  assert.equal(executedTests, 10);
+  assert.equal(executedTests, 9);
 });
 
 function baseSettings(overrides = {}) {
@@ -117,18 +117,15 @@ test('classifies approval requests and builds matching response payloads', () =>
   });
 });
 
-test('parses pairing payloads and applies encrypted settings', () => {
+test('parses embedded pairing links and applies encrypted settings', async () => {
   executedTests += 1;
-  const pairing = transportCrypto.parsePairingPayload(JSON.stringify({
-    kind: 'todex-pairing',
+  const pairing = await transportCrypto.resolvePairingPayload(JSON.stringify({
+    kind: 'todex-pairing-link',
     version: 1,
     serverUrl: 'http://127.0.0.1:7345',
     authToken: 'token',
     preferredEncryption: 'x25519',
-    protocols: [
-      { id: 'x25519', publicKey: 'x-key' },
-      { id: 'ml-kem-768', publicKey: 'kem-key' },
-    ],
+    protocol: { id: 'x25519', publicKey: 'x-key' },
   }));
 
   assert.deepEqual(pairing, {
@@ -146,54 +143,7 @@ test('parses pairing payloads and applies encrypted settings', () => {
   });
 });
 
-test('resolves pairing links through the configured authenticated endpoint', async () => {
-  executedTests += 1;
-  const requests = [];
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (url, options) => {
-    requests.push({ url, options });
-    return {
-      ok: true,
-      async json() {
-        return {
-          kind: 'todex-pairing',
-          version: 1,
-          serverUrl: 'http://backend-internal:7345',
-          protocols: [
-            { id: 'x25519', publicKey: 'x-key' },
-            { id: 'ml-kem-768', publicKey: 'kem-key' },
-          ],
-        };
-      },
-    };
-  };
-
-  try {
-    const pairing = await transportCrypto.resolvePairingPayload(JSON.stringify({
-      kind: 'todex-pairing-link',
-      version: 1,
-      serverUrl: 'http://phone-visible:7345',
-      pairingUrl: 'http://backend-internal:7345/v1/pairing',
-      authToken: 'secret',
-      preferredEncryption: 'x25519',
-    }));
-
-    assert.deepEqual(requests, [{
-      url: 'http://backend-internal:7345/v1/pairing',
-      options: { headers: { Authorization: 'Bearer secret' } },
-    }]);
-    assert.deepEqual(pairing, {
-      serverUrl: 'http://phone-visible:7345',
-      authToken: 'secret',
-      encryptionProtocol: 'x25519',
-      encryptionPublicKey: 'x-key',
-    });
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test('imports pairing links with embedded selected public keys without fetching', async () => {
+test('imports pairing links with embedded selected public keys', async () => {
   executedTests += 1;
   const requests = [];
   const originalFetch = globalThis.fetch;
@@ -207,7 +157,6 @@ test('imports pairing links with embedded selected public keys without fetching'
       kind: 'todex-pairing-link',
       version: 1,
       serverUrl: 'http://phone-visible:7345',
-      pairingUrl: 'http://backend-internal:7345/v1/pairing',
       authToken: 'secret',
       preferredEncryption: 'ml-kem-768',
       protocol: { id: 'ml-kem-768', publicKey: 'kem-key' },
@@ -232,7 +181,6 @@ test('rejects pairing links with mismatched embedded public keys', async () => {
       kind: 'todex-pairing-link',
       version: 1,
       serverUrl: 'http://phone-visible:7345',
-      pairingUrl: 'http://backend-internal:7345/v1/pairing',
       authToken: 'secret',
       preferredEncryption: 'x25519',
       protocol: { id: 'ml-kem-768', publicKey: 'kem-key' },
@@ -241,33 +189,18 @@ test('rejects pairing links with mismatched embedded public keys', async () => {
   );
 });
 
-test('imports pairing link settings even when the key endpoint is unreachable', async () => {
+test('rejects encrypted pairing links without embedded public keys', async () => {
   executedTests += 1;
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => {
-    throw new TypeError('Network request failed');
-  };
-
-  try {
-    const pairing = await transportCrypto.resolvePairingPayload(JSON.stringify({
+  await assert.rejects(
+    () => transportCrypto.resolvePairingPayload(JSON.stringify({
       kind: 'todex-pairing-link',
       version: 1,
       serverUrl: 'http://127.0.0.1:7345',
-      pairingUrl: 'http://127.0.0.1:7345/v1/pairing',
       authToken: 'secret',
       preferredEncryption: 'x25519',
-    }));
-    assert.match(pairing.importWarning, /地址只在后端本机可用/);
-    assert.deepEqual(pairing, {
-      serverUrl: 'http://127.0.0.1:7345',
-      authToken: 'secret',
-      encryptionProtocol: 'x25519',
-      encryptionPublicKey: '',
-      importWarning: pairing.importWarning,
-    });
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+    })),
+    /缺少当前加密方式的公钥/,
+  );
 });
 
 test('does not create crypto sessions for plaintext and rejects missing keys', () => {
