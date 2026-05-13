@@ -32,6 +32,7 @@ type PairingLinkPayload = {
   pairingUrl: string;
   authToken?: string;
   preferredEncryption?: TransportEncryptionProtocol;
+  protocol?: PairingProtocol;
 };
 
 export type ParsedPairing = {
@@ -64,6 +65,9 @@ export async function resolvePairingPayload(raw: string): Promise<ParsedPairing>
     throw new Error('不是有效的 TodeX 配对链接二维码');
   }
   const linkPairing = parsePairingLinkObject(parsed);
+  if (linkPairing.encryptionProtocol === 'none' || linkPairing.encryptionPublicKey) {
+    return linkPairing;
+  }
   try {
     const response = await fetchPairingLink(parsed);
     if (!response.ok) {
@@ -98,10 +102,32 @@ function parsePairingLinkObject(parsed: Partial<PairingLinkPayload>): ParsedPair
   if (!parsed.serverUrl) {
     throw new Error('配对二维码缺少后端地址');
   }
+  const protocol = parsed.protocol;
+  const protocolId = normalizePairingProtocol(protocol?.id);
+  const selectedProtocol = normalizePairingProtocol(parsed.preferredEncryption) ?? protocolId ?? 'none';
+  if (selectedProtocol === 'none') {
+    return {
+      serverUrl: parsed.serverUrl,
+      authToken: parsed.authToken ?? '',
+      encryptionProtocol: 'none',
+      encryptionPublicKey: '',
+    };
+  }
+  if (protocol?.publicKey) {
+    if (protocolId !== selectedProtocol) {
+      throw new Error('配对二维码的加密方式和公钥不匹配');
+    }
+    return {
+      serverUrl: parsed.serverUrl,
+      authToken: parsed.authToken ?? '',
+      encryptionProtocol: selectedProtocol,
+      encryptionPublicKey: protocol.publicKey,
+    };
+  }
   return {
     serverUrl: parsed.serverUrl,
     authToken: parsed.authToken ?? '',
-    encryptionProtocol: normalizePairingProtocol(parsed.preferredEncryption) ?? 'none',
+    encryptionProtocol: selectedProtocol,
     encryptionPublicKey: '',
   };
 }

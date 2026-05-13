@@ -8,7 +8,7 @@ const transportCrypto = require(path.join(compiledDir, 'transportCrypto.js'));
 let executedTests = 0;
 
 process.on('exit', () => {
-  assert.equal(executedTests, 8);
+  assert.equal(executedTests, 10);
 });
 
 function baseSettings(overrides = {}) {
@@ -191,6 +191,54 @@ test('resolves pairing links through the configured authenticated endpoint', asy
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('imports pairing links with embedded selected public keys without fetching', async () => {
+  executedTests += 1;
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url, options });
+    throw new TypeError('Network request failed');
+  };
+
+  try {
+    const pairing = await transportCrypto.resolvePairingPayload(JSON.stringify({
+      kind: 'todex-pairing-link',
+      version: 1,
+      serverUrl: 'http://phone-visible:7345',
+      pairingUrl: 'http://backend-internal:7345/v1/pairing',
+      authToken: 'secret',
+      preferredEncryption: 'ml-kem-768',
+      protocol: { id: 'ml-kem-768', publicKey: 'kem-key' },
+    }));
+
+    assert.deepEqual(requests, []);
+    assert.deepEqual(pairing, {
+      serverUrl: 'http://phone-visible:7345',
+      authToken: 'secret',
+      encryptionProtocol: 'ml-kem-768',
+      encryptionPublicKey: 'kem-key',
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('rejects pairing links with mismatched embedded public keys', async () => {
+  executedTests += 1;
+  await assert.rejects(
+    () => transportCrypto.resolvePairingPayload(JSON.stringify({
+      kind: 'todex-pairing-link',
+      version: 1,
+      serverUrl: 'http://phone-visible:7345',
+      pairingUrl: 'http://backend-internal:7345/v1/pairing',
+      authToken: 'secret',
+      preferredEncryption: 'x25519',
+      protocol: { id: 'ml-kem-768', publicKey: 'kem-key' },
+    })),
+    /加密方式和公钥不匹配/,
+  );
 });
 
 test('imports pairing link settings even when the key endpoint is unreachable', async () => {
