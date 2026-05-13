@@ -57,6 +57,7 @@ import {
   eventPayloadData,
   extractThreadIdFromEvent,
   inferApprovalResponseType,
+  normalizeReasoningEffort,
   normalizeThreadId,
   normalizeServerUrl,
   sandboxPolicyForMode,
@@ -142,6 +143,11 @@ type PendingThreadStart = {
 type ConversationContext = {
   workspace: WorkspaceRecord;
   conversation: ConversationRecord;
+};
+
+type ModelCommandPromptState = {
+  conversationId: string;
+  initialValue: string;
 };
 
 type TimelineTarget = {
@@ -718,6 +724,80 @@ const defaultConnectionHealth: ConnectionHealth = {
   lastCheckedAt: null,
   error: '',
 };
+
+function modelCommandInitialValue(workspace: WorkspaceRecord, settings: ConnectionSettings): string {
+  return [workspace.model || settings.defaultModel, normalizeReasoningEffort(workspace.reasoningEffort)]
+    .filter(Boolean)
+    .join(' ');
+}
+
+function parseModelCommandArgs(args: string[]): {
+  model: string;
+  reasoningEffort: string | null;
+  invalidReasoningEffort: string;
+} {
+  let model = '';
+  let reasoningEffort: string | null = null;
+  let invalidReasoningEffort = '';
+  let expected: 'model' | 'effort' | null = null;
+
+  for (const rawArg of args) {
+    const arg = rawArg.trim();
+    if (!arg) {
+      continue;
+    }
+    const lower = arg.toLowerCase();
+
+    if (lower === '--model' || lower === '-m' || lower === 'model') {
+      expected = 'model';
+      continue;
+    }
+    if (
+      lower === '--effort' ||
+      lower === '--reasoning' ||
+      lower === '--thinking' ||
+      lower === '-e' ||
+      lower === 'effort' ||
+      lower === 'reasoning' ||
+      lower === 'thinking'
+    ) {
+      expected = 'effort';
+      continue;
+    }
+
+    if (expected === 'model') {
+      model = arg;
+      expected = null;
+      continue;
+    }
+
+    const normalizedEffort = normalizeReasoningEffort(arg);
+    if (expected === 'effort') {
+      if (normalizedEffort) {
+        reasoningEffort = normalizedEffort;
+      } else {
+        invalidReasoningEffort = arg;
+      }
+      expected = null;
+      continue;
+    }
+
+    if (normalizedEffort) {
+      reasoningEffort = normalizedEffort;
+      continue;
+    }
+
+    if (!model) {
+      model = arg;
+    }
+  }
+
+  if (expected === 'effort') {
+    invalidReasoningEffort = invalidReasoningEffort || 'missing';
+  }
+
+  return { model, reasoningEffort, invalidReasoningEffort };
+}
 
 function toPersistedSettings(settings: ConnectionSettings): PersistedSettings {
   const { authToken: _authToken, ...rest } = settings;
@@ -1358,6 +1438,7 @@ export default function App() {
   const [queuedChatDrafts, setQueuedChatDrafts] = useState<Record<string, QueuedChatSubmission[]>>({});
   const [composerAttachments, setComposerAttachments] = useState<Record<string, ComposerAttachmentDraft[]>>({});
   const [composerSelections, setComposerSelections] = useState<Record<string, ComposerSelection>>({});
+  const [modelCommandPrompt, setModelCommandPrompt] = useState<ModelCommandPromptState | null>(null);
   const [turnIds, setTurnIds] = useState<Record<string, string>>({});
   const [thinkingConversations, setThinkingConversations] = useState<Record<string, boolean>>({});
   const queuedChatDraftsRef = useRef<Record<string, QueuedChatSubmission[]>>({});
@@ -1497,6 +1578,7 @@ export default function App() {
       const nextSettings = fromPersistedSettings(storedSettings, storedToken);
       const normalizedWorkspaces = storedWorkspaces.map((workspace) => ({
         ...workspace,
+        reasoningEffort: normalizeReasoningEffort(workspace.reasoningEffort),
         threadId: '',
         localAdapterState: 'idle' as LocalAdapterState,
       }));
@@ -2148,7 +2230,6 @@ export default function App() {
       socket.onopen = () => {
         attachedSessionIdsRef.current.clear();
         setConnectionState('open');
-        pushSystem('已连接', crypto ? `${wsUrl} · ${crypto.protocol}` : wsUrl);
         void checkConnectionHealth();
         void refreshServerVersion();
       };
@@ -2171,7 +2252,6 @@ export default function App() {
       socket.onclose = () => {
         setConnectionState((current) => (current === 'open' || current === 'connecting' ? 'closed' : current));
         socketCryptoRef.current = null;
-        pushSystem('已断开', wsUrl);
       };
     } catch (error) {
       setConnectionState('error');
@@ -2261,6 +2341,7 @@ export default function App() {
         tenantId: settings.tenantId,
         threadId,
         model: settings.defaultModel,
+        reasoningEffort: null,
         approvalPolicy: settings.approvalPolicy,
         sandboxMode: settings.sandboxMode,
         serviceTier: null,
@@ -2536,10 +2617,12 @@ export default function App() {
           codexSessionId: sessionId,
           tenantId: workspace.tenantId,
           cwd: workspace.path,
-          model: workspace.model,
+          model: workspace.model || settings.defaultModel || undefined,
           approvalPolicy: workspace.approvalPolicy,
           sandboxMode: workspace.sandboxMode,
-          configOverrides: {},
+          configOverrides: {
+            reasoningEffort: workspace.reasoningEffort || undefined,
+          },
         }, requestId);
 
         if (!sent) {
@@ -2551,7 +2634,7 @@ export default function App() {
         }
       });
     },
-    [pushSystem, sendProtocolMessage, updateConversation],
+    [pushSystem, sendProtocolMessage, settings.defaultModel, updateConversation],
   );
 
   const ensureThreadId = useCallback(
@@ -2606,6 +2689,7 @@ export default function App() {
             ephemeral: true,
             cwd: workspace.path,
             model: workspace.model || settings.defaultModel || undefined,
+            reasoningEffort: workspace.reasoningEffort || undefined,
             approvalPolicy: workspace.approvalPolicy || settings.approvalPolicy || undefined,
             sandbox: workspace.sandboxMode || settings.sandboxMode || undefined,
             serviceTier: workspace.serviceTier || undefined,
@@ -2673,6 +2757,7 @@ export default function App() {
           mode: 'default',
           settings: {
             model: workspace.model || settings.defaultModel,
+            reasoningEffort: workspace.reasoningEffort || undefined,
             developerInstructions: null,
           },
         },
@@ -2770,6 +2855,57 @@ export default function App() {
     );
   }, [applyPermissionPreset]);
 
+  const applyModelCommand = useCallback(
+    (conversationId: string, args: string[], promptWhenEmpty = true) => {
+      const context = getConversationContext(conversationId);
+      if (!context) {
+        Alert.alert('未选择工作区', '请先选择一个工作区。');
+        return;
+      }
+
+      const { workspace, conversation } = context;
+      const { model, reasoningEffort, invalidReasoningEffort } = parseModelCommandArgs(args);
+      if (invalidReasoningEffort) {
+        Alert.alert(
+          '无效思考强度',
+          '支持 none、minimal、low、medium、high、xhigh，也支持 max 作为 xhigh 的别名。',
+        );
+        return;
+      }
+
+      if (!model && !reasoningEffort) {
+        if (promptWhenEmpty) {
+          setModelCommandPrompt({
+            conversationId: conversation.id,
+            initialValue: modelCommandInitialValue(workspace, settings),
+          });
+        } else {
+          Alert.alert('Model', '请输入模型名或思考强度，例如 gpt-5.5 high。');
+        }
+        return;
+      }
+
+      const nextModel = model || workspace.model || settings.defaultModel;
+      const nextReasoningEffort = reasoningEffort ?? normalizeReasoningEffort(workspace.reasoningEffort);
+      updateWorkspace(workspace.id, {
+        ...(model ? { model: nextModel } : {}),
+        ...(reasoningEffort ? { reasoningEffort: nextReasoningEffort } : {}),
+      });
+
+      const detail = [
+        `Model: ${nextModel || '未设置'}`,
+        `Reasoning: ${nextReasoningEffort || '默认'}`,
+      ].join('\n');
+      appendTimeline(makeSystemEntry(
+        'Model settings updated',
+        `${detail}\n后续新 thread 和 turn 会把这些参数发送给 Codex app-server。`,
+        workspace.id,
+        conversation.id,
+      ));
+    },
+    [appendTimeline, getConversationContext, settings, updateWorkspace],
+  );
+
   const sendSlashCommand = useCallback(
     (input: string, conversationId = activeConversationRef.current) => {
       const trimmed = input.trim();
@@ -2827,18 +2963,7 @@ export default function App() {
       }
 
       if (lower === 'model') {
-        const nextModel = rest[0]?.trim() ?? '';
-        if (!nextModel) {
-          Alert.alert('Model', workspace.model || settings.defaultModel || '未设置模型');
-          return;
-        }
-        updateWorkspace(workspace.id, { model: nextModel });
-        appendTimeline(makeSystemEntry(
-          `Model updated to ${nextModel}`,
-          '后续新 thread 和 turn 会把该模型作为 Codex app-server 的 model 参数发送。',
-          workspace.id,
-          conversation.id,
-        ));
+        applyModelCommand(conversation.id, rest);
         return;
       }
 
@@ -3106,6 +3231,7 @@ export default function App() {
       addCommandNotice(`/${lower} recognized`, '该命令不在当前内置命令清单中，已阻止作为普通 prompt 发送。');
     },
     [
+      applyModelCommand,
       appendTimeline,
       createConversation,
       ensureThreadId,
@@ -3337,6 +3463,18 @@ export default function App() {
             </Stack.Screen>
           </Stack.Navigator>
         </NavigationContainer>
+        <PromptModal
+          visible={Boolean(modelCommandPrompt)}
+          title="切换模型"
+          initialValue={modelCommandPrompt?.initialValue ?? ''}
+          placeholder="gpt-5.5 high"
+          onCancel={() => setModelCommandPrompt(null)}
+          onSubmit={(value) => {
+            const targetConversationId = modelCommandPrompt?.conversationId ?? '';
+            setModelCommandPrompt(null);
+            applyModelCommand(targetConversationId, value.trim().split(/\s+/), false);
+          }}
+        />
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );
@@ -4678,6 +4816,8 @@ function SettingsScreen({
           <Diagnostic label="数据目录" value={serverVersion?.data_dir ?? 'unknown'} />
           <Diagnostic label="工作区根目录" value={serverVersion?.workspace_root ?? 'unknown'} />
           <Diagnostic label="当前目录" value={activeWorkspace?.path ?? 'none'} />
+          <Diagnostic label="当前模型" value={activeWorkspace?.model || settings.defaultModel || 'none'} />
+          <Diagnostic label="思考强度" value={activeWorkspace?.reasoningEffort || '默认'} />
           <Diagnostic label="待处理请求" value={String(pendingRequestCount)} />
           <Diagnostic label="当前 Turn" value={turnId || 'unknown'} />
         </View>

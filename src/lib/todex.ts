@@ -22,6 +22,7 @@ export type WorkspaceRecord = {
   tenantId: string;
   threadId: string;
   model: string;
+  reasoningEffort?: string | null;
   approvalPolicy: string;
   sandboxMode: string;
   serviceTier?: string | null;
@@ -94,6 +95,36 @@ export function normalizeServerUrl(raw: string): string {
   }
 
   return `http://${value}`;
+}
+
+export function normalizeReasoningEffort(value: string | null | undefined): string | null {
+  const normalized = value?.trim().toLowerCase().replace(/[\s_-]+/g, '') ?? '';
+  if (!normalized) {
+    return null;
+  }
+  switch (normalized) {
+    case 'none':
+    case 'off':
+      return 'none';
+    case 'minimal':
+    case 'min':
+      return 'minimal';
+    case 'low':
+      return 'low';
+    case 'medium':
+    case 'med':
+    case 'default':
+      return 'medium';
+    case 'high':
+      return 'high';
+    case 'xhigh':
+    case 'extra':
+    case 'extrahigh':
+    case 'max':
+      return 'xhigh';
+    default:
+      return null;
+  }
 }
 
 export function buildHttpUrl(serverUrl: string, pathname: string): string {
@@ -413,10 +444,12 @@ export const COMMAND_PRESETS: CommandPreset[] = [
     description: 'Start a local Codex CLI adapter for the selected workspace.',
     build: (ctx) => ({
       ...localCwdPayload(ctx),
-      model: ctx.settings.defaultModel || undefined,
+      model: ctx.workspace?.model || ctx.settings.defaultModel || undefined,
       approvalPolicy: ctx.settings.approvalPolicy || undefined,
       sandboxMode: ctx.settings.sandboxMode || undefined,
-      configOverrides: {},
+      configOverrides: {
+        reasoningEffort: ctx.workspace?.reasoningEffort || undefined,
+      },
     }),
   },
   {
@@ -448,7 +481,8 @@ export const COMMAND_PRESETS: CommandPreset[] = [
       collaborationMode: {
         mode: 'default',
         settings: {
-          model: ctx.settings.defaultModel || undefined,
+          model: ctx.workspace?.model || ctx.settings.defaultModel || undefined,
+          reasoningEffort: ctx.workspace?.reasoningEffort || undefined,
           developerInstructions: null,
         },
       },

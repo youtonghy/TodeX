@@ -8,7 +8,7 @@ const transportCrypto = require(path.join(compiledDir, 'transportCrypto.js'));
 let executedTests = 0;
 
 process.on('exit', () => {
-  assert.equal(executedTests, 7);
+  assert.equal(executedTests, 8);
 });
 
 function baseSettings(overrides = {}) {
@@ -44,6 +44,15 @@ test('builds HTTP and WebSocket URLs from flexible server addresses', () => {
     todex.buildWebSocketUrl('ws://127.0.0.1:7345/path', '?enc=ml-kem-768'),
     'ws://127.0.0.1:7345/v1/ws?enc=ml-kem-768',
   );
+});
+
+test('normalizes Codex reasoning effort aliases', () => {
+  executedTests += 1;
+  assert.equal(todex.normalizeReasoningEffort('high'), 'high');
+  assert.equal(todex.normalizeReasoningEffort('extra-high'), 'xhigh');
+  assert.equal(todex.normalizeReasoningEffort('max'), 'xhigh');
+  assert.equal(todex.normalizeReasoningEffort('default'), 'medium');
+  assert.equal(todex.normalizeReasoningEffort('unknown'), null);
 });
 
 test('extracts thread ids from nested server event payloads', () => {
