@@ -66,8 +66,11 @@ import {
 import { loadJson, loadSecret, saveJson, saveSecret } from './src/lib/storage';
 import {
   applyPairingToSettings,
+  assemblePairingQrChunkPayload,
   createTransportCryptoSession,
+  parsePairingQrFrame,
   resolvePairingPayload,
+  type PairingQrChunk,
   type TransportCryptoSession,
 } from './src/lib/transportCrypto';
 
@@ -102,6 +105,12 @@ type ConversationRecord = {
 type ComposerSelection = TextInputSelectionChangeEventData['selection'];
 
 const DEFAULT_COMPOSER_SELECTION: ComposerSelection = { start: 0, end: 0 };
+
+type PairingChunkCollector = {
+  checksum: string;
+  total: number;
+  chunks: Map<number, PairingQrChunk>;
+};
 
 type ComposerAttachmentDraft = {
   id: string;
@@ -4603,7 +4612,10 @@ function SettingsScreen({
 }) {
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [pairingScannerVisible, setPairingScannerVisible] = useState(false);
-  const [pairingScannerArmed, setPairingScannerArmed] = useState(true);
+  const [pairingScannerStatus, setPairingScannerStatus] = useState('对准后端配对二维码。');
+  const pairingChunkCollectorRef = useRef<PairingChunkCollector | null>(null);
+  const pairingScanBusyRef = useRef(false);
+  const pairingScannerLastRawRef = useRef<string | null>(null);
   const isConnected = connectionState === 'open';
   const isConnecting = connectionState === 'connecting';
   const connectionActionTitle = isConnected || isConnecting ? '中断' : '连接';
@@ -4643,16 +4655,25 @@ function SettingsScreen({
         return;
       }
     }
-    setPairingScannerArmed(true);
+    pairingChunkCollectorRef.current = null;
+    setPairingScannerStatus('对准后端配对二维码。');
+    pairingScannerLastRawRef.current = null;
     setPairingScannerVisible(true);
   }, [cameraPermission?.granted, requestCameraPermission]);
+
+  const closePairingScanner = useCallback(() => {
+    pairingChunkCollectorRef.current = null;
+    pairingScanBusyRef.current = false;
+    pairingScannerLastRawRef.current = null;
+    setPairingScannerVisible(false);
+    setPairingScannerStatus('对准后端配对二维码。');
+  }, []);
 
   const applyPairingText = useCallback(async (raw: string) => {
     try {
       const pairing = await resolvePairingPayload(raw);
       setSettings((current) => applyPairingToSettings(current, pairing));
-      setPairingScannerVisible(false);
-      setPairingScannerArmed(false);
+      closePairingScanner();
       const summary = `${pairing.serverUrl} · ${pairing.encryptionProtocol}`;
       const manualHint = pairing.importWarning
         ? `\n\n已先填写二维码中的基础信息，密钥或地址可手动调整后再连接。\n${pairing.importWarning}`
@@ -4661,7 +4682,7 @@ function SettingsScreen({
     } catch (error) {
       Alert.alert('配对失败', error instanceof Error ? error.message : '二维码内容无效');
     }
-  }, [setSettings]);
+  }, [closePairingScanner, setSettings]);
 
   const pastePairingFromClipboard = useCallback(async () => {
     const raw = await Clipboard.getStringAsync();
@@ -4669,12 +4690,65 @@ function SettingsScreen({
   }, [applyPairingText]);
 
   const handlePairingScan = useCallback((result: BarcodeScanningResult) => {
-    if (!pairingScannerArmed) {
+    if (pairingScanBusyRef.current) {
       return;
     }
-    setPairingScannerArmed(false);
-    void applyPairingText(result.data);
-  }, [applyPairingText, pairingScannerArmed]);
+    if (pairingScannerLastRawRef.current === result.data) {
+      return;
+    }
+    pairingScannerLastRawRef.current = result.data;
+    pairingScanBusyRef.current = true;
+    void (async () => {
+      try {
+        const frame = parsePairingQrFrame(result.data);
+        if (frame.kind === 'pairing') {
+          await applyPairingText(frame.raw);
+          return;
+        }
+
+        const existing = pairingChunkCollectorRef.current;
+        if (
+          !existing ||
+          existing.checksum !== frame.chunk.checksum ||
+          existing.total !== frame.chunk.total
+        ) {
+          pairingChunkCollectorRef.current = {
+            checksum: frame.chunk.checksum,
+            total: frame.chunk.total,
+            chunks: new Map(),
+          };
+          setPairingScannerStatus(
+            `已开始收集分段二维码：0/${frame.chunk.total}`,
+          );
+        }
+
+        const collector = pairingChunkCollectorRef.current;
+        if (!collector) {
+          throw new Error('无法收集分段二维码');
+        }
+        if (frame.chunk.index < 1 || frame.chunk.index > collector.total) {
+          throw new Error('分段二维码序号无效');
+        }
+        if (!collector.chunks.has(frame.chunk.index)) {
+          collector.chunks.set(frame.chunk.index, frame.chunk);
+          setPairingScannerStatus(
+            `已收集 ${collector.chunks.size}/${collector.total} 段，请继续扫描下一张。`,
+          );
+        }
+        if (collector.chunks.size === collector.total) {
+          const assembled = assemblePairingQrChunkPayload([...collector.chunks.values()]);
+          pairingChunkCollectorRef.current = null;
+          await applyPairingText(assembled);
+        }
+      } catch (error) {
+        pairingChunkCollectorRef.current = null;
+        setPairingScannerStatus('扫描失败，请重新开始。');
+        Alert.alert('配对失败', error instanceof Error ? error.message : '二维码内容无效');
+      } finally {
+        pairingScanBusyRef.current = false;
+      }
+    })();
+  }, [applyPairingText]);
 
   return (
     <ScrollView contentContainerStyle={styles.pageContent}>
@@ -4767,18 +4841,19 @@ function SettingsScreen({
       <Modal
         visible={pairingScannerVisible}
         animationType="slide"
-        onRequestClose={() => setPairingScannerVisible(false)}
+        onRequestClose={closePairingScanner}
       >
         <View style={styles.scannerScreen}>
           <CameraView
             style={styles.scannerCamera}
             facing="back"
             barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
-            onBarcodeScanned={pairingScannerArmed ? handlePairingScan : undefined}
+            onBarcodeScanned={handlePairingScan}
           />
           <View style={styles.scannerFooter}>
             <Text style={styles.scannerTitle}>扫描 TodeX 配对二维码</Text>
-            <ActionButton title="关闭" onPress={() => setPairingScannerVisible(false)} tone="ghost" />
+            <Text style={styles.scannerStatus}>{pairingScannerStatus}</Text>
+            <ActionButton title="关闭" onPress={closePairingScanner} tone="ghost" />
           </View>
         </View>
       </Modal>
@@ -5474,6 +5549,12 @@ const styles = StyleSheet.create({
     color: '#17202a',
     fontSize: 16,
     fontWeight: '800',
+  },
+  scannerStatus: {
+    color: '#52606d',
+    fontSize: 13,
+    fontWeight: '600',
+    lineHeight: 18,
   },
   pageContent: {
     padding: 18,

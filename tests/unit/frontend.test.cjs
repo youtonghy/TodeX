@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const { test } = require('node:test');
 const path = require('node:path');
 
@@ -8,7 +9,7 @@ const transportCrypto = require(path.join(compiledDir, 'transportCrypto.js'));
 let executedTests = 0;
 
 process.on('exit', () => {
-  assert.equal(executedTests, 9);
+  assert.equal(executedTests, 10);
 });
 
 function baseSettings(overrides = {}) {
@@ -172,6 +173,53 @@ test('imports pairing links with embedded selected public keys', async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('reassembles segmented pairing qr frames into an importable payload', async () => {
+  executedTests += 1;
+  const raw = JSON.stringify({
+    kind: 'todex-pairing-link',
+    version: 1,
+    serverUrl: 'http://phone-visible:7345',
+    authToken: 'secret',
+    preferredEncryption: 'ml-kem-768',
+    protocol: {
+      id: 'ml-kem-768',
+      publicKey: 'kem-key-'.repeat(180),
+    },
+  });
+  const encoded = Buffer.from(raw, 'utf8').toString('base64url');
+  const checksum = crypto.createHash('sha256').update(raw).digest('base64url');
+  const chunkSize = 96;
+  const total = Math.ceil(encoded.length / chunkSize);
+  const frames = Array.from({ length: total }, (_, index) =>
+    JSON.stringify({
+      kind: 'todex-pairing-chunk',
+      version: 1,
+      checksum,
+      index: index + 1,
+      total,
+      data: encoded.slice(index * chunkSize, (index + 1) * chunkSize),
+    }),
+  );
+
+  const parsedFirst = transportCrypto.parsePairingQrFrame(frames[0]);
+  assert.equal(parsedFirst.kind, 'chunk');
+  assert.equal(parsedFirst.chunk.total, total);
+  assert.equal(parsedFirst.chunk.checksum, checksum);
+
+  const assembled = transportCrypto.assemblePairingQrChunkPayload(
+    frames.map((frame) => transportCrypto.parsePairingQrFrame(frame).chunk),
+  );
+  assert.equal(assembled, raw);
+
+  const pairing = await transportCrypto.resolvePairingPayload(assembled);
+  assert.deepEqual(pairing, {
+    serverUrl: 'http://phone-visible:7345',
+    authToken: 'secret',
+    encryptionProtocol: 'ml-kem-768',
+    encryptionPublicKey: 'kem-key-'.repeat(180),
+  });
 });
 
 test('rejects pairing links with mismatched embedded public keys', async () => {

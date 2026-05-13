@@ -22,6 +22,28 @@ type PairingLinkPayload = {
   protocol?: PairingProtocol;
 };
 
+type PairingChunkPayload = {
+  kind: 'todex-pairing-chunk';
+  version: number;
+  checksum: string;
+  index: number;
+  total: number;
+  data: string;
+};
+
+type PairingQrEnvelope = {
+  kind?: unknown;
+  version?: unknown;
+  serverUrl?: unknown;
+  authToken?: unknown;
+  preferredEncryption?: unknown;
+  protocol?: unknown;
+  checksum?: unknown;
+  index?: unknown;
+  total?: unknown;
+  data?: unknown;
+};
+
 export type ParsedPairing = {
   serverUrl: string;
   authToken: string;
@@ -29,6 +51,23 @@ export type ParsedPairing = {
   encryptionPublicKey: string;
   importWarning?: string;
 };
+
+export type PairingQrChunk = {
+  checksum: string;
+  index: number;
+  total: number;
+  data: string;
+};
+
+export type PairingQrFrame =
+  | {
+      kind: 'pairing';
+      raw: string;
+    }
+  | {
+      kind: 'chunk';
+      chunk: PairingQrChunk;
+    };
 
 export type TransportCryptoSession = {
   protocol: Exclude<TransportEncryptionProtocol, 'none'>;
@@ -42,6 +81,54 @@ const AAD = utf8('todex-ws-transport-crypto-v1');
 export async function resolvePairingPayload(raw: string): Promise<ParsedPairing> {
   const parsed = JSON.parse(raw) as Partial<PairingLinkPayload>;
   return parsePairingLinkObject(parsed);
+}
+
+export function parsePairingQrFrame(raw: string): PairingQrFrame {
+  const parsed = JSON.parse(raw) as PairingQrEnvelope;
+  if (parsed.kind === 'todex-pairing-link' && parsed.version === 1) {
+    return { kind: 'pairing', raw };
+  }
+  if (parsed.kind === 'todex-pairing-chunk' && parsed.version === 1) {
+    return {
+      kind: 'chunk',
+      chunk: parsePairingQrChunk(parsed),
+    };
+  }
+  throw new Error('不是有效的 TodeX 配对二维码');
+}
+
+export function assemblePairingQrChunkPayload(chunks: PairingQrChunk[]): string {
+  if (chunks.length === 0) {
+    throw new Error('分段二维码内容为空');
+  }
+  const [firstChunk] = chunks;
+  const sortedChunks = [...chunks].sort((left, right) => left.index - right.index);
+  const seen = new Set<number>();
+  for (const chunk of sortedChunks) {
+    if (chunk.checksum !== firstChunk.checksum) {
+      throw new Error('分段二维码批次不一致');
+    }
+    if (chunk.total !== firstChunk.total) {
+      throw new Error('分段二维码总数不一致');
+    }
+    if (!Number.isInteger(chunk.index) || chunk.index < 1 || chunk.index > chunk.total) {
+      throw new Error('分段二维码序号无效');
+    }
+    if (seen.has(chunk.index)) {
+      throw new Error('分段二维码存在重复分片');
+    }
+    seen.add(chunk.index);
+  }
+  if (sortedChunks.length !== firstChunk.total) {
+    throw new Error('分段二维码内容不完整');
+  }
+  const assembled = sortedChunks.map((chunk) => chunk.data).join('');
+  const decoded = decodeBase64Url(assembled);
+  const digest = encodeBase64Url(sha256(decoded));
+  if (digest !== firstChunk.checksum) {
+    throw new Error('分段二维码校验失败');
+  }
+  return new TextDecoder().decode(decoded);
 }
 
 function parsePairingLinkObject(parsed: Partial<PairingLinkPayload>): ParsedPairing {
@@ -74,6 +161,31 @@ function parsePairingLinkObject(parsed: Partial<PairingLinkPayload>): ParsedPair
     };
   }
   throw new Error('配对二维码缺少当前加密方式的公钥');
+}
+
+function parsePairingQrChunk(parsed: PairingQrEnvelope): PairingQrChunk {
+  if (typeof parsed.checksum !== 'string' || !parsed.checksum) {
+    throw new Error('分段二维码缺少校验值');
+  }
+  if (typeof parsed.data !== 'string' || !parsed.data) {
+    throw new Error('分段二维码缺少内容');
+  }
+  const index = parsed.index;
+  if (!Number.isInteger(index) || (index as number) < 1) {
+    throw new Error('分段二维码序号无效');
+  }
+  const total = parsed.total;
+  if (!Number.isInteger(total) || (total as number) < 1) {
+    throw new Error('分段二维码总数无效');
+  }
+  const chunkIndex = index as number;
+  const chunkTotal = total as number;
+  return {
+    checksum: parsed.checksum,
+    index: chunkIndex,
+    total: chunkTotal,
+    data: parsed.data,
+  };
 }
 
 function normalizePairingProtocol(protocol: unknown): TransportEncryptionProtocol | null {
