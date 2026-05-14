@@ -9,7 +9,7 @@ const transportCrypto = require(path.join(compiledDir, 'transportCrypto.js'));
 let executedTests = 0;
 
 process.on('exit', () => {
-  assert.equal(executedTests, 12);
+  assert.equal(executedTests, 14);
 });
 
 function baseSettings(overrides = {}) {
@@ -126,6 +126,55 @@ test('extracts thread ids from nested server event payloads', () => {
     }),
     'thread-top-level',
   );
+});
+
+test('parses native Codex thread list responses', () => {
+  executedTests += 1;
+  const parsed = todex.parseCodexNativeThreadListResponse({
+    result: {
+      data: [
+        {
+          id: 'thr_1',
+          name: 'Native thread',
+          preview: 'hello world',
+          status: { type: 'idle' },
+          createdAt: 100,
+          updatedAt: 120,
+          session: { cwd: '/workspace/app' },
+          model: 'gpt-5.5',
+        },
+      ],
+    },
+  });
+
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].id, 'thr_1');
+  assert.equal(parsed[0].title, 'Native thread');
+  assert.equal(parsed[0].status, 'idle');
+  assert.equal(parsed[0].cwd, '/workspace/app');
+  assert.equal(parsed[0].updatedAt, 120000);
+});
+
+test('parses native Codex thread objects from control responses', () => {
+  executedTests += 1;
+  const parsed = todex.parseCodexNativeThread({
+    payload: {
+      data: {
+        result: {
+          thread: {
+            id: 'thr_forked',
+            preview: 'forked work',
+            archived: false,
+          },
+        },
+      },
+    },
+  });
+
+  assert.ok(parsed);
+  assert.equal(parsed.id, 'thr_forked');
+  assert.equal(parsed.title, 'forked work');
+  assert.equal(parsed.archived, false);
 });
 
 test('classifies approval requests and builds matching response payloads', () => {
