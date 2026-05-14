@@ -4833,6 +4833,10 @@ function SettingsScreen({
           setPairingScannerStatus(
             `已收集 ${collector.chunks.size}/${collector.total} 段，请继续扫描下一张。`,
           );
+        } else {
+          setPairingScannerStatus(
+            `已扫描过第 ${frame.chunk.index}/${collector.total} 段，请切换到下一张二维码。`,
+          );
         }
         if (collector.chunks.size === collector.total) {
           const assembled = assemblePairingQrChunkPayload([...collector.chunks.values()]);
