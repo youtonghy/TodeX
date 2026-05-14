@@ -12,6 +12,7 @@ import {
 } from 'react';
 import {
   Alert,
+  AppState,
   Image,
   Keyboard,
   type NativeScrollEvent,
@@ -147,6 +148,11 @@ type PendingThreadStart = {
   resolve: (threadId: string) => void;
   reject: (reason: Error) => void;
   timeoutId: ReturnType<typeof setTimeout>;
+};
+
+type PendingJsonSave = {
+  timeoutId: ReturnType<typeof setTimeout>;
+  value: unknown;
 };
 
 type ConversationContext = {
@@ -628,6 +634,9 @@ const ACTIVE_SELECTION_STORAGE_KEY = 'todex.mobile.activeSelection.v1';
 const MENTION_HISTORY_STORAGE_KEY = 'todex.mobile.mentionHistory.v1';
 const SESSION_CURSORS_STORAGE_KEY = 'todex.mobile.sessionCursors.v1';
 const TOKEN_STORAGE_KEY = 'todex.mobile.token.v1';
+const JSON_SAVE_DEBOUNCE_MS = 350;
+const SESSION_CURSOR_SAVE_DEBOUNCE_MS = 800;
+const SOCKET_EVENT_BATCH_SIZE = 24;
 const MAX_TIMELINE_ITEMS = 260;
 const MAX_EVENTS = 220;
 const RECONNECT_DELAY_MS = 2500;
@@ -1421,6 +1430,9 @@ export default function App() {
   const conversationsRef = useRef<ConversationRecord[]>([]);
   const pendingLocalStartsRef = useRef(new Map<string, PendingLocalStart>());
   const pendingThreadStartsRef = useRef(new Map<string, PendingThreadStart>());
+  const pendingJsonSavesRef = useRef(new Map<string, PendingJsonSave>());
+  const pendingServerEventsRef = useRef<ServerEvent[]>([]);
+  const pendingServerEventFrameRef = useRef<number | null>(null);
   const autoConnectAttemptedRef = useRef(false);
   const attachedSessionIdsRef = useRef(new Set<string>());
   const sessionCursorsRef = useRef(new Map<string, number>());
@@ -1530,10 +1542,40 @@ export default function App() {
     });
   }, []);
 
+  const flushJsonSave = useCallback((key?: string) => {
+    const entries = key
+      ? Array.from(pendingJsonSavesRef.current.entries()).filter(([entryKey]) => entryKey === key)
+      : Array.from(pendingJsonSavesRef.current.entries());
+
+    for (const [entryKey, pending] of entries) {
+      clearTimeout(pending.timeoutId);
+      pendingJsonSavesRef.current.delete(entryKey);
+      void saveJson(entryKey, pending.value);
+    }
+  }, []);
+
+  const scheduleJsonSave = useCallback(<T,>(key: string, value: T, delayMs = JSON_SAVE_DEBOUNCE_MS) => {
+    const previous = pendingJsonSavesRef.current.get(key);
+    if (previous) {
+      clearTimeout(previous.timeoutId);
+    }
+
+    const timeoutId = setTimeout(() => {
+      const pending = pendingJsonSavesRef.current.get(key);
+      if (!pending || pending.timeoutId !== timeoutId) {
+        return;
+      }
+      pendingJsonSavesRef.current.delete(key);
+      void saveJson(key, pending.value);
+    }, delayMs);
+
+    pendingJsonSavesRef.current.set(key, { timeoutId, value });
+  }, []);
+
   const persistSessionCursors = useCallback(() => {
     const cursors = Object.fromEntries(sessionCursorsRef.current.entries());
-    void saveJson(SESSION_CURSORS_STORAGE_KEY, cursors);
-  }, []);
+    scheduleJsonSave(SESSION_CURSORS_STORAGE_KEY, cursors, SESSION_CURSOR_SAVE_DEBOUNCE_MS);
+  }, [scheduleJsonSave]);
 
   const closeSocket = useCallback((manual = true) => {
     if (manual) {
@@ -1555,7 +1597,32 @@ export default function App() {
     }
     socketCryptoRef.current = null;
     attachedSessionIdsRef.current.clear();
+    pendingServerEventsRef.current = [];
+    if (pendingServerEventFrameRef.current !== null) {
+      cancelAnimationFrame(pendingServerEventFrameRef.current);
+      pendingServerEventFrameRef.current = null;
+    }
   }, []);
+
+  useEffect(() => {
+    return () => {
+      flushJsonSave();
+      pendingServerEventsRef.current = [];
+      if (pendingServerEventFrameRef.current !== null) {
+        cancelAnimationFrame(pendingServerEventFrameRef.current);
+        pendingServerEventFrameRef.current = null;
+      }
+    };
+  }, [flushJsonSave]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') {
+        flushJsonSave();
+      }
+    });
+    return () => subscription.remove();
+  }, [flushJsonSave]);
 
   useEffect(() => {
     let alive = true;
@@ -1695,8 +1762,8 @@ export default function App() {
     if (!hydrated) {
       return;
     }
-    void saveJson(TIMELINE_STORAGE_KEY, timeline.slice(0, MAX_TIMELINE_ITEMS));
-  }, [hydrated, timeline]);
+    scheduleJsonSave(TIMELINE_STORAGE_KEY, timeline.slice(0, MAX_TIMELINE_ITEMS));
+  }, [hydrated, scheduleJsonSave, timeline]);
 
   useEffect(() => {
     if (!hydrated) {
@@ -2122,6 +2189,27 @@ export default function App() {
     [appendTimeline, findPendingLocalStart, persistSessionCursors, resetWorkspaceSession, resolveTimelineTarget, settlePendingLocalStart, settlePendingThreadStart, setConversationThinking, setConversationTurnId, updateConversation, upsertChatTimeline],
   );
 
+  const scheduleServerEventDrain = useCallback(() => {
+    if (pendingServerEventFrameRef.current !== null) {
+      return;
+    }
+
+    pendingServerEventFrameRef.current = requestAnimationFrame(() => {
+      pendingServerEventFrameRef.current = null;
+      const batch = pendingServerEventsRef.current.splice(0, SOCKET_EVENT_BATCH_SIZE);
+      batch.forEach(appendEvent);
+
+      if (pendingServerEventsRef.current.length > 0) {
+        scheduleServerEventDrain();
+      }
+    });
+  }, [appendEvent]);
+
+  const enqueueServerEvent = useCallback((event: ServerEvent) => {
+    pendingServerEventsRef.current.push(event);
+    scheduleServerEventDrain();
+  }, [scheduleServerEventDrain]);
+
   const pushSystem = useCallback(
     (title: string, subtitle = '') => {
       appendTimeline(makeSystemEntry(title, subtitle, activeWorkspaceRef.current, activeConversationRef.current));
@@ -2247,7 +2335,7 @@ export default function App() {
         try {
           const text = socketCryptoRef.current?.decryptServerText(String(event.data)) ?? String(event.data);
           const data = JSON.parse(text) as ServerEvent;
-          appendEvent(data);
+          enqueueServerEvent(data);
         } catch (error) {
           setLastError(error instanceof Error ? error.message : 'failed to parse websocket message');
         }
@@ -2267,7 +2355,7 @@ export default function App() {
       socketCryptoRef.current = null;
       setLastError(error instanceof Error ? error.message : 'failed to connect');
     }
-  }, [appendEvent, checkConnectionHealth, closeSocket, pushSystem, refreshServerVersion, settings]);
+  }, [checkConnectionHealth, closeSocket, enqueueServerEvent, pushSystem, refreshServerVersion, settings]);
 
   useEffect(() => {
     if (!hydrated || !autoConnectEnabled || manualDisconnectRef.current) {
@@ -3676,6 +3764,16 @@ function ConversationListScreen({
   const [renamingConversation, setRenamingConversation] = useState<ConversationRecord | null>(null);
   const workspace = workspaces.find((item) => item.id === route.params.workspaceId) ?? null;
   const workspaceConversations = conversations.filter((conversation) => conversation.workspaceId === route.params.workspaceId);
+  const latestVisibleByConversation = useMemo(() => {
+    const latest = new Map<string, TimelineEntry>();
+    for (const entry of timeline) {
+      if (!entry.conversationId || latest.has(entry.conversationId) || !isVisibleConversationEntry(entry)) {
+        continue;
+      }
+      latest.set(entry.conversationId, entry);
+    }
+    return latest;
+  }, [timeline]);
 
   useEffect(() => {
     selectWorkspace(route.params.workspaceId);
@@ -3699,8 +3797,7 @@ function ConversationListScreen({
   }, [createConversation, navigation, route.params.workspaceId, workspace?.name]);
 
   const conversationTitle = (conversation: ConversationRecord) => {
-    const latest = timeline.find((entry) => entry.conversationId === conversation.id && isVisibleConversationEntry(entry));
-    return conversation.title || conversationPreviewText(latest);
+    return conversation.title || conversationPreviewText(latestVisibleByConversation.get(conversation.id));
   };
 
   const openConversationActions = (conversation: ConversationRecord) => {
@@ -3753,8 +3850,7 @@ function ConversationListScreen({
         <EmptyState text="还没有对话。点右上角 + 创建一个纯粹的新对话。" />
       ) : (
         workspaceConversations.map((conversation) => {
-          const latest = timeline.find((entry) => entry.conversationId === conversation.id && isVisibleConversationEntry(entry));
-          const preview = conversation.title || conversationPreviewText(latest);
+          const preview = conversation.title || conversationPreviewText(latestVisibleByConversation.get(conversation.id));
           const active = isConversationActive(conversation);
           return (
             <Pressable
@@ -3866,11 +3962,13 @@ function ChatScreen({
   const composerPaddingBottom = 12 + (keyboardInset > 0 ? 0 : insets.bottom);
   const workspace = workspaces.find((item) => item.id === route.params.workspaceId) ?? null;
   const conversation = conversations.find((item) => item.id === route.params.conversationId) ?? null;
-  const conversationMessages = timeline
-    .filter((entry) => entry.conversationId === route.params.conversationId)
-    .filter(isVisibleConversationEntry)
-    .slice()
-    .reverse();
+  const conversationMessages = useMemo(
+    () => timeline
+      .filter((entry) => entry.conversationId === route.params.conversationId && isVisibleConversationEntry(entry))
+      .slice()
+      .reverse(),
+    [route.params.conversationId, timeline],
+  );
   const chatHeaderTitle = conversation?.title || conversationPreviewText(conversationMessages[conversationMessages.length - 1]);
   const conversationRenderItems = useMemo(
     () => buildConversationRenderItems(conversationMessages),
