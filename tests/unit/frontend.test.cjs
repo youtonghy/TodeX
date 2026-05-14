@@ -5,11 +5,12 @@ const path = require('node:path');
 
 const compiledDir = path.join(__dirname, '..', '..', 'dist', 'unit');
 const todex = require(path.join(compiledDir, 'todex.js'));
+const transport = require(path.join(compiledDir, 'transport.js'));
 const transportCrypto = require(path.join(compiledDir, 'transportCrypto.js'));
 let executedTests = 0;
 
 process.on('exit', () => {
-  assert.equal(executedTests, 14);
+  assert.equal(executedTests, 17);
 });
 
 function baseSettings(overrides = {}) {
@@ -126,6 +127,110 @@ test('extracts thread ids from nested server event payloads', () => {
     }),
     'thread-top-level',
   );
+});
+
+test('transport client unwraps enveloped server events', () => {
+  executedTests += 1;
+  const client = new transport.TodeXTransportClient({ loadSessionCursors: () => ({}) });
+  const events = client.decode(JSON.stringify({
+    type: 'transport.event',
+    payload: {
+      streamId: 'stream-1',
+      seqId: 1,
+      sessionId: 'session-1',
+      cursor: 4,
+      payload: {
+        type: 'codex.item.completed',
+        payload: { data: { text: 'done' } },
+      },
+    },
+  }));
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, 'codex.item.completed');
+  assert.equal(events[0].codex_session_id, 'session-1');
+  assert.equal(events[0].cursor, 4);
+});
+
+test('transport client reassembles chunked frames before decoding events', () => {
+  executedTests += 1;
+  const client = new transport.TodeXTransportClient({ loadSessionCursors: () => ({}) });
+  const payload = JSON.stringify({
+    type: 'transport.event',
+    payload: {
+      streamId: 'stream-1',
+      seqId: 2,
+      sessionId: 'session-1',
+      cursor: 5,
+      payload: {
+        type: 'codex.item.completed',
+        payload: { data: { text: 'chunked' } },
+      },
+    },
+  });
+  const first = Buffer.from(payload.slice(0, 30)).toString('base64');
+  const second = Buffer.from(payload.slice(30)).toString('base64');
+
+  assert.deepEqual(client.decode(JSON.stringify({
+    type: 'transport.chunk',
+    payload: {
+      chunkId: 'chunk-1',
+      index: 1,
+      total: 2,
+      encoding: 'base64',
+      totalBytes: Buffer.byteLength(payload),
+      data: second,
+    },
+  })), []);
+
+  const events = client.decode(JSON.stringify({
+    type: 'transport.chunk',
+    payload: {
+      chunkId: 'chunk-1',
+      index: 0,
+      total: 2,
+      encoding: 'base64',
+      totalBytes: Buffer.byteLength(payload),
+      data: first,
+    },
+  }));
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, 'codex.item.completed');
+  assert.equal(events[0].cursor, 5);
+});
+
+test('transport client sends hello, enveloped events, and cursor acks', () => {
+  executedTests += 1;
+  const sent = [];
+  const socket = {
+    readyState: 1,
+    send: (value) => sent.push(JSON.parse(value)),
+  };
+  global.WebSocket = { OPEN: 1 };
+  const client = new transport.TodeXTransportClient({
+    loadSessionCursors: () => ({ 'session-1': 3 }),
+  });
+
+  client.attach(socket, (text) => text);
+  const message = client.send('codex.local.approval.respond', {
+    codexSessionId: 'session-1',
+    tenantId: 'local',
+  }, 'approval-1');
+  client.ack({
+    type: 'codex.item.completed',
+    codex_session_id: 'session-1',
+    cursor: 6,
+    payload: {},
+  });
+
+  assert.equal(sent[0].type, 'transport.hello');
+  assert.deepEqual(sent[0].payload.sessionCursors, { 'session-1': 3 });
+  assert.equal(sent[1].type, 'transport.event');
+  assert.equal(sent[1].payload.payload.id, 'approval-1');
+  assert.equal(message.id, 'approval-1');
+  assert.equal(sent[2].type, 'transport.ack');
+  assert.equal(sent[2].payload.cursor, 6);
 });
 
 test('parses native Codex thread list responses', () => {

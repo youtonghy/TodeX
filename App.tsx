@@ -83,6 +83,12 @@ import {
   type PairingQrChunk,
   type TransportCryptoSession,
 } from './src/lib/transportCrypto';
+import {
+  TodeXTransportClient,
+  type TransportStatusSnapshot,
+  cursorFromEvent as transportCursorFromEvent,
+  sessionIdFromEvent as transportSessionIdFromEvent,
+} from './src/lib/transport';
 
 type RootStackParamList = {
   Workspaces: undefined;
@@ -135,6 +141,11 @@ type PendingThreadAction = {
 type ComposerSelection = TextInputSelectionChangeEventData['selection'];
 
 const DEFAULT_COMPOSER_SELECTION: ComposerSelection = { start: 0, end: 0 };
+const DEFAULT_TRANSPORT_STATUS: TransportStatusSnapshot = {
+  status: 'disabled',
+  clientId: '',
+  error: '',
+};
 
 type PairingChunkCollector = {
   checksum: string;
@@ -211,6 +222,14 @@ type TimelineTarget = {
 };
 
 type ConnectionState = 'idle' | 'connecting' | 'open' | 'closed' | 'error';
+
+type RuntimeStatusState = {
+  socket: ConnectionState;
+  transport: TransportStatusSnapshot;
+  daemon: ConnectionHealth['status'];
+  codexAdapter: LocalAdapterState | 'unknown';
+  turn: 'idle' | 'running';
+};
 
 type ConnectionHealth = {
   status: 'unknown' | 'checking' | 'online' | 'offline';
@@ -1283,31 +1302,22 @@ function objectPayloadOf(event: ServerEvent): Record<string, unknown> {
 }
 
 function sessionIdFromEvent(event: ServerEvent, data = eventPayloadData(event)): string {
-  const payload = objectPayloadOf(event);
+  const direct = transportSessionIdFromEvent(event);
+  if (direct) {
+    return direct;
+  }
   const candidates = [
-    event.codex_session_id,
     data.codexSessionId,
     data.codex_session_id,
     data.sessionId,
     data.session_id,
-    payload.codexSessionId,
-    payload.codex_session_id,
-    payload.sessionId,
-    payload.session_id,
   ];
   const value = candidates.find((candidate) => typeof candidate === 'string' && candidate.trim());
   return typeof value === 'string' ? value : '';
 }
 
 function cursorFromEvent(event: ServerEvent): number | null {
-  if (typeof event.cursor === 'number' && Number.isFinite(event.cursor)) {
-    return event.cursor;
-  }
-  if (typeof event.cursor === 'string') {
-    const parsed = Number(event.cursor);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
+  return transportCursorFromEvent(event);
 }
 
 function threadIdFromEventData(event: ServerEvent, data = eventPayloadData(event)): string {
@@ -1612,6 +1622,7 @@ export default function App() {
   const pendingJsonSavesRef = useRef(new Map<string, PendingJsonSave>());
   const pendingServerEventsRef = useRef<ServerEvent[]>([]);
   const pendingServerEventFrameRef = useRef<number | null>(null);
+  const transportClientRef = useRef<TodeXTransportClient | null>(null);
   const autoConnectAttemptedRef = useRef(false);
   const attachedSessionIdsRef = useRef(new Set<string>());
   const sessionCursorsRef = useRef(new Map<string, number>());
@@ -1628,6 +1639,7 @@ export default function App() {
   const [activeConversationId, setActiveConversationId] = useState('');
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
   const [connectionHealth, setConnectionHealth] = useState<ConnectionHealth>(defaultConnectionHealth);
+  const [transportStatus, setTransportStatus] = useState<TransportStatusSnapshot>(DEFAULT_TRANSPORT_STATUS);
   const [remoteModelCatalog, setRemoteModelCatalog] = useState<CodexModelCatalogItem[]>([]);
   const [modelCatalogStatus, setModelCatalogStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [modelCatalogError, setModelCatalogError] = useState('');
@@ -1776,6 +1788,10 @@ export default function App() {
     scheduleJsonSave(SESSION_CURSORS_STORAGE_KEY, cursors, SESSION_CURSOR_SAVE_DEBOUNCE_MS);
   }, [scheduleJsonSave]);
 
+  const getSessionCursorSnapshot = useCallback(() => {
+    return Object.fromEntries(sessionCursorsRef.current.entries());
+  }, []);
+
   const closeSocket = useCallback((manual = true) => {
     if (manual) {
       manualDisconnectRef.current = true;
@@ -1795,6 +1811,7 @@ export default function App() {
       socketRef.current = null;
     }
     socketCryptoRef.current = null;
+    transportClientRef.current?.detach();
     attachedSessionIdsRef.current.clear();
     pendingServerEventsRef.current = [];
     if (pendingServerEventFrameRef.current !== null) {
@@ -1993,6 +2010,14 @@ export default function App() {
     () => conversations.find((item) => item.id === activeConversationId) ?? null,
     [activeConversationId, conversations],
   );
+
+  const runtimeStatus = useMemo<RuntimeStatusState>(() => ({
+    socket: connectionState,
+    transport: transportStatus,
+    daemon: connectionHealth.status,
+    codexAdapter: activeConversation?.localAdapterState ?? activeWorkspace?.localAdapterState ?? 'unknown',
+    turn: activeTurnId ? 'running' : 'idle',
+  }), [activeConversation?.localAdapterState, activeTurnId, activeWorkspace?.localAdapterState, connectionHealth.status, connectionState, transportStatus]);
 
   const getConversationContext = useCallback((conversationId = activeConversationRef.current): ConversationContext | null => {
     const conversation = conversationsRef.current.find((item) => item.id === conversationId) ?? null;
@@ -2304,6 +2329,7 @@ export default function App() {
           return;
         }
         sessionCursorsRef.current.set(sessionId, cursor);
+        transportClientRef.current?.ack(event);
         persistSessionCursors();
       }
       setEvents((current) => [event, ...current].slice(0, MAX_EVENTS));
@@ -2717,6 +2743,12 @@ export default function App() {
 
       socket.onopen = () => {
         attachedSessionIdsRef.current.clear();
+        const transport = new TodeXTransportClient({
+          loadSessionCursors: getSessionCursorSnapshot,
+          onStatus: setTransportStatus,
+        });
+        transportClientRef.current = transport;
+        transport.attach(socket, (text) => socketCryptoRef.current?.encryptClientText(text) ?? text);
         setConnectionState('open');
         void checkConnectionHealth();
         void refreshServerVersion();
@@ -2725,8 +2757,9 @@ export default function App() {
       socket.onmessage = (event) => {
         try {
           const text = socketCryptoRef.current?.decryptServerText(String(event.data)) ?? String(event.data);
-          const data = JSON.parse(text) as ServerEvent;
-          enqueueServerEvent(data);
+          const transport = transportClientRef.current;
+          const events = transport ? transport.decode(text) : [JSON.parse(text) as ServerEvent];
+          events.forEach(enqueueServerEvent);
         } catch (error) {
           setLastError(error instanceof Error ? error.message : 'failed to parse websocket message');
         }
@@ -2739,14 +2772,17 @@ export default function App() {
 
       socket.onclose = () => {
         setConnectionState((current) => (current === 'open' || current === 'connecting' ? 'closed' : current));
-        socketCryptoRef.current = null;
+        if (socketRef.current === socket) {
+          socketCryptoRef.current = null;
+          transportClientRef.current?.detach();
+        }
       };
     } catch (error) {
       setConnectionState('error');
       socketCryptoRef.current = null;
       setLastError(error instanceof Error ? error.message : 'failed to connect');
     }
-  }, [checkConnectionHealth, closeSocket, enqueueServerEvent, pushSystem, refreshServerVersion, settings]);
+  }, [checkConnectionHealth, closeSocket, enqueueServerEvent, getSessionCursorSnapshot, pushSystem, refreshServerVersion, settings]);
 
   useEffect(() => {
     if (!hydrated || !autoConnectEnabled || manualDisconnectRef.current) {
@@ -2794,9 +2830,11 @@ export default function App() {
         return false;
       }
 
-      const message = { id: requestId, type, payload };
-      const json = JSON.stringify(message);
-      socket.send(socketCryptoRef.current?.encryptClientText(json) ?? json);
+      const message = transportClientRef.current?.send(type, payload, requestId);
+      if (!message) {
+        setLastError('请先在设置里连接后端。');
+        return false;
+      }
       if (type === 'codex.local.turn') {
         appendTimeline(makeOutgoingEntry(
           message,
@@ -4305,6 +4343,7 @@ export default function App() {
                   activeWorkspace={activeWorkspace}
                   pendingRequestCount={pendingRequests.length}
                   turnId={activeTurnId}
+                  runtimeStatus={runtimeStatus}
                   connectionState={connectionState}
                   connectionHealth={connectionHealth}
                   lastError={lastError}
@@ -5560,6 +5599,7 @@ function SettingsScreen({
   activeWorkspace,
   pendingRequestCount,
   turnId,
+  runtimeStatus,
   connectionState,
   connectionHealth,
   lastError,
@@ -5578,6 +5618,7 @@ function SettingsScreen({
   activeWorkspace: WorkspaceRecord | null;
   pendingRequestCount: number;
   turnId: string;
+  runtimeStatus: RuntimeStatusState;
   connectionState: ConnectionState;
   connectionHealth: ConnectionHealth;
   lastError: string;
@@ -5748,11 +5789,22 @@ function SettingsScreen({
               <Text style={styles.connectionLatency}>{latencyLabelOf(connectionHealth.latencyMs)}</Text>
             </View>
             <View style={styles.connectionMetaRow}>
-              <Text style={styles.connectionMeta}>WebSocket: {connectionState}</Text>
+              <Text style={styles.connectionMeta}>WebSocket: {runtimeStatus.socket}</Text>
+              <Text style={styles.connectionMeta}>Transport: {runtimeStatus.transport.status}</Text>
+            </View>
+            <View style={styles.connectionMetaRow}>
+              <Text style={styles.connectionMeta}>Daemon: {runtimeStatus.daemon}</Text>
+              <Text style={styles.connectionMeta}>Codex: {runtimeStatus.codexAdapter}</Text>
+            </View>
+            <View style={styles.connectionMetaRow}>
+              <Text style={styles.connectionMeta}>Turn: {runtimeStatus.turn}</Text>
               <Text style={styles.connectionMeta}>
                 {connectionHealth.lastCheckedAt ? `检测: ${nowLabel(connectionHealth.lastCheckedAt)}` : '检测: --'}
               </Text>
             </View>
+            {runtimeStatus.transport.error ? (
+              <Text style={styles.connectionErrorText} numberOfLines={2}>{runtimeStatus.transport.error}</Text>
+            ) : null}
           </View>
           <Field
             label="Server URL"
@@ -6840,6 +6892,11 @@ const styles = StyleSheet.create({
     color: '#66717c',
     fontSize: 11,
     fontWeight: '800',
+  },
+  connectionErrorText: {
+    color: '#8a2f2f',
+    fontSize: 11,
+    fontWeight: '700',
   },
   field: {
     gap: 6,
