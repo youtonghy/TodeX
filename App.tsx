@@ -31,6 +31,7 @@ import {
   type TextInputSelectionChangeEventData,
   View,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
 import { CameraView, useCameraPermissions, type BarcodeScanningResult } from 'expo-camera';
 import * as DocumentPicker from 'expo-document-picker';
@@ -42,6 +43,18 @@ import { createNativeStackNavigator, type NativeStackScreenProps } from '@react-
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { enableScreens } from 'react-native-screens';
+import {
+  Button,
+  Card,
+  Chip,
+  HeroUINativeProvider,
+  Input,
+  Label,
+  Surface,
+  Text as HeroText,
+  TextField,
+} from 'heroui-native';
+import { withUniwind } from 'uniwind';
 
 import {
   ConnectionSettings,
@@ -701,6 +714,8 @@ type PersistedSettings = Omit<ConnectionSettings, 'authToken'>;
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 enableScreens(true);
+
+const StyledIonicons = withUniwind(Ionicons);
 
 const SETTINGS_STORAGE_KEY = 'todex.mobile.settings.v1';
 const WORKSPACES_STORAGE_KEY = 'todex.mobile.workspaces.v1';
@@ -3714,28 +3729,37 @@ export default function App() {
 
   if (!hydrated) {
     return (
-      <View style={styles.loadingScreen}>
-        <StatusBar style="light" />
-        <Text style={styles.loadingTitle}>TodeX</Text>
-        <Text style={styles.loadingText}>正在加载设置和工作区...</Text>
-      </View>
+      <GestureHandlerRootView style={styles.appRoot}>
+        <HeroUINativeProvider>
+          <Surface className="flex-1 items-center justify-center bg-background px-8">
+            <StatusBar style="dark" />
+            <View className="h-14 w-14 items-center justify-center rounded-lg bg-accent">
+              <HeroText className="text-2xl font-semibold text-accent-foreground">T</HeroText>
+            </View>
+            <HeroText className="mt-4 text-3xl font-semibold text-foreground">TodeX</HeroText>
+            <HeroText className="mt-2 text-center text-sm text-muted">正在加载设置和工作区...</HeroText>
+          </Surface>
+        </HeroUINativeProvider>
+      </GestureHandlerRootView>
     );
   }
 
   return (
     <GestureHandlerRootView style={styles.appRoot}>
-      <SafeAreaProvider>
-        <NavigationContainer>
-          <StatusBar style="dark" />
-          <Stack.Navigator
-            initialRouteName="Workspaces"
-            screenOptions={{
-              headerStyle: { backgroundColor: '#ffffff' },
-              headerTitleStyle: styles.headerTitle,
-              headerTintColor: '#17202a',
-              contentStyle: styles.screenBackground,
-            }}
-          >
+      <HeroUINativeProvider>
+        <SafeAreaProvider>
+          <NavigationContainer>
+            <StatusBar style="dark" />
+            <Stack.Navigator
+              initialRouteName="Workspaces"
+              screenOptions={{
+                headerStyle: { backgroundColor: '#f7f9fa' },
+                headerShadowVisible: false,
+                headerTitleStyle: styles.headerTitle,
+                headerTintColor: '#17202a',
+                contentStyle: styles.screenBackground,
+              }}
+            >
             <Stack.Screen name="Workspaces" options={{ title: '工作区' }}>
               {(props) => (
                 <WorkspaceListScreen
@@ -3827,9 +3851,9 @@ export default function App() {
                 />
               )}
             </Stack.Screen>
-          </Stack.Navigator>
-        </NavigationContainer>
-        <PromptModal
+            </Stack.Navigator>
+          </NavigationContainer>
+          <PromptModal
           visible={Boolean(modelCommandPrompt)}
           title="切换模型"
           initialValue={modelCommandPrompt?.initialValue ?? ''}
@@ -3851,7 +3875,7 @@ export default function App() {
             applyModelCommand(targetConversationId, value.trim().split(/\s+/), false);
           }}
         />
-        <ModelPickerModal
+          <ModelPickerModal
           visible={Boolean(modelPickerPrompt)}
           title={modelPickerPrompt?.target === 'settings' ? '默认模型' : '当前对话模型'}
           catalog={modelCatalog}
@@ -3911,8 +3935,9 @@ export default function App() {
               }
             }
           }}
-        />
-      </SafeAreaProvider>
+          />
+        </SafeAreaProvider>
+      </HeroUINativeProvider>
     </GestureHandlerRootView>
   );
 }
@@ -3993,13 +4018,20 @@ function WorkspaceListScreen({
   };
 
   return (
-    <View style={styles.root}>
+    <Surface className="flex-1 bg-background">
       <ScrollView contentContainerStyle={styles.listContent}>
-        <View style={styles.statusRow}>
-          <Text style={styles.statusLabel}>TodeX</Text>
-          <View style={[styles.statusPill, connectionState === 'open' ? styles.statusOpen : styles.statusMuted]}>
-            <Text style={styles.statusText}>{connectionState}</Text>
+        <View className="mx-4 mb-2 mt-1 flex-row items-center justify-between">
+          <View>
+            <HeroText className="text-2xl font-semibold text-foreground">TodeX</HeroText>
+            <HeroText className="mt-1 text-xs text-muted">移动端工作区</HeroText>
           </View>
+          <Chip
+            color={connectionState === 'open' ? 'success' : 'default'}
+            variant={connectionState === 'open' ? 'primary' : 'secondary'}
+            size="sm"
+          >
+            {connectionState}
+          </Chip>
         </View>
 
         {workspaces.length === 0 ? (
@@ -4008,30 +4040,32 @@ function WorkspaceListScreen({
           workspaces.map((workspace) => {
             const count = conversations.filter((conversation) => conversation.workspaceId === workspace.id).length;
             return (
-              <Pressable
+              <Button
                 key={workspace.id}
+                variant="ghost"
                 onPress={() => {
                   selectWorkspace(workspace.id);
                   navigation.navigate('Conversations', { workspaceId: workspace.id });
                 }}
                 onLongPress={() => openWorkspaceActions(workspace)}
-                style={styles.listItem}
+                className="mx-3 mb-2 min-h-[76px] justify-start rounded-lg bg-surface px-3 py-3"
               >
-                <View style={styles.itemAvatar}>
-                  <Text style={styles.itemAvatarText}>{workspace.name.slice(0, 1).toUpperCase()}</Text>
+                <View className="h-12 w-12 items-center justify-center rounded-lg bg-foreground">
+                  <HeroText className="text-base font-semibold text-background">{workspace.name.slice(0, 1).toUpperCase()}</HeroText>
                 </View>
-                <View style={styles.itemMain}>
-                  <View style={styles.itemHeader}>
-                    <Text style={styles.itemTitle} numberOfLines={1}>
+                <View className="min-w-0 flex-1">
+                  <View className="flex-row items-center justify-between gap-2">
+                    <HeroText className="min-w-0 flex-1 text-base font-semibold text-foreground" numberOfLines={1}>
                       {workspace.name}
-                    </Text>
-                    <Text style={styles.itemTag}>{count} 个对话</Text>
+                    </HeroText>
+                    <Chip size="sm" variant="secondary">{count} 个对话</Chip>
                   </View>
-                  <Text style={styles.itemBody} numberOfLines={1}>
+                  <HeroText className="mt-1 text-xs text-muted" numberOfLines={1}>
                     {workspace.path}
-                  </Text>
+                  </HeroText>
                 </View>
-              </Pressable>
+                <StyledIonicons name="chevron-forward" size={17} className="text-muted" />
+              </Button>
             );
           })
         )}
@@ -4039,12 +4073,12 @@ function WorkspaceListScreen({
 
       <Modal visible={modalVisible} animationType="slide" transparent onRequestClose={() => setModalVisible(false)}>
         <View style={styles.modalBackdrop}>
-          <View style={styles.modalSheet}>
+          <Card className="rounded-b-none">
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>新建工作区</Text>
-              <Pressable onPress={() => setModalVisible(false)}>
-                <Text style={styles.modalClose}>关闭</Text>
-              </Pressable>
+              <Card.Title>新建工作区</Card.Title>
+              <Button variant="ghost" size="sm" onPress={() => setModalVisible(false)}>
+                <Button.Label>关闭</Button.Label>
+              </Button>
             </View>
             <Field label="工作区名称" value={workspaceNameDraft} onChangeText={setWorkspaceNameDraft} placeholder="可选" />
             <Field
@@ -4057,7 +4091,7 @@ function WorkspaceListScreen({
               <ActionButton title="创建" onPress={submit} />
               <ActionButton title="填入默认路径" onPress={() => setWorkspacePathDraft(settings.defaultWorkspacePath)} tone="ghost" />
             </Row>
-          </View>
+          </Card>
         </View>
       </Modal>
 
@@ -4074,7 +4108,7 @@ function WorkspaceListScreen({
           setRenamingWorkspace(null);
         }}
       />
-    </View>
+    </Surface>
   );
 }
 
@@ -4173,22 +4207,21 @@ function ConversationListScreen({
 
   if (!workspace) {
     return (
-      <View style={styles.centerScreen}>
+      <Surface className="flex-1 items-center justify-center bg-background p-5">
         <EmptyState text="工作区不存在。请返回工作区列表重新选择。" />
-      </View>
+      </Surface>
     );
   }
 
   return (
-    <ScrollView contentContainerStyle={styles.listContent}>
-      <View style={styles.workspaceSummary}>
-        <Text style={styles.summaryTitle} numberOfLines={1}>
-          {workspace.name}
-        </Text>
-        <Text style={styles.summaryPath} numberOfLines={2}>
-          {workspace.path}
-        </Text>
-      </View>
+    <Surface className="flex-1 bg-background">
+      <ScrollView contentContainerStyle={styles.listContent}>
+      <Card variant="transparent" className="mx-4 mb-2 border border-separator bg-surface-secondary">
+        <Card.Body className="gap-1">
+          <Card.Title numberOfLines={1}>{workspace.name}</Card.Title>
+          <Card.Description numberOfLines={2}>{workspace.path}</Card.Description>
+        </Card.Body>
+      </Card>
 
       {workspaceConversations.length === 0 ? (
         <EmptyState text="还没有对话。点右上角 + 创建一个纯粹的新对话。" />
@@ -4198,34 +4231,35 @@ function ConversationListScreen({
           const running = Boolean(activeTurns[conversation.id]);
           const highlighted = isConversationHighlighted(conversation, activeConversationId, activeTurns);
           return (
-            <Pressable
+            <Button
               key={conversation.id}
+              variant="ghost"
               onPress={() => {
                 selectConversation(workspace.id, conversation.id);
                 navigation.navigate('Chat', { workspaceId: workspace.id, conversationId: conversation.id });
               }}
               onLongPress={() => openConversationActions(conversation)}
-              style={[styles.listItem, highlighted && styles.listItemActive, running && styles.listItemRunning]}
+              className={`mx-3 mb-2 min-h-[76px] justify-start rounded-lg px-3 py-3 ${running ? 'bg-success-soft' : highlighted ? 'bg-accent-soft' : 'bg-surface'}`}
             >
-              <View style={[styles.conversationAvatar, running && styles.conversationAvatarActive]}>
-                <Text style={[styles.conversationAvatarText, running && styles.conversationAvatarTextActive]}>
+              <View className={`h-12 w-12 items-center justify-center rounded-lg ${running ? 'bg-success' : 'bg-surface-tertiary'}`}>
+                <HeroText className={`text-base font-semibold ${running ? 'text-success-foreground' : 'text-surface-tertiary-foreground'}`}>
                   {preview.slice(0, 1).toUpperCase()}
-                </Text>
+                </HeroText>
               </View>
-              <View style={styles.itemMain}>
-                <View style={styles.itemHeader}>
-                  <Text style={[styles.itemTitle, running && styles.itemTitleActive]} numberOfLines={1}>
+              <View className="min-w-0 flex-1">
+                <View className="flex-row items-center justify-between gap-2">
+                  <HeroText className={`min-w-0 flex-1 text-base font-semibold ${running ? 'text-success-soft-foreground' : 'text-foreground'}`} numberOfLines={1}>
                     {preview}
-                  </Text>
-                  <Text style={[styles.itemTag, running && styles.itemTagActive]}>
+                  </HeroText>
+                  <Chip color={running ? 'success' : 'default'} size="sm" variant={running ? 'primary' : 'secondary'}>
                     {running ? '运行中' : nowLabel(conversation.updatedAt)}
-                  </Text>
+                  </Chip>
                 </View>
-                <Text style={styles.itemBody} numberOfLines={1}>
+                <HeroText className="mt-1 text-xs text-muted" numberOfLines={1}>
                   {running ? '正在处理当前对话' : nowLabel(conversation.updatedAt)}
-                </Text>
+                </HeroText>
               </View>
-            </Pressable>
+            </Button>
           );
         })
       )}
@@ -4242,7 +4276,8 @@ function ConversationListScreen({
           setRenamingConversation(null);
         }}
       />
-    </ScrollView>
+      </ScrollView>
+    </Surface>
   );
 }
 
@@ -4783,15 +4818,19 @@ function ChatScreen({
 
   if (!workspace || !conversation) {
     return (
-      <View style={styles.centerScreen}>
+      <Surface className="flex-1 items-center justify-center bg-background p-5">
         <EmptyState text="对话不存在。请返回后重新选择。" />
-      </View>
+      </Surface>
     );
   }
 
   return (
-    <View style={[styles.chatRoot, { paddingBottom: keyboardInset }]}>
-      {lastError ? <Text style={styles.inlineError}>{lastError}</Text> : null}
+    <Surface className="flex-1 bg-background" style={{ paddingBottom: keyboardInset }}>
+      {lastError ? (
+        <Surface variant="secondary" className="mx-3 mt-2 rounded-lg px-3 py-2">
+          <HeroText className="text-sm text-danger">{lastError}</HeroText>
+        </Surface>
+      ) : null}
 
       <View style={styles.messageArea}>
         <ScrollView
@@ -4846,53 +4885,60 @@ function ChatScreen({
         </ScrollView>
 
         {showJumpToLatest ? (
-          <Pressable
+          <Button
+            isIconOnly
+            size="sm"
+            variant="secondary"
             accessibilityLabel="跳到最新消息"
             onPress={jumpToLatest}
-            style={styles.jumpToLatestButton}
+            className="absolute bottom-3 self-center rounded-lg"
           >
-            <Text style={styles.jumpToLatestText}>↓</Text>
-          </Pressable>
+            <StyledIonicons name="arrow-down" size={17} className="text-foreground" />
+          </Button>
         ) : null}
       </View>
 
       <View style={[styles.composer, { paddingBottom: composerPaddingBottom }]}>
         {slashSuggestions.length > 0 ? (
-          <View style={styles.slashPanel}>
+          <Surface variant="secondary" className="mb-2 overflow-hidden rounded-lg">
             {slashSuggestions.map((item) => (
-              <Pressable
+              <Button
                 key={item.command}
-                style={styles.slashItem}
+                variant="ghost"
+                className="min-h-12 justify-start rounded-none px-3"
                 onPress={() => {
                   const nextText = `${item.command} `;
                   setChatDraft(nextText);
                   setComposerSelection({ start: nextText.length, end: nextText.length });
                 }}
               >
-                <Text style={styles.slashCommand} numberOfLines={1}>{item.command}</Text>
-                <Text style={styles.slashDescription} numberOfLines={1}>{item.description || item.title}</Text>
-              </Pressable>
+                <View className="min-w-0 flex-1">
+                  <HeroText className="font-semibold text-foreground" numberOfLines={1}>{item.command}</HeroText>
+                  <HeroText className="text-xs text-muted" numberOfLines={1}>{item.description || item.title}</HeroText>
+                </View>
+              </Button>
             ))}
-          </View>
+          </Surface>
         ) : null}
         {mentionSuggestions.length > 0 ? (
-          <View style={styles.mentionPanel}>
+          <Surface variant="secondary" className="mb-2 overflow-hidden rounded-lg">
             {mentionSuggestions.map((item) => (
-              <Pressable
+              <Button
                 key={item.id}
-                style={styles.mentionItem}
+                variant="ghost"
+                className="min-h-12 justify-start rounded-none px-3"
                 onPress={() => selectMention(item)}
               >
-                <View style={styles.mentionIcon}>
-                  <Text style={styles.mentionIconText}>@</Text>
+                <View className="h-8 w-8 items-center justify-center rounded-md bg-accent-soft">
+                  <HeroText className="text-sm font-semibold text-accent-soft-foreground">@</HeroText>
                 </View>
-                <View style={styles.mentionMain}>
-                  <Text style={styles.mentionTitle} numberOfLines={1}>{item.title}</Text>
-                  <Text style={styles.mentionDescription} numberOfLines={1}>{item.description}</Text>
+                <View className="min-w-0 flex-1">
+                  <HeroText className="font-semibold text-foreground" numberOfLines={1}>{item.title}</HeroText>
+                  <HeroText className="text-xs text-muted" numberOfLines={1}>{item.description}</HeroText>
                 </View>
-              </Pressable>
+              </Button>
             ))}
-          </View>
+          </Surface>
         ) : null}
         {composerAttachments.length > 0 ? (
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.attachmentRail}>
@@ -4913,25 +4959,31 @@ function ChatScreen({
                     {attachment.kind === 'image' ? '图片' : '文件'} · {formatBytes(attachment.sizeBytes)}
                   </Text>
                 </View>
-                <Pressable
+                <Button
+                  isIconOnly
+                  size="sm"
+                  variant="ghost"
                   accessibilityLabel={`移除附件 ${attachment.name}`}
                   onPress={() => removeComposerAttachment(attachment.id)}
-                  style={styles.attachmentRemoveButton}
+                  className="rounded-md"
                 >
-                  <Text style={styles.attachmentRemoveText}>×</Text>
-                </Pressable>
+                  <StyledIonicons name="close" size={14} className="text-muted" />
+                </Button>
               </View>
             ))}
           </ScrollView>
         ) : null}
         <View style={styles.composerInputRow}>
-          <Pressable
+          <Button
+            isIconOnly
+            size="md"
+            variant="secondary"
             accessibilityLabel="添加附件"
             onPress={() => setAttachmentMenuVisible(true)}
-            style={styles.attachmentButton}
+            className="rounded-lg"
           >
-            <Text style={styles.attachmentButtonText}>📎</Text>
-          </Pressable>
+            <StyledIonicons name="attach" size={19} className="text-foreground" />
+          </Button>
           <TextInput
             ref={composerInputRef}
             value={chatDraft}
@@ -4952,29 +5004,35 @@ function ChatScreen({
           />
           <View style={styles.composerActions}>
             {turnId ? (
-              <Pressable
+              <Button
+                isIconOnly
+                size="md"
+                variant="danger-soft"
                 accessibilityLabel="中断当前任务"
                 onPress={() => stopThinking(route.params.conversationId)}
-                style={styles.stopButton}
+                className="rounded-lg"
               >
-                <Text style={styles.stopButtonText}>■</Text>
-              </Pressable>
+                <StyledIonicons name="stop" size={17} className="text-danger-soft-foreground" />
+              </Button>
             ) : null}
-            <Pressable
+            <Button
+              isIconOnly
+              size="md"
+              variant="primary"
               accessibilityLabel="发送消息"
               onPress={() => submitChat(route.params.conversationId)}
-              style={styles.sendButton}
+              className="rounded-lg"
             >
-              <Text style={styles.sendButtonText}>↑</Text>
-            </Pressable>
+              <StyledIonicons name="arrow-up" size={18} className="text-accent-foreground" />
+            </Button>
           </View>
         </View>
       </View>
 
       <Modal visible={menuVisible} animationType="fade" transparent onRequestClose={() => setMenuVisible(false)}>
         <Pressable style={styles.menuBackdrop} onPress={() => setMenuVisible(false)}>
-          <View style={styles.menuSheet}>
-            <Text style={styles.menuTitle}>{workspace.name}</Text>
+          <Card className="w-[260px] gap-1 rounded-lg">
+            <Card.Title numberOfLines={1}>{workspace.name}</Card.Title>
             <MenuItem title="启动" onPress={() => runWorkspaceCommand(workspace, conversation, 'start')} close={() => setMenuVisible(false)} />
             <MenuItem title="状态" onPress={() => runWorkspaceCommand(workspace, conversation, 'status')} close={() => setMenuVisible(false)} />
             <MenuItem title="附加" onPress={() => runWorkspaceCommand(workspace, conversation, 'attach')} close={() => setMenuVisible(false)} />
@@ -4994,7 +5052,7 @@ function ChatScreen({
               }}
               close={() => setMenuVisible(false)}
             />
-          </View>
+          </Card>
         </Pressable>
       </Modal>
 
@@ -5005,8 +5063,8 @@ function ChatScreen({
         onRequestClose={() => setAttachmentMenuVisible(false)}
       >
         <Pressable style={styles.menuBackdrop} onPress={() => setAttachmentMenuVisible(false)}>
-          <View style={styles.attachmentMenuSheet}>
-            <Text style={styles.menuTitle}>添加附件</Text>
+          <Card className="w-[260px] gap-1 rounded-lg">
+            <Card.Title>添加附件</Card.Title>
             <MenuItem
               title="从剪贴板粘贴"
               onPress={() => void addClipboardAttachment()}
@@ -5022,10 +5080,10 @@ function ChatScreen({
               onPress={() => void pickFileAttachments()}
               close={() => setAttachmentMenuVisible(false)}
             />
-          </View>
+          </Card>
         </Pressable>
       </Modal>
-    </View>
+    </Surface>
   );
 }
 
@@ -5076,14 +5134,6 @@ function SettingsScreen({
   const isConnecting = connectionState === 'connecting';
   const connectionActionTitle = isConnected || isConnecting ? '中断' : '连接';
   const connectionAction = isConnected || isConnecting ? () => closeSocket(true) : connect;
-  const statusStyle =
-    connectionState === 'open'
-      ? styles.connectionCardOnline
-      : connectionState === 'connecting'
-        ? styles.connectionCardChecking
-        : connectionState === 'error' || connectionHealth.status === 'offline'
-          ? styles.connectionCardOffline
-          : styles.connectionCardIdle;
   const dotStyle =
     connectionState === 'open'
       ? styles.connectionDotOnline
@@ -5100,6 +5150,7 @@ function SettingsScreen({
         : 'ML-KEM-768';
   const currentModelName = activeWorkspace?.model || settings.defaultModel;
   const currentReasoningEffort = normalizeReasoningEffort(activeWorkspace?.reasoningEffort ?? settings.defaultReasoningEffort);
+  const connectionChipColor = connectionState === 'open' ? 'success' : connectionState === 'error' || connectionHealth.status === 'offline' ? 'danger' : 'default';
 
   const openPairingScanner = useCallback(async () => {
     if (Platform.OS === 'web') {
@@ -5213,28 +5264,34 @@ function SettingsScreen({
   }, [applyPairingText]);
 
   return (
-    <ScrollView contentContainerStyle={styles.pageContent}>
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>连接</Text>
-        <View style={styles.formBlock}>
-          <View style={[styles.connectionCard, statusStyle]}>
-            <View style={styles.connectionHeader}>
+    <Surface className="flex-1 bg-background">
+      <ScrollView contentContainerStyle={styles.pageContent}>
+      <Card className="gap-4">
+        <Card.Header className="items-center justify-between">
+          <Card.Title>连接</Card.Title>
+          <Chip color={connectionChipColor} size="sm" variant={connectionState === 'open' ? 'primary' : 'secondary'}>
+            {connectionStateLabel(connectionState)}
+          </Chip>
+        </Card.Header>
+        <Card.Body className="gap-4">
+          <Surface variant="secondary" className="rounded-lg p-3">
+            <View className="flex-row items-center gap-3">
               <View style={[styles.connectionDot, dotStyle]} />
-              <View style={styles.connectionSummary}>
-                <Text style={styles.connectionTitle}>{connectionStateLabel(connectionState)}</Text>
-                <Text style={styles.connectionSubtitle} numberOfLines={1}>
+              <View className="min-w-0 flex-1">
+                <HeroText className="text-base font-semibold text-foreground">{connectionStateLabel(connectionState)}</HeroText>
+                <HeroText className="mt-1 text-xs text-muted" numberOfLines={1}>
                   {healthLabelOf(connectionHealth)}
-                </Text>
+                </HeroText>
               </View>
-              <Text style={styles.connectionLatency}>{latencyLabelOf(connectionHealth.latencyMs)}</Text>
+              <HeroText className="text-sm font-semibold text-foreground">{latencyLabelOf(connectionHealth.latencyMs)}</HeroText>
             </View>
-            <View style={styles.connectionMetaRow}>
-              <Text style={styles.connectionMeta}>WebSocket: {connectionState}</Text>
-              <Text style={styles.connectionMeta}>
+            <View className="mt-3 flex-row justify-between gap-3">
+              <HeroText className="text-xs text-muted">WebSocket: {connectionState}</HeroText>
+              <HeroText className="text-xs text-muted">
                 {connectionHealth.lastCheckedAt ? `检测: ${nowLabel(connectionHealth.lastCheckedAt)}` : '检测: --'}
-              </Text>
+              </HeroText>
             </View>
-          </View>
+          </Surface>
           <Field
             label="Server URL"
             value={settings.serverUrl}
@@ -5249,8 +5306,8 @@ function SettingsScreen({
             placeholder="Bearer token"
             secureTextEntry
           />
-          <View style={styles.encryptionBlock}>
-            <Text style={styles.fieldLabel}>编辑加密</Text>
+          <Surface variant="secondary" className="gap-3 rounded-lg p-3">
+            <HeroText className="text-sm font-semibold text-foreground">编辑加密</HeroText>
             <Row>
               <ActionButton
                 title="无"
@@ -5268,7 +5325,7 @@ function SettingsScreen({
                 tone={settings.encryptionProtocol === 'x25519' ? 'solid' : 'ghost'}
               />
             </Row>
-            <Text style={styles.connectionMeta}>当前: {encryptionLabel}</Text>
+            <HeroText className="text-xs text-muted">当前: {encryptionLabel}</HeroText>
             <Field
               label="Key 密钥"
               value={settings.encryptionPublicKey}
@@ -5281,7 +5338,7 @@ function SettingsScreen({
               <ActionButton title="扫码填写配对" onPress={openPairingScanner} tone="solid" />
               <ActionButton title="粘贴配对内容" onPress={pastePairingFromClipboard} tone="ghost" />
             </Row>
-          </View>
+          </Surface>
           <Field
             label="Tenant id"
             value={settings.tenantId}
@@ -5296,9 +5353,9 @@ function SettingsScreen({
             />
             <ActionButton title="刷新版本" onPress={refreshServerVersion} tone="ghost" />
           </Row>
-          {lastError ? <Text style={styles.errorText}>{lastError}</Text> : null}
-        </View>
-      </View>
+          {lastError ? <HeroText className="text-sm text-danger">{lastError}</HeroText> : null}
+        </Card.Body>
+      </Card>
 
       <Modal
         visible={pairingScannerVisible}
@@ -5320,9 +5377,11 @@ function SettingsScreen({
         </View>
       </Modal>
 
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>默认参数</Text>
-        <View style={styles.formBlock}>
+      <Card className="gap-4">
+        <Card.Header>
+          <Card.Title>默认参数</Card.Title>
+        </Card.Header>
+        <Card.Body className="gap-4">
           <Field
             label="默认目录路径"
             value={settings.defaultWorkspacePath}
@@ -5335,13 +5394,13 @@ function SettingsScreen({
             onChangeText={(value) => setSettings((current) => ({ ...current, defaultModel: value }))}
             placeholder="gpt-5.5"
           />
-          <View style={styles.modelControlBlock}>
+          <Surface variant="secondary" className="gap-3 rounded-lg p-3">
             <View style={styles.modelControlHeader}>
               <View style={styles.modelControlTitleBlock}>
-                <Text style={styles.fieldLabel}>模型选择</Text>
-                <Text style={styles.modelControlCurrent} numberOfLines={1}>
+                <HeroText className="text-sm font-semibold text-foreground">模型选择</HeroText>
+                <HeroText className="text-xs text-muted" numberOfLines={1}>
                   {modelDisplayLabel(settings.defaultModel, modelCatalog)} · {reasoningEffortLabel(settings.defaultReasoningEffort)}
-                </Text>
+                </HeroText>
               </View>
               {modelCatalogStatus === 'loading' ? <ActivityIndicator size="small" color="#17202a" /> : null}
             </View>
@@ -5349,8 +5408,8 @@ function SettingsScreen({
               <ActionButton title="选择模型" onPress={openDefaultModelPicker} tone="solid" />
               <ActionButton title="刷新列表" onPress={refreshModelCatalog} tone="ghost" disabled={modelCatalogStatus === 'loading'} />
             </Row>
-            {modelCatalogError ? <Text style={styles.warningText}>{modelCatalogError}</Text> : null}
-          </View>
+            {modelCatalogError ? <HeroText className="text-sm text-warning">{modelCatalogError}</HeroText> : null}
+          </Surface>
           <ReasoningEffortSelector
             label="默认思考强度"
             options={reasoningOptionsForModel(settings.defaultModel, modelCatalog)}
@@ -5370,12 +5429,14 @@ function SettingsScreen({
             onChangeText={(value) => setSettings((current) => ({ ...current, sandboxMode: value }))}
             placeholder="workspace-write"
           />
-        </View>
-      </View>
+        </Card.Body>
+      </Card>
 
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>运行状态</Text>
-        <View style={styles.diagnostics}>
+      <Card className="gap-4">
+        <Card.Header>
+          <Card.Title>运行状态</Card.Title>
+        </Card.Header>
+        <Card.Body className="gap-2">
           <Diagnostic label="版本" value={serverVersion ? `${serverVersion.name} ${serverVersion.version}` : 'unknown'} />
           <Diagnostic label="数据目录" value={serverVersion?.data_dir ?? 'unknown'} />
           <Diagnostic label="工作区根目录" value={serverVersion?.workspace_root ?? 'unknown'} />
@@ -5384,9 +5445,10 @@ function SettingsScreen({
           <Diagnostic label="思考强度" value={reasoningEffortLabel(currentReasoningEffort)} />
           <Diagnostic label="待处理请求" value={String(pendingRequestCount)} />
           <Diagnostic label="当前 Turn" value={turnId || 'unknown'} />
-        </View>
-      </View>
-    </ScrollView>
+        </Card.Body>
+      </Card>
+      </ScrollView>
+    </Surface>
   );
 }
 
@@ -5417,28 +5479,33 @@ function MessageBubble({
     await Clipboard.setStringAsync(text);
     Alert.alert('已复制', '消息内容已复制到剪贴板。');
   };
+  const bubbleClassName = [
+    'max-w-[86%] rounded-lg px-3 py-2',
+    outgoing ? 'self-end bg-accent' : system ? 'self-center bg-surface-secondary' : 'self-start bg-surface',
+    collapsible ? 'border border-separator' : '',
+  ].join(' ');
   const content = (
-    <View style={[styles.bubble, collapsible && styles.progressBubble, outgoing && styles.bubbleOutgoing, system && styles.bubbleSystem]}>
-      <View style={styles.bubbleMetaRow}>
+    <Surface className={bubbleClassName}>
+      <View className="flex-row items-center gap-2">
         {collapsible ? (
-          <Text style={styles.progressChevron}>{collapsed ? '›' : '⌄'}</Text>
+          <HeroText className={outgoing ? 'text-accent-foreground' : 'text-muted'}>{collapsed ? '›' : '⌄'}</HeroText>
         ) : null}
         {!hideTitle ? (
-          <Text style={[styles.bubbleTitle, outgoing && styles.bubbleTitleOutgoing]} numberOfLines={1}>
+          <HeroText className={`min-w-0 flex-1 text-xs font-semibold ${outgoing ? 'text-accent-foreground' : 'text-foreground'}`} numberOfLines={1}>
             {entry.title}
-          </Text>
+          </HeroText>
         ) : (
           <View style={styles.hiddenBubbleTitleSpacer} />
         )}
-        <Text style={[styles.bubbleTime, outgoing && styles.bubbleTimeOutgoing]}>{nowLabel(entry.at)}</Text>
+        <HeroText className={`text-[10px] ${outgoing ? 'text-accent-foreground' : 'text-muted'}`}>{nowLabel(entry.at)}</HeroText>
       </View>
       {entry.subtitle && !collapsed ? (
-        <Text selectable style={[styles.bubbleText, outgoing && styles.bubbleTextOutgoing]}>{entry.subtitle}</Text>
+        <HeroText selectable className={`mt-1 text-sm leading-5 ${outgoing ? 'text-accent-foreground' : 'text-foreground'}`}>{entry.subtitle}</HeroText>
       ) : null}
       {entry.subtitle && collapsed ? (
-        <Text selectable style={styles.collapsedProgressText} numberOfLines={1}>
+        <HeroText selectable className="mt-1 text-xs text-muted" numberOfLines={1}>
           {entry.subtitle}
-        </Text>
+        </HeroText>
       ) : null}
       {pendingRequest ? (
         <View style={styles.approvalActions}>
@@ -5446,11 +5513,11 @@ function MessageBubble({
           <MiniButton title="拒绝" onPress={() => onApprovalResponse?.(false, pendingRequest)} />
         </View>
       ) : null}
-    </View>
+    </Surface>
   );
 
   return (
-    <View style={[styles.bubbleRow, outgoing && styles.bubbleRowOutgoing]}>
+    <View className={`mb-2 ${outgoing ? 'items-end' : system ? 'items-center' : 'items-start'}`}>
       <Pressable
         onPress={collapsible ? () => onToggleProgress?.(entry, collapsed) : undefined}
         onLongPress={copyText}
@@ -5490,15 +5557,15 @@ function ExecutionGroupBubble({
     .find(Boolean) ?? `${entries.length} 个执行`;
 
   return (
-    <View style={styles.bubbleRow}>
-      <View style={styles.executionGroupShell}>
-        <Pressable onPress={() => onToggleGroup(id, collapsed)} style={styles.executionGroupHeader}>
-          <Text style={styles.progressChevron}>{collapsed ? '›' : '⌄'}</Text>
-          <Text style={styles.executionGroupSummary} numberOfLines={1}>
+    <View className="mb-2 items-start">
+      <Surface className="max-w-[92%] rounded-lg border border-separator bg-surface-secondary p-2">
+        <Button variant="ghost" size="sm" onPress={() => onToggleGroup(id, collapsed)} className="justify-start rounded-md">
+          <HeroText className="text-muted">{collapsed ? '›' : '⌄'}</HeroText>
+          <HeroText className="min-w-0 flex-1 text-sm font-semibold text-foreground" numberOfLines={1}>
             {summary}
-          </Text>
-          <Text style={styles.bubbleTime}>{latestEntry ? nowLabel(latestEntry.at) : ''}</Text>
-        </Pressable>
+          </HeroText>
+          <HeroText className="text-[10px] text-muted">{latestEntry ? nowLabel(latestEntry.at) : ''}</HeroText>
+        </Button>
         {!collapsed ? (
           <View style={styles.executionGroupItems}>
             {entries.map((entry) => {
@@ -5519,13 +5586,20 @@ function ExecutionGroupBubble({
             })}
           </View>
         ) : null}
-      </View>
+      </Surface>
     </View>
   );
 }
 
 function EmptyState({ text }: { text: string }) {
-  return <Text style={styles.emptyState}>{text}</Text>;
+  return (
+    <Card variant="transparent" className="mx-4 my-4 border border-separator bg-surface-secondary">
+      <Card.Body className="items-center gap-2 py-6">
+        <StyledIonicons name="chatbubbles-outline" size={24} className="text-muted" />
+        <HeroText className="text-center text-sm leading-5 text-muted">{text}</HeroText>
+      </Card.Body>
+    </Card>
+  );
 }
 
 function Row({ children }: { children: ReactNode }) {
@@ -5533,10 +5607,25 @@ function Row({ children }: { children: ReactNode }) {
 }
 
 function HeaderIconButton({ label, onPress }: { label: string; onPress: () => void }) {
+  const iconName =
+    label === '+'
+      ? 'add'
+      : label === '设置'
+        ? 'settings-outline'
+        : label === '更多'
+          ? 'ellipsis-horizontal'
+          : 'chevron-forward';
   return (
-    <Pressable onPress={onPress} style={styles.headerIconButton}>
-      <Text style={styles.headerIconText}>{label}</Text>
-    </Pressable>
+    <Button
+      isIconOnly
+      size="sm"
+      variant="ghost"
+      accessibilityLabel={label}
+      onPress={onPress}
+      className="rounded-lg"
+    >
+      <StyledIonicons name={iconName} size={18} className="text-foreground" />
+    </Button>
   );
 }
 
@@ -5583,35 +5672,25 @@ function ActionButton({
   tone?: 'solid' | 'ghost' | 'danger';
   disabled?: boolean;
 }) {
+  const variant = tone === 'ghost' ? 'secondary' : tone === 'danger' ? 'danger-soft' : 'primary';
   return (
-    <Pressable
-      disabled={disabled}
+    <Button
+      size="md"
+      variant={variant}
+      isDisabled={disabled}
       onPress={onPress}
-      style={[
-        styles.actionButton,
-        tone === 'ghost' && styles.actionButtonGhost,
-        tone === 'danger' && styles.actionButtonDanger,
-        disabled && styles.actionButtonDisabled,
-      ]}
+      className="min-h-11 flex-1 rounded-lg"
     >
-      <Text
-        style={[
-          styles.actionButtonText,
-          tone === 'ghost' && styles.actionButtonTextGhost,
-          tone === 'danger' && styles.actionButtonTextDanger,
-        ]}
-      >
-        {title}
-      </Text>
-    </Pressable>
+      <Button.Label numberOfLines={1}>{title}</Button.Label>
+    </Button>
   );
 }
 
 function MiniButton({ title, onPress }: { title: string; onPress: () => void }) {
   return (
-    <Pressable onPress={onPress} style={styles.miniButton}>
-      <Text style={styles.miniButtonText}>{title}</Text>
-    </Pressable>
+    <Button size="sm" variant={title === '拒绝' ? 'danger-soft' : 'secondary'} onPress={onPress} className="rounded-md">
+      <Button.Label>{title}</Button.Label>
+    </Button>
   );
 }
 
@@ -5627,26 +5706,28 @@ function MenuItem({
   danger?: boolean;
 }) {
   return (
-    <Pressable
+    <Button
+      variant={danger ? 'danger-soft' : 'ghost'}
+      size="lg"
       onPress={() => {
         close();
         onPress();
       }}
-      style={styles.menuItem}
+      className="min-h-12 justify-start rounded-lg"
     >
-      <Text style={[styles.menuItemText, danger && styles.menuDangerText]}>{title}</Text>
-    </Pressable>
+      <Button.Label className={danger ? 'text-danger-soft-foreground' : undefined}>{title}</Button.Label>
+    </Button>
   );
 }
 
 function Diagnostic({ label, value }: { label: string; value: string }) {
   return (
-    <View style={styles.diagnosticRow}>
-      <Text style={styles.diagnosticLabel}>{label}</Text>
-      <Text style={styles.diagnosticValue} numberOfLines={1}>
+    <Surface variant="secondary" className="min-h-12 flex-row items-center justify-between gap-3 rounded-lg px-3 py-2">
+      <HeroText className="text-xs font-semibold text-muted">{label}</HeroText>
+      <HeroText className="min-w-0 flex-1 text-right text-sm font-medium text-foreground" numberOfLines={1}>
         {value}
-      </Text>
-    </View>
+      </HeroText>
+    </Surface>
   );
 }
 
@@ -5672,23 +5753,23 @@ function Field({
   inputStyle?: StyleProp<TextStyle>;
 }) {
   return (
-    <View style={styles.field}>
-      <Text style={styles.fieldLabel}>{label}</Text>
-      <TextInput
+    <TextField className="gap-2">
+      <Label>{label}</Label>
+      <Input
         value={value}
         onChangeText={onChangeText}
         onBlur={onBlur}
         placeholder={placeholder}
-        placeholderTextColor="#8a93a1"
-        style={[styles.input, multiline && styles.inputMultiline, !editable && styles.inputDisabled, inputStyle]}
+        className={multiline ? 'min-h-24 items-start rounded-lg' : 'min-h-11 rounded-lg'}
+        style={[multiline && styles.inputMultiline, inputStyle]}
         multiline={multiline}
-        editable={editable}
+        isDisabled={!editable}
         secureTextEntry={secureTextEntry}
         autoCapitalize="none"
         autoCorrect={false}
         textAlignVertical={multiline ? 'top' : 'center'}
       />
-    </View>
+    </TextField>
   );
 }
 
