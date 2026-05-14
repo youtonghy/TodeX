@@ -9,7 +9,7 @@ const transportCrypto = require(path.join(compiledDir, 'transportCrypto.js'));
 let executedTests = 0;
 
 process.on('exit', () => {
-  assert.equal(executedTests, 10);
+  assert.equal(executedTests, 12);
 });
 
 function baseSettings(overrides = {}) {
@@ -21,6 +21,7 @@ function baseSettings(overrides = {}) {
     encryptionPublicKey: '',
     defaultWorkspacePath: '/workspace',
     defaultModel: 'gpt-5.5',
+    defaultReasoningEffort: 'medium',
     approvalPolicy: 'on-request',
     sandboxMode: 'workspace-write',
     ...overrides,
@@ -54,6 +55,50 @@ test('normalizes Codex reasoning effort aliases', () => {
   assert.equal(todex.normalizeReasoningEffort('max'), 'xhigh');
   assert.equal(todex.normalizeReasoningEffort('default'), 'medium');
   assert.equal(todex.normalizeReasoningEffort('unknown'), null);
+});
+
+test('parses Codex model list responses with reasoning efforts', () => {
+  executedTests += 1;
+  const parsed = todex.parseCodexModelListResponse({
+    data: [{
+      id: 'gpt-5.4',
+      model: 'gpt-5.4',
+      displayName: 'GPT 5.4',
+      description: 'Everyday coding',
+      isDefault: true,
+      supportedReasoningEfforts: [
+        { reasoningEffort: 'low', description: 'Fast responses' },
+        { reasoningEffort: 'high', description: 'Deeper reasoning' },
+      ],
+      defaultReasoningEffort: 'high',
+    }],
+  });
+
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].model, 'gpt-5.4');
+  assert.equal(parsed[0].displayName, 'GPT 5.4');
+  assert.equal(parsed[0].defaultReasoningEffort, 'high');
+  assert.deepEqual(parsed[0].supportedReasoningEfforts.map((item) => item.reasoningEffort), ['low', 'high']);
+});
+
+test('parses legacy snake_case model catalog shapes', () => {
+  executedTests += 1;
+  const parsed = todex.parseCodexModelListResponse({
+    result: {
+      models: [{
+        slug: 'gpt-5.3-codex',
+        display_name: 'Codex',
+        supported_reasoning_levels: [{ effort: 'extra-high', description: 'Maximum' }],
+        default_reasoning_level: 'medium',
+      }],
+    },
+  });
+
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].model, 'gpt-5.3-codex');
+  assert.equal(parsed[0].displayName, 'Codex');
+  assert.equal(parsed[0].defaultReasoningEffort, 'medium');
+  assert.equal(parsed[0].supportedReasoningEfforts[0].reasoningEffort, 'xhigh');
 });
 
 test('extracts thread ids from nested server event payloads', () => {

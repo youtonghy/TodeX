@@ -15,6 +15,7 @@ import {
   AppState,
   Image,
   Keyboard,
+  ActivityIndicator,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   type KeyboardEvent,
@@ -44,6 +45,10 @@ import { enableScreens } from 'react-native-screens';
 
 import {
   ConnectionSettings,
+  CodexModelCatalogItem,
+  CodexReasoningEffortOption,
+  DEFAULT_REASONING_EFFORT_OPTIONS,
+  FALLBACK_CODEX_MODELS,
   LocalAdapterState,
   PendingRequest,
   ServerEvent,
@@ -61,6 +66,7 @@ import {
   normalizeReasoningEffort,
   normalizeThreadId,
   normalizeServerUrl,
+  parseCodexModelListResponse,
   sandboxPolicyForMode,
   shortJson,
 } from './src/lib/todex';
@@ -150,6 +156,11 @@ type PendingThreadStart = {
   timeoutId: ReturnType<typeof setTimeout>;
 };
 
+type PendingModelList = {
+  requestId: string;
+  timeoutId: ReturnType<typeof setTimeout>;
+};
+
 type PendingJsonSave = {
   timeoutId: ReturnType<typeof setTimeout>;
   value: unknown;
@@ -163,6 +174,12 @@ type ConversationContext = {
 type ModelCommandPromptState = {
   conversationId: string;
   initialValue: string;
+  target?: 'workspace' | 'settings';
+};
+
+type ModelPickerPromptState = {
+  target: 'workspace' | 'settings';
+  conversationId?: string;
 };
 
 type TimelineTarget = {
@@ -189,8 +206,8 @@ function localConversationStateOf(conversation: ConversationRecord | null): Loca
   return conversation?.localAdapterState ?? 'idle';
 }
 
-function isConversationActive(conversation: ConversationRecord): boolean {
-  return conversation.localAdapterState === 'running' || conversation.localAdapterState === 'starting';
+function isConversationHighlighted(conversation: ConversationRecord, activeConversationId: string, activeTurns: Record<string, string>): boolean {
+  return conversation.id === activeConversationId || Boolean(activeTurns[conversation.id]);
 }
 
 function sessionIdForConversation(workspace: WorkspaceRecord, conversation: ConversationRecord): string {
@@ -577,6 +594,65 @@ type WorkspaceMentionHistory = {
   updatedAt: number;
 };
 
+const REASONING_EFFORT_LABELS: Record<string, string> = {
+  none: 'None',
+  minimal: 'Minimal',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'Extra high',
+};
+
+function reasoningEffortLabel(value: string | null | undefined): string {
+  const normalized = normalizeReasoningEffort(value);
+  return normalized ? REASONING_EFFORT_LABELS[normalized] ?? normalized : 'Default';
+}
+
+function modelDisplayLabel(model: string | null | undefined, catalog: CodexModelCatalogItem[]): string {
+  const normalized = model?.trim() ?? '';
+  if (!normalized) {
+    return '未设置';
+  }
+  return catalog.find((item) => item.model === normalized)?.displayName || normalized;
+}
+
+function reasoningOptionsForModel(
+  model: string | null | undefined,
+  catalog: CodexModelCatalogItem[],
+): CodexReasoningEffortOption[] {
+  const preset = catalog.find((item) => item.model === model);
+  return preset?.supportedReasoningEfforts.length ? preset.supportedReasoningEfforts : DEFAULT_REASONING_EFFORT_OPTIONS;
+}
+
+function defaultReasoningForModel(model: string | null | undefined, catalog: CodexModelCatalogItem[]): string | null {
+  const preset = catalog.find((item) => item.model === model);
+  return preset?.defaultReasoningEffort ?? null;
+}
+
+function mergeModelCatalog(remoteModels: CodexModelCatalogItem[], currentModels: string[]): CodexModelCatalogItem[] {
+  const byModel = new Map<string, CodexModelCatalogItem>();
+  FALLBACK_CODEX_MODELS.forEach((item) => byModel.set(item.model, item));
+  remoteModels.forEach((item) => byModel.set(item.model, item));
+  currentModels
+    .map((model) => model.trim())
+    .filter(Boolean)
+    .forEach((model) => {
+      if (!byModel.has(model)) {
+        byModel.set(model, {
+          id: model,
+          model,
+          displayName: model,
+          description: 'Custom model',
+          hidden: false,
+          isDefault: false,
+          supportedReasoningEfforts: DEFAULT_REASONING_EFFORT_OPTIONS,
+          defaultReasoningEffort: 'medium',
+        });
+      }
+    });
+  return [...byModel.values()].filter((item) => !item.hidden);
+}
+
 function itemTypeOf(item: Record<string, unknown>): string {
   const rawType = item.type ?? item.itemType ?? item.item_type;
   return typeof rawType === 'string' ? rawType : '';
@@ -732,6 +808,7 @@ const defaultSettings: ConnectionSettings = {
   encryptionPublicKey: '',
   defaultWorkspacePath: '/home/dev/projects',
   defaultModel: 'gpt-5.5',
+  defaultReasoningEffort: 'medium',
   approvalPolicy: 'on-request',
   sandboxMode: 'workspace-write',
 };
@@ -829,6 +906,7 @@ function fromPersistedSettings(raw: Partial<PersistedSettings> | null | undefine
   return {
     ...defaultSettings,
     ...safeRaw,
+    defaultReasoningEffort: normalizeReasoningEffort(safeRaw.defaultReasoningEffort) ?? defaultSettings.defaultReasoningEffort,
     authToken,
   };
 }
@@ -927,6 +1005,25 @@ function goalPatchFromEventData(data: Record<string, unknown>): Pick<Conversatio
   }
 
   return null;
+}
+
+function turnObjectFromEventData(data: Record<string, unknown>): Record<string, unknown> | null {
+  const turn = data.turn;
+  return turn && typeof turn === 'object' && !Array.isArray(turn)
+    ? turn as Record<string, unknown>
+    : null;
+}
+
+function turnIdFromEventData(data: Record<string, unknown>): string {
+  const turn = turnObjectFromEventData(data);
+  const value = data.turnId ?? data.turn_id ?? data.codexTurnId ?? data.codex_turn_id ?? turn?.id;
+  return typeof value === 'string' && value.trim() ? value.trim() : '';
+}
+
+function turnStatusFromEventData(data: Record<string, unknown>): string {
+  const turn = turnObjectFromEventData(data);
+  const value = data.status ?? data.lifecycleState ?? data.lifecycle_state ?? turn?.status;
+  return typeof value === 'string' ? value : '';
 }
 
 function textFromLocalTurnPayload(payload: Record<string, unknown>): string {
@@ -1430,6 +1527,7 @@ export default function App() {
   const conversationsRef = useRef<ConversationRecord[]>([]);
   const pendingLocalStartsRef = useRef(new Map<string, PendingLocalStart>());
   const pendingThreadStartsRef = useRef(new Map<string, PendingThreadStart>());
+  const pendingModelListRef = useRef<PendingModelList | null>(null);
   const pendingJsonSavesRef = useRef(new Map<string, PendingJsonSave>());
   const pendingServerEventsRef = useRef<ServerEvent[]>([]);
   const pendingServerEventFrameRef = useRef<number | null>(null);
@@ -1449,6 +1547,9 @@ export default function App() {
   const [activeConversationId, setActiveConversationId] = useState('');
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
   const [connectionHealth, setConnectionHealth] = useState<ConnectionHealth>(defaultConnectionHealth);
+  const [remoteModelCatalog, setRemoteModelCatalog] = useState<CodexModelCatalogItem[]>([]);
+  const [modelCatalogStatus, setModelCatalogStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [modelCatalogError, setModelCatalogError] = useState('');
   const [lastError, setLastError] = useState('');
   const [serverVersion, setServerVersion] = useState<ServerVersion | null>(null);
   const [events, setEvents] = useState<ServerEvent[]>([]);
@@ -1460,6 +1561,7 @@ export default function App() {
   const [composerAttachments, setComposerAttachments] = useState<Record<string, ComposerAttachmentDraft[]>>({});
   const [composerSelections, setComposerSelections] = useState<Record<string, ComposerSelection>>({});
   const [modelCommandPrompt, setModelCommandPrompt] = useState<ModelCommandPromptState | null>(null);
+  const [modelPickerPrompt, setModelPickerPrompt] = useState<ModelPickerPromptState | null>(null);
   const [turnIds, setTurnIds] = useState<Record<string, string>>({});
   const [thinkingConversations, setThinkingConversations] = useState<Record<string, boolean>>({});
   const queuedChatDraftsRef = useRef<Record<string, QueuedChatSubmission[]>>({});
@@ -1467,6 +1569,16 @@ export default function App() {
   const sendQueuedChatDraftRef = useRef<(submission: QueuedChatSubmission, conversationId: string) => Promise<boolean>>(async () => false);
 
   const activeTurnId = activeConversationId ? turnIds[activeConversationId] ?? '' : '';
+  const modelCatalog = useMemo(
+    () => mergeModelCatalog(
+      remoteModelCatalog,
+      [
+        settings.defaultModel,
+        ...workspaces.map((workspace) => workspace.model),
+      ],
+    ),
+    [remoteModelCatalog, settings.defaultModel, workspaces],
+  );
 
   const setConversationChatDraft = useCallback((conversationId: string, value: SetStateAction<string>) => {
     if (!conversationId) {
@@ -1525,6 +1637,10 @@ export default function App() {
     setTurnIds((current) => {
       if ((current[conversationId] ?? '') === value) {
         return current;
+      }
+      if (!value) {
+        const { [conversationId]: _removed, ...rest } = current;
+        return rest;
       }
       return { ...current, [conversationId]: value };
     });
@@ -2060,7 +2176,45 @@ export default function App() {
       if (event.type === 'codex.control.request.accepted' && data.operation === 'codex.local.turn') {
         setConversationThinking(targetConversationId, true);
       }
-      if (isTurnTerminalEvent(event)) {
+      const maybeModelListRequestId = data.requestId ?? data.request_id;
+      const pendingModelList = pendingModelListRef.current;
+      if (
+        pendingModelList &&
+        typeof maybeModelListRequestId === 'string' &&
+        maybeModelListRequestId === pendingModelList.requestId
+      ) {
+        if (event.type === 'codex.control.response') {
+          const models = parseCodexModelListResponse(data.result ?? data);
+          if (models.length) {
+            setRemoteModelCatalog(models);
+            setModelCatalogStatus('ready');
+            setModelCatalogError('');
+          } else {
+            setModelCatalogStatus('error');
+            setModelCatalogError('model/list 没有返回可用模型');
+          }
+          clearTimeout(pendingModelList.timeoutId);
+          pendingModelListRef.current = null;
+        } else if (protocolError || event.type === 'codex.control.error') {
+          setModelCatalogStatus('error');
+          setModelCatalogError(localTurnErrorMessage(protocolError || 'model/list 请求失败'));
+          clearTimeout(pendingModelList.timeoutId);
+          pendingModelListRef.current = null;
+        }
+      }
+      const turnId = turnIdFromEventData(data);
+      const turnStatus = turnStatusFromEventData(data);
+      const turnIsStarting = event.type === 'codex.turn.started' || /^inprogress$/i.test(turnStatus.replace(/[^a-z]/gi, ''));
+      const turnIsTerminal = isTurnTerminalEvent(event) || /^(completed|interrupted|failed)$/i.test(turnStatus);
+      if (turnIsTerminal) {
+        setConversationTurnId(targetConversationId, '');
+      } else if (turnId) {
+        setConversationTurnId(targetConversationId, turnId);
+      }
+      if (turnIsStarting) {
+        setConversationThinking(targetConversationId, true);
+      }
+      if (turnIsTerminal) {
         setConversationThinking(targetConversationId, false);
         const queuedDrafts = queuedChatDraftsRef.current[targetConversationId] ?? [];
         const nextQueuedDraft = queuedDrafts[0] ?? null;
@@ -2180,10 +2334,6 @@ export default function App() {
       }
       if (protocolError && !isLocalAdapterAlreadyRunning(protocolError)) {
         setLastError(localTurnErrorMessage(protocolError));
-      }
-      const maybeTurnId = data.turnId ?? data.turn_id;
-      if (typeof maybeTurnId === 'string' && maybeTurnId) {
-        setConversationTurnId(targetConversationId, maybeTurnId);
       }
     },
     [appendTimeline, findPendingLocalStart, persistSessionCursors, resetWorkspaceSession, resolveTimelineTarget, settlePendingLocalStart, settlePendingThreadStart, setConversationThinking, setConversationTurnId, updateConversation, upsertChatTimeline],
@@ -2418,6 +2568,49 @@ export default function App() {
     [appendTimeline],
   );
 
+  const requestModelCatalog = useCallback(() => {
+    const sessionId =
+      activeWorkspaceRef.current
+        ? workspacesRef.current.find((workspace) => workspace.id === activeWorkspaceRef.current)?.sessionId
+        : workspacesRef.current[0]?.sessionId;
+    if (!sessionId) {
+      setModelCatalogStatus('ready');
+      return false;
+    }
+    const requestId = createRequestId('model-list');
+    if (pendingModelListRef.current) {
+      clearTimeout(pendingModelListRef.current.timeoutId);
+    }
+    const timeoutId = setTimeout(() => {
+      if (pendingModelListRef.current?.requestId !== requestId) {
+        return;
+      }
+      pendingModelListRef.current = null;
+      setModelCatalogStatus('error');
+      setModelCatalogError('model/list 请求超时，已保留内置模型列表');
+    }, 8000);
+    pendingModelListRef.current = { requestId, timeoutId };
+    setModelCatalogStatus('loading');
+    setModelCatalogError('');
+    const sent = sendProtocolMessage('codex.local.request', {
+      codexSessionId: sessionId,
+      tenantId: settings.tenantId,
+      method: 'model/list',
+      params: {
+        limit: 50,
+        includeHidden: false,
+      },
+    }, requestId);
+    if (!sent) {
+      clearTimeout(timeoutId);
+      pendingModelListRef.current = null;
+      setModelCatalogStatus('error');
+      setModelCatalogError('请先连接后端后再刷新模型列表');
+      return false;
+    }
+    return true;
+  }, [sendProtocolMessage, settings.tenantId]);
+
   const createWorkspace = useCallback(
     (nameDraft: string, pathDraft: string) => {
       const path = pathDraft.trim();
@@ -2463,6 +2656,7 @@ export default function App() {
       pushSystem,
       settings.approvalPolicy,
       settings.defaultModel,
+      settings.defaultReasoningEffort,
       settings.sandboxMode,
       settings.tenantId,
     ],
@@ -2718,7 +2912,7 @@ export default function App() {
           approvalPolicy: workspace.approvalPolicy,
           sandboxMode: workspace.sandboxMode,
           configOverrides: {
-            reasoningEffort: workspace.reasoningEffort || undefined,
+            reasoningEffort: workspace.reasoningEffort || settings.defaultReasoningEffort || undefined,
           },
         }, requestId);
 
@@ -2731,7 +2925,7 @@ export default function App() {
         }
       });
     },
-    [pushSystem, sendProtocolMessage, settings.defaultModel, updateConversation],
+    [pushSystem, sendProtocolMessage, settings.defaultModel, settings.defaultReasoningEffort, updateConversation],
   );
 
   const ensureThreadId = useCallback(
@@ -2786,7 +2980,7 @@ export default function App() {
             ephemeral: true,
             cwd: workspace.path,
             model: workspace.model || settings.defaultModel || undefined,
-            reasoningEffort: workspace.reasoningEffort || undefined,
+            reasoningEffort: workspace.reasoningEffort || settings.defaultReasoningEffort || undefined,
             approvalPolicy: workspace.approvalPolicy || settings.approvalPolicy || undefined,
             sandbox: workspace.sandboxMode || settings.sandboxMode || undefined,
             serviceTier: workspace.serviceTier || undefined,
@@ -2802,7 +2996,7 @@ export default function App() {
         }
       });
     },
-    [sendProtocolMessage, settings.approvalPolicy, settings.defaultModel, settings.sandboxMode],
+    [sendProtocolMessage, settings.approvalPolicy, settings.defaultModel, settings.defaultReasoningEffort, settings.sandboxMode],
   );
 
   const sendLocalTurn = useCallback(
@@ -2854,7 +3048,7 @@ export default function App() {
           mode: 'default',
           settings: {
             model: workspace.model || settings.defaultModel,
-            reasoningEffort: workspace.reasoningEffort || undefined,
+            reasoningEffort: workspace.reasoningEffort || settings.defaultReasoningEffort || undefined,
             developerInstructions: null,
           },
         },
@@ -2884,7 +3078,7 @@ export default function App() {
       setConversationThinking(conversation.id, false);
       return false;
     },
-    [appendTimeline, ensureThreadId, getConversationContext, sendProtocolMessage, setConversationThinking, settings.approvalPolicy, settings.defaultModel, settings.sandboxMode, startLocalAdapter],
+    [appendTimeline, ensureThreadId, getConversationContext, sendProtocolMessage, setConversationThinking, settings.approvalPolicy, settings.defaultModel, settings.defaultReasoningEffort, settings.sandboxMode, startLocalAdapter],
   );
 
   useEffect(() => {
@@ -2952,6 +3146,16 @@ export default function App() {
     );
   }, [applyPermissionPreset]);
 
+  const openModelPicker = useCallback((conversationId = activeConversationRef.current) => {
+    setModelPickerPrompt({
+      target: 'workspace',
+      conversationId,
+    });
+    if (connectionState === 'open' && modelCatalogStatus !== 'loading') {
+      requestModelCatalog();
+    }
+  }, [connectionState, modelCatalogStatus, requestModelCatalog]);
+
   const applyModelCommand = useCallback(
     (conversationId: string, args: string[], promptWhenEmpty = true) => {
       const context = getConversationContext(conversationId);
@@ -2983,7 +3187,7 @@ export default function App() {
       }
 
       const nextModel = model || workspace.model || settings.defaultModel;
-      const nextReasoningEffort = reasoningEffort ?? normalizeReasoningEffort(workspace.reasoningEffort);
+      const nextReasoningEffort = reasoningEffort ?? normalizeReasoningEffort(workspace.reasoningEffort ?? settings.defaultReasoningEffort);
       updateWorkspace(workspace.id, {
         ...(model ? { model: nextModel } : {}),
         ...(reasoningEffort ? { reasoningEffort: nextReasoningEffort } : {}),
@@ -3001,6 +3205,53 @@ export default function App() {
       ));
     },
     [appendTimeline, getConversationContext, settings, updateWorkspace],
+  );
+
+  const applyWorkspaceModelSelection = useCallback(
+    (conversationId: string, model: string, reasoningEffort: string | null) => {
+      const context = getConversationContext(conversationId);
+      if (!context) {
+        Alert.alert('未选择工作区', '请先选择一个工作区。');
+        return;
+      }
+      const nextModel = model.trim();
+      if (!nextModel) {
+        Alert.alert('缺少模型', '请选择或输入模型名。');
+        return;
+      }
+      const nextReasoningEffort = normalizeReasoningEffort(reasoningEffort) ?? defaultReasoningForModel(nextModel, modelCatalog);
+      updateWorkspace(context.workspace.id, {
+        model: nextModel,
+        reasoningEffort: nextReasoningEffort,
+      });
+      appendTimeline(makeSystemEntry(
+        'Model settings updated',
+        [
+          `Model: ${nextModel}`,
+          `Reasoning: ${reasoningEffortLabel(nextReasoningEffort)}`,
+          '后续新 thread 和 turn 会把这些参数发送给 Codex app-server。',
+        ].join('\n'),
+        context.workspace.id,
+        context.conversation.id,
+      ));
+    },
+    [appendTimeline, getConversationContext, modelCatalog, updateWorkspace],
+  );
+
+  const applyDefaultModelSelection = useCallback(
+    (model: string, reasoningEffort: string | null) => {
+      const nextModel = model.trim();
+      if (!nextModel) {
+        return;
+      }
+      const nextReasoningEffort = normalizeReasoningEffort(reasoningEffort) ?? defaultReasoningForModel(nextModel, modelCatalog);
+      setSettings((current) => ({
+        ...current,
+        defaultModel: nextModel,
+        defaultReasoningEffort: nextReasoningEffort,
+      }));
+    },
+    [modelCatalog],
   );
 
   const sendSlashCommand = useCallback(
@@ -3060,7 +3311,11 @@ export default function App() {
       }
 
       if (lower === 'model') {
-        applyModelCommand(conversation.id, rest);
+        if (rest.length) {
+          applyModelCommand(conversation.id, rest);
+        } else {
+          openModelPicker(conversation.id);
+        }
         return;
       }
 
@@ -3333,6 +3588,7 @@ export default function App() {
       createConversation,
       ensureThreadId,
       getConversationContext,
+      openModelPicker,
       openPermissionsMenu,
       pendingRequests,
       selectConversation,
@@ -3503,6 +3759,8 @@ export default function App() {
                   workspaces={workspaces}
                   conversations={conversations}
                   timeline={timeline}
+                  activeConversationId={activeConversationId}
+                  activeTurns={turnIds}
                   createConversation={createConversation}
                   selectWorkspace={selectWorkspace}
                   selectConversation={selectConversation}
@@ -3526,6 +3784,7 @@ export default function App() {
                   composerAttachments={composerAttachments[props.route.params.conversationId] ?? []}
                   composerSelection={composerSelections[props.route.params.conversationId] ?? DEFAULT_COMPOSER_SELECTION}
                   isThinking={thinkingConversations[props.route.params.conversationId] === true}
+                  turnId={turnIds[props.route.params.conversationId] ?? ''}
                   lastError={lastError}
                   setChatDraft={(value) => setConversationChatDraft(props.route.params.conversationId, value)}
                   setComposerAttachments={(value) => setConversationAttachments(props.route.params.conversationId, value)}
@@ -3545,6 +3804,16 @@ export default function App() {
                   {...props}
                   settings={settings}
                   setSettings={setSettings}
+                  modelCatalog={modelCatalog}
+                  modelCatalogStatus={modelCatalogStatus}
+                  modelCatalogError={modelCatalogError}
+                  refreshModelCatalog={requestModelCatalog}
+                  openDefaultModelPicker={() => {
+                    setModelPickerPrompt({ target: 'settings' });
+                    if (connectionState === 'open' && modelCatalogStatus !== 'loading') {
+                      requestModelCatalog();
+                    }
+                  }}
                   serverVersion={serverVersion}
                   activeWorkspace={activeWorkspace}
                   pendingRequestCount={pendingRequests.length}
@@ -3568,8 +3837,79 @@ export default function App() {
           onCancel={() => setModelCommandPrompt(null)}
           onSubmit={(value) => {
             const targetConversationId = modelCommandPrompt?.conversationId ?? '';
+            if (modelCommandPrompt?.target === 'settings') {
+              const { model, reasoningEffort, invalidReasoningEffort } = parseModelCommandArgs(value.trim().split(/\s+/));
+              if (invalidReasoningEffort) {
+                Alert.alert('无效思考强度', '支持 none、minimal、low、medium、high、xhigh，也支持 max 作为 xhigh 的别名。');
+                return;
+              }
+              applyDefaultModelSelection(model || settings.defaultModel, reasoningEffort ?? settings.defaultReasoningEffort ?? null);
+              setModelCommandPrompt(null);
+              return;
+            }
             setModelCommandPrompt(null);
             applyModelCommand(targetConversationId, value.trim().split(/\s+/), false);
+          }}
+        />
+        <ModelPickerModal
+          visible={Boolean(modelPickerPrompt)}
+          title={modelPickerPrompt?.target === 'settings' ? '默认模型' : '当前对话模型'}
+          catalog={modelCatalog}
+          selectedModel={
+            modelPickerPrompt?.target === 'settings'
+              ? settings.defaultModel
+              : (() => {
+                  const context = modelPickerPrompt?.conversationId
+                    ? getConversationContext(modelPickerPrompt.conversationId)
+                    : null;
+                  return context?.workspace.model || settings.defaultModel;
+                })()
+          }
+          selectedReasoningEffort={
+            modelPickerPrompt?.target === 'settings'
+              ? normalizeReasoningEffort(settings.defaultReasoningEffort)
+              : (() => {
+                  const context = modelPickerPrompt?.conversationId
+                    ? getConversationContext(modelPickerPrompt.conversationId)
+                    : null;
+                  return normalizeReasoningEffort(context?.workspace.reasoningEffort ?? settings.defaultReasoningEffort);
+                })()
+          }
+          loading={modelCatalogStatus === 'loading'}
+          error={modelCatalogError}
+          onRefresh={requestModelCatalog}
+          onCancel={() => setModelPickerPrompt(null)}
+          onSubmit={(model, reasoningEffort) => {
+            const prompt = modelPickerPrompt;
+            setModelPickerPrompt(null);
+            if (prompt?.target === 'settings') {
+              applyDefaultModelSelection(model, reasoningEffort);
+              return;
+            }
+            if (prompt?.conversationId) {
+              applyWorkspaceModelSelection(prompt.conversationId, model, reasoningEffort);
+            }
+          }}
+          onManual={() => {
+            const prompt = modelPickerPrompt;
+            setModelPickerPrompt(null);
+            if (prompt?.target === 'settings') {
+              setModelCommandPrompt({
+                conversationId: activeConversationRef.current,
+                initialValue: [settings.defaultModel, normalizeReasoningEffort(settings.defaultReasoningEffort)].filter(Boolean).join(' '),
+                target: 'settings',
+              });
+              return;
+            }
+            if (prompt?.conversationId) {
+              const context = getConversationContext(prompt.conversationId);
+              if (context) {
+                setModelCommandPrompt({
+                  conversationId: context.conversation.id,
+                  initialValue: modelCommandInitialValue(context.workspace, settings),
+                });
+              }
+            }
           }}
         />
       </SafeAreaProvider>
@@ -3744,6 +4084,8 @@ function ConversationListScreen({
   workspaces,
   conversations,
   timeline,
+  activeConversationId,
+  activeTurns,
   createConversation,
   selectWorkspace,
   selectConversation,
@@ -3754,6 +4096,8 @@ function ConversationListScreen({
   workspaces: WorkspaceRecord[];
   conversations: ConversationRecord[];
   timeline: TimelineEntry[];
+  activeConversationId: string;
+  activeTurns: Record<string, string>;
   createConversation: (workspaceId: string) => ConversationRecord | null;
   selectWorkspace: (workspaceId: string) => void;
   selectConversation: (workspaceId: string, conversationId: string) => void;
@@ -3851,7 +4195,8 @@ function ConversationListScreen({
       ) : (
         workspaceConversations.map((conversation) => {
           const preview = conversation.title || conversationPreviewText(latestVisibleByConversation.get(conversation.id));
-          const active = isConversationActive(conversation);
+          const running = Boolean(activeTurns[conversation.id]);
+          const highlighted = isConversationHighlighted(conversation, activeConversationId, activeTurns);
           return (
             <Pressable
               key={conversation.id}
@@ -3860,24 +4205,24 @@ function ConversationListScreen({
                 navigation.navigate('Chat', { workspaceId: workspace.id, conversationId: conversation.id });
               }}
               onLongPress={() => openConversationActions(conversation)}
-              style={[styles.listItem, active && styles.listItemActive]}
+              style={[styles.listItem, highlighted && styles.listItemActive, running && styles.listItemRunning]}
             >
-              <View style={[styles.conversationAvatar, active && styles.conversationAvatarActive]}>
-                <Text style={[styles.conversationAvatarText, active && styles.conversationAvatarTextActive]}>
+              <View style={[styles.conversationAvatar, running && styles.conversationAvatarActive]}>
+                <Text style={[styles.conversationAvatarText, running && styles.conversationAvatarTextActive]}>
                   {preview.slice(0, 1).toUpperCase()}
                 </Text>
               </View>
               <View style={styles.itemMain}>
                 <View style={styles.itemHeader}>
-                  <Text style={[styles.itemTitle, active && styles.itemTitleActive]} numberOfLines={1}>
+                  <Text style={[styles.itemTitle, running && styles.itemTitleActive]} numberOfLines={1}>
                     {preview}
                   </Text>
-                  <Text style={[styles.itemTag, active && styles.itemTagActive]}>
-                    {active ? '运行中' : nowLabel(conversation.updatedAt)}
+                  <Text style={[styles.itemTag, running && styles.itemTagActive]}>
+                    {running ? '运行中' : nowLabel(conversation.updatedAt)}
                   </Text>
                 </View>
                 <Text style={styles.itemBody} numberOfLines={1}>
-                  {active ? '正在处理当前对话' : nowLabel(conversation.updatedAt)}
+                  {running ? '正在处理当前对话' : nowLabel(conversation.updatedAt)}
                 </Text>
               </View>
             </Pressable>
@@ -3914,6 +4259,7 @@ function ChatScreen({
   composerAttachments,
   composerSelection,
   isThinking,
+  turnId,
   lastError,
   setChatDraft,
   setComposerAttachments,
@@ -3935,6 +4281,7 @@ function ChatScreen({
   composerAttachments: ComposerAttachmentDraft[];
   composerSelection: TextInputSelectionChangeEventData['selection'];
   isThinking: boolean;
+  turnId: string;
   lastError: string;
   setChatDraft: Dispatch<SetStateAction<string>>;
   setComposerAttachments: Dispatch<SetStateAction<ComposerAttachmentDraft[]>>;
@@ -4604,7 +4951,7 @@ function ChatScreen({
             autoCorrect={false}
           />
           <View style={styles.composerActions}>
-            {isThinking ? (
+            {turnId ? (
               <Pressable
                 accessibilityLabel="中断当前任务"
                 onPress={() => stopThinking(route.params.conversationId)}
@@ -4685,6 +5032,11 @@ function ChatScreen({
 function SettingsScreen({
   settings,
   setSettings,
+  modelCatalog,
+  modelCatalogStatus,
+  modelCatalogError,
+  refreshModelCatalog,
+  openDefaultModelPicker,
   serverVersion,
   activeWorkspace,
   pendingRequestCount,
@@ -4698,6 +5050,11 @@ function SettingsScreen({
 }: NativeStackScreenProps<RootStackParamList, 'Settings'> & {
   settings: ConnectionSettings;
   setSettings: React.Dispatch<React.SetStateAction<ConnectionSettings>>;
+  modelCatalog: CodexModelCatalogItem[];
+  modelCatalogStatus: 'idle' | 'loading' | 'ready' | 'error';
+  modelCatalogError: string;
+  refreshModelCatalog: () => boolean;
+  openDefaultModelPicker: () => void;
   serverVersion: ServerVersion | null;
   activeWorkspace: WorkspaceRecord | null;
   pendingRequestCount: number;
@@ -4741,6 +5098,8 @@ function SettingsScreen({
       : settings.encryptionProtocol === 'x25519'
         ? 'X25519'
         : 'ML-KEM-768';
+  const currentModelName = activeWorkspace?.model || settings.defaultModel;
+  const currentReasoningEffort = normalizeReasoningEffort(activeWorkspace?.reasoningEffort ?? settings.defaultReasoningEffort);
 
   const openPairingScanner = useCallback(async () => {
     if (Platform.OS === 'web') {
@@ -4976,6 +5335,29 @@ function SettingsScreen({
             onChangeText={(value) => setSettings((current) => ({ ...current, defaultModel: value }))}
             placeholder="gpt-5.5"
           />
+          <View style={styles.modelControlBlock}>
+            <View style={styles.modelControlHeader}>
+              <View style={styles.modelControlTitleBlock}>
+                <Text style={styles.fieldLabel}>模型选择</Text>
+                <Text style={styles.modelControlCurrent} numberOfLines={1}>
+                  {modelDisplayLabel(settings.defaultModel, modelCatalog)} · {reasoningEffortLabel(settings.defaultReasoningEffort)}
+                </Text>
+              </View>
+              {modelCatalogStatus === 'loading' ? <ActivityIndicator size="small" color="#17202a" /> : null}
+            </View>
+            <Row>
+              <ActionButton title="选择模型" onPress={openDefaultModelPicker} tone="solid" />
+              <ActionButton title="刷新列表" onPress={refreshModelCatalog} tone="ghost" disabled={modelCatalogStatus === 'loading'} />
+            </Row>
+            {modelCatalogError ? <Text style={styles.warningText}>{modelCatalogError}</Text> : null}
+          </View>
+          <ReasoningEffortSelector
+            label="默认思考强度"
+            options={reasoningOptionsForModel(settings.defaultModel, modelCatalog)}
+            value={normalizeReasoningEffort(settings.defaultReasoningEffort)}
+            defaultValue={defaultReasoningForModel(settings.defaultModel, modelCatalog)}
+            onChange={(value) => setSettings((current) => ({ ...current, defaultReasoningEffort: value }))}
+          />
           <Field
             label="Approval policy"
             value={settings.approvalPolicy}
@@ -4998,8 +5380,8 @@ function SettingsScreen({
           <Diagnostic label="数据目录" value={serverVersion?.data_dir ?? 'unknown'} />
           <Diagnostic label="工作区根目录" value={serverVersion?.workspace_root ?? 'unknown'} />
           <Diagnostic label="当前目录" value={activeWorkspace?.path ?? 'none'} />
-          <Diagnostic label="当前模型" value={activeWorkspace?.model || settings.defaultModel || 'none'} />
-          <Diagnostic label="思考强度" value={activeWorkspace?.reasoningEffort || '默认'} />
+          <Diagnostic label="当前模型" value={currentModelName || 'none'} />
+          <Diagnostic label="思考强度" value={reasoningEffortLabel(currentReasoningEffort)} />
           <Diagnostic label="待处理请求" value={String(pendingRequestCount)} />
           <Diagnostic label="当前 Turn" value={turnId || 'unknown'} />
         </View>
@@ -5358,6 +5740,162 @@ function PromptModal({
   );
 }
 
+function ReasoningEffortSelector({
+  label,
+  options,
+  value,
+  defaultValue,
+  onChange,
+}: {
+  label: string;
+  options: CodexReasoningEffortOption[];
+  value: string | null;
+  defaultValue: string | null;
+  onChange: (value: string | null) => void;
+}) {
+  const normalizedValue = normalizeReasoningEffort(value);
+  const normalizedDefault = normalizeReasoningEffort(defaultValue);
+  const effectiveOptions = options.length ? options : DEFAULT_REASONING_EFFORT_OPTIONS;
+  return (
+    <View style={styles.reasoningBlock}>
+      <View style={styles.modelControlHeader}>
+        <Text style={styles.fieldLabel}>{label}</Text>
+        <Text style={styles.reasoningDefaultText}>默认: {reasoningEffortLabel(normalizedDefault)}</Text>
+      </View>
+      <View style={styles.reasoningGrid}>
+        {effectiveOptions.map((option) => {
+          const selected = normalizedValue === option.reasoningEffort;
+          return (
+            <Pressable
+              key={option.reasoningEffort}
+              style={[styles.reasoningOption, selected ? styles.reasoningOptionActive : null]}
+              onPress={() => onChange(option.reasoningEffort)}
+            >
+              <Text style={[styles.reasoningOptionTitle, selected ? styles.reasoningOptionTitleActive : null]} numberOfLines={1}>
+                {reasoningEffortLabel(option.reasoningEffort)}
+              </Text>
+              <Text style={[styles.reasoningOptionDescription, selected ? styles.reasoningOptionDescriptionActive : null]} numberOfLines={2}>
+                {option.description}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
+function ModelPickerModal({
+  visible,
+  title,
+  catalog,
+  selectedModel,
+  selectedReasoningEffort,
+  loading,
+  error,
+  onRefresh,
+  onCancel,
+  onSubmit,
+  onManual,
+}: {
+  visible: boolean;
+  title: string;
+  catalog: CodexModelCatalogItem[];
+  selectedModel: string;
+  selectedReasoningEffort: string | null;
+  loading: boolean;
+  error: string;
+  onRefresh: () => boolean;
+  onCancel: () => void;
+  onSubmit: (model: string, reasoningEffort: string | null) => void;
+  onManual: () => void;
+}) {
+  const [draftModel, setDraftModel] = useState(selectedModel);
+  const [draftReasoningEffort, setDraftReasoningEffort] = useState<string | null>(normalizeReasoningEffort(selectedReasoningEffort));
+  const safeCatalog = catalog.length ? catalog : FALLBACK_CODEX_MODELS;
+
+  useEffect(() => {
+    if (visible) {
+      setDraftModel(selectedModel);
+      setDraftReasoningEffort(normalizeReasoningEffort(selectedReasoningEffort));
+    }
+  }, [selectedModel, selectedReasoningEffort, visible]);
+
+  const selectedPreset = safeCatalog.find((item) => item.model === draftModel);
+  const reasoningOptions = reasoningOptionsForModel(draftModel, safeCatalog);
+  const defaultEffort = selectedPreset?.defaultReasoningEffort ?? defaultReasoningForModel(draftModel, safeCatalog);
+
+  const selectModel = (model: CodexModelCatalogItem) => {
+    setDraftModel(model.model);
+    const currentEffort = normalizeReasoningEffort(draftReasoningEffort);
+    const supported = model.supportedReasoningEfforts.map((option) => option.reasoningEffort);
+    setDraftReasoningEffort(
+      currentEffort && supported.includes(currentEffort)
+        ? currentEffort
+        : model.defaultReasoningEffort ?? supported[0] ?? null,
+    );
+  };
+
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onCancel}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.modelPickerSheet}>
+          <View style={styles.modalHeader}>
+            <View style={styles.modelControlTitleBlock}>
+              <Text style={styles.modalTitle}>{title}</Text>
+              <Text style={styles.modelPickerSubtitle} numberOfLines={1}>
+                {modelDisplayLabel(draftModel, safeCatalog)} · {reasoningEffortLabel(draftReasoningEffort)}
+              </Text>
+            </View>
+            <Pressable onPress={onCancel}>
+              <Text style={styles.modalClose}>关闭</Text>
+            </Pressable>
+          </View>
+          <View style={styles.modelPickerToolbar}>
+            <ActionButton title="刷新" onPress={onRefresh} tone="ghost" disabled={loading} />
+            <ActionButton title="手动输入" onPress={onManual} tone="ghost" />
+            {loading ? <ActivityIndicator size="small" color="#17202a" /> : null}
+          </View>
+          {error ? <Text style={styles.warningText}>{error}</Text> : null}
+          <ScrollView style={styles.modelPickerList} contentContainerStyle={styles.modelPickerListContent}>
+            {safeCatalog.map((model) => {
+              const selected = draftModel === model.model;
+              return (
+                <Pressable
+                  key={model.model}
+                  style={[styles.modelOption, selected ? styles.modelOptionActive : null]}
+                  onPress={() => selectModel(model)}
+                >
+                  <View style={styles.modelOptionHeader}>
+                    <Text style={[styles.modelOptionTitle, selected ? styles.modelOptionTitleActive : null]} numberOfLines={1}>
+                      {model.displayName || model.model}
+                    </Text>
+                    {model.isDefault ? <Text style={styles.modelDefaultBadge}>default</Text> : null}
+                  </View>
+                  {model.description ? (
+                    <Text style={styles.modelOptionDescription} numberOfLines={2}>{model.description}</Text>
+                  ) : null}
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+          <ReasoningEffortSelector
+            label={`思考强度 · ${draftModel || 'model'}`}
+            options={reasoningOptions}
+            value={draftReasoningEffort}
+            defaultValue={defaultEffort}
+            onChange={setDraftReasoningEffort}
+          />
+          <Row>
+            <ActionButton title="应用" onPress={() => onSubmit(draftModel, draftReasoningEffort)} />
+            <ActionButton title="取消" onPress={onCancel} tone="ghost" />
+          </Row>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 const styles = StyleSheet.create({
   appRoot: {
     flex: 1,
@@ -5500,6 +6038,10 @@ const styles = StyleSheet.create({
     borderBottomColor: '#e7ecef',
   },
   listItemActive: {
+    backgroundColor: '#edf5ff',
+    borderBottomColor: '#bed7f0',
+  },
+  listItemRunning: {
     backgroundColor: '#f0fbf5',
     borderBottomColor: '#bfe8cf',
   },
@@ -5619,6 +6161,15 @@ const styles = StyleSheet.create({
     marginHorizontal: 18,
     borderRadius: 8,
     padding: 18,
+    gap: 14,
+  },
+  modelPickerSheet: {
+    maxHeight: '92%',
+    backgroundColor: '#ffffff',
+    borderTopLeftRadius: 8,
+    borderTopRightRadius: 8,
+    padding: 18,
+    paddingBottom: 28,
     gap: 14,
   },
   modalHeader: {
@@ -5792,6 +6343,129 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 18,
   },
+  modelControlBlock: {
+    gap: 10,
+  },
+  modelControlHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  modelControlTitleBlock: {
+    flex: 1,
+    minWidth: 0,
+  },
+  modelControlCurrent: {
+    marginTop: 4,
+    color: '#17202a',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  modelPickerToolbar: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 10,
+  },
+  modelPickerSubtitle: {
+    marginTop: 4,
+    color: '#66717c',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  modelPickerList: {
+    maxHeight: 260,
+  },
+  modelPickerListContent: {
+    gap: 8,
+    paddingBottom: 2,
+  },
+  modelOption: {
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d8e0e7',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 5,
+  },
+  modelOptionActive: {
+    borderColor: '#19a463',
+    backgroundColor: '#f0fbf5',
+  },
+  modelOptionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  modelOptionTitle: {
+    flex: 1,
+    minWidth: 0,
+    color: '#17202a',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  modelOptionTitleActive: {
+    color: '#168451',
+  },
+  modelDefaultBadge: {
+    color: '#168451',
+    fontSize: 10,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+  },
+  modelOptionDescription: {
+    color: '#66717c',
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: '600',
+  },
+  reasoningBlock: {
+    gap: 10,
+  },
+  reasoningDefaultText: {
+    color: '#66717c',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  reasoningGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  reasoningOption: {
+    width: '48%',
+    minHeight: 74,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d8e0e7',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    gap: 4,
+  },
+  reasoningOptionActive: {
+    borderColor: '#17202a',
+    backgroundColor: '#17202a',
+  },
+  reasoningOptionTitle: {
+    color: '#17202a',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  reasoningOptionTitleActive: {
+    color: '#ffffff',
+  },
+  reasoningOptionDescription: {
+    color: '#66717c',
+    fontSize: 11,
+    lineHeight: 15,
+    fontWeight: '600',
+  },
+  reasoningOptionDescriptionActive: {
+    color: '#d7dde3',
+  },
   inputDisabled: {
     opacity: 0.7,
   },
@@ -5851,6 +6525,12 @@ const styles = StyleSheet.create({
     fontSize: 12,
     paddingHorizontal: 16,
     paddingTop: 8,
+  },
+  warningText: {
+    color: '#a23b3b',
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: '700',
   },
   messageArea: {
     flex: 1,

@@ -8,8 +8,25 @@ export type ConnectionSettings = {
   encryptionPublicKey: string;
   defaultWorkspacePath: string;
   defaultModel: string;
+  defaultReasoningEffort?: string | null;
   approvalPolicy: string;
   sandboxMode: string;
+};
+
+export type CodexModelCatalogItem = {
+  id: string;
+  model: string;
+  displayName: string;
+  description: string;
+  hidden: boolean;
+  isDefault: boolean;
+  supportedReasoningEfforts: CodexReasoningEffortOption[];
+  defaultReasoningEffort: string | null;
+};
+
+export type CodexReasoningEffortOption = {
+  reasoningEffort: string;
+  description: string;
 };
 
 export type LocalAdapterState = 'idle' | 'starting' | 'running' | 'stopped' | 'error';
@@ -125,6 +142,210 @@ export function normalizeReasoningEffort(value: string | null | undefined): stri
     default:
       return null;
   }
+}
+
+const REASONING_EFFORT_DESCRIPTIONS: Record<string, string> = {
+  none: 'No model reasoning',
+  minimal: 'Minimal reasoning for fastest responses',
+  low: 'Fast responses with lighter reasoning',
+  medium: 'Balances speed and reasoning depth for everyday tasks',
+  high: 'Greater reasoning depth for complex problems',
+  xhigh: 'Extra high reasoning depth for complex problems',
+};
+
+export const DEFAULT_REASONING_EFFORT_OPTIONS: CodexReasoningEffortOption[] = [
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+].map((reasoningEffort) => ({
+  reasoningEffort,
+  description: REASONING_EFFORT_DESCRIPTIONS[reasoningEffort] ?? reasoningEffort,
+}));
+
+export const FALLBACK_CODEX_MODELS: CodexModelCatalogItem[] = [
+  {
+    id: 'gpt-5.5',
+    model: 'gpt-5.5',
+    displayName: 'gpt-5.5',
+    description: 'Frontier model for complex coding, research, and real-world work.',
+    hidden: false,
+    isDefault: true,
+    supportedReasoningEfforts: DEFAULT_REASONING_EFFORT_OPTIONS,
+    defaultReasoningEffort: 'medium',
+  },
+  {
+    id: 'gpt-5.4',
+    model: 'gpt-5.4',
+    displayName: 'gpt-5.4',
+    description: 'Strong model for everyday coding.',
+    hidden: false,
+    isDefault: false,
+    supportedReasoningEfforts: DEFAULT_REASONING_EFFORT_OPTIONS,
+    defaultReasoningEffort: 'medium',
+  },
+  {
+    id: 'gpt-5.4-mini',
+    model: 'gpt-5.4-mini',
+    displayName: 'gpt-5.4-mini',
+    description: 'Small, fast, and cost-efficient model for simpler coding tasks.',
+    hidden: false,
+    isDefault: false,
+    supportedReasoningEfforts: DEFAULT_REASONING_EFFORT_OPTIONS.filter((option) => option.reasoningEffort !== 'xhigh'),
+    defaultReasoningEffort: 'medium',
+  },
+  {
+    id: 'gpt-5.3-codex',
+    model: 'gpt-5.3-codex',
+    displayName: 'gpt-5.3-codex',
+    description: 'Coding-optimized model.',
+    hidden: false,
+    isDefault: false,
+    supportedReasoningEfforts: DEFAULT_REASONING_EFFORT_OPTIONS,
+    defaultReasoningEffort: 'medium',
+  },
+];
+
+function stringField(record: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+  return '';
+}
+
+function booleanField(record: Record<string, unknown>, keys: string[], fallback = false): boolean {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'boolean') {
+      return value;
+    }
+  }
+  return fallback;
+}
+
+function parseReasoningEffortOptions(value: unknown, defaultEffort: string | null): CodexReasoningEffortOption[] {
+  if (!Array.isArray(value)) {
+    return defaultEffort
+      ? [{ reasoningEffort: defaultEffort, description: REASONING_EFFORT_DESCRIPTIONS[defaultEffort] ?? defaultEffort }]
+      : DEFAULT_REASONING_EFFORT_OPTIONS;
+  }
+
+  const options = value
+    .map((item): CodexReasoningEffortOption | null => {
+      if (typeof item === 'string') {
+        const normalized = normalizeReasoningEffort(item);
+        return normalized
+          ? {
+              reasoningEffort: normalized,
+              description: REASONING_EFFORT_DESCRIPTIONS[normalized] ?? normalized,
+            }
+          : null;
+      }
+      if (!isObject(item)) {
+        return null;
+      }
+      const effort = normalizeReasoningEffort(
+        stringField(item, ['reasoningEffort', 'reasoning_effort', 'effort', 'level']),
+      );
+      if (!effort) {
+        return null;
+      }
+      return {
+        reasoningEffort: effort,
+        description: stringField(item, ['description', 'label']) || REASONING_EFFORT_DESCRIPTIONS[effort] || effort,
+      };
+    })
+    .filter((item): item is CodexReasoningEffortOption => Boolean(item));
+
+  if (!options.length && defaultEffort) {
+    return [{ reasoningEffort: defaultEffort, description: REASONING_EFFORT_DESCRIPTIONS[defaultEffort] ?? defaultEffort }];
+  }
+
+  const seen = new Set<string>();
+  return options.filter((option) => {
+    if (seen.has(option.reasoningEffort)) {
+      return false;
+    }
+    seen.add(option.reasoningEffort);
+    return true;
+  });
+}
+
+function modelCatalogArray(value: unknown): unknown[] {
+  if (Array.isArray(value)) {
+    return value;
+  }
+  if (!isObject(value)) {
+    return [];
+  }
+  if (isObject(value.payload)) {
+    const payloadData = isObject(value.payload.data) ? value.payload.data : value.payload;
+    const nested = modelCatalogArray(payloadData);
+    if (nested.length) {
+      return nested;
+    }
+  }
+  if (isObject(value.result)) {
+    const nested = modelCatalogArray(value.result);
+    if (nested.length) {
+      return nested;
+    }
+  }
+  for (const key of ['data', 'models', 'items']) {
+    const nested = value[key];
+    if (Array.isArray(nested)) {
+      return nested;
+    }
+  }
+  return [];
+}
+
+export function parseCodexModelListResponse(value: unknown): CodexModelCatalogItem[] {
+  const items = modelCatalogArray(value);
+  const parsed = items
+    .map((item): CodexModelCatalogItem | null => {
+      if (!isObject(item)) {
+        return null;
+      }
+      const model = stringField(item, ['model', 'slug', 'id']);
+      if (!model) {
+        return null;
+      }
+      const defaultReasoningEffort = normalizeReasoningEffort(
+        stringField(item, ['defaultReasoningEffort', 'default_reasoning_effort', 'default_reasoning_level']),
+      );
+      const supportedReasoningEfforts = parseReasoningEffortOptions(
+        item.supportedReasoningEfforts ?? item.supported_reasoning_efforts ?? item.supported_reasoning_levels,
+        defaultReasoningEffort,
+      );
+      return {
+        id: stringField(item, ['id']) || model,
+        model,
+        displayName: stringField(item, ['displayName', 'display_name', 'name']) || model,
+        description: stringField(item, ['description']),
+        hidden: booleanField(item, ['hidden'], false),
+        isDefault: booleanField(item, ['isDefault', 'is_default'], false),
+        supportedReasoningEfforts,
+        defaultReasoningEffort:
+          defaultReasoningEffort ??
+          supportedReasoningEfforts.find((option) => option.reasoningEffort === 'medium')?.reasoningEffort ??
+          supportedReasoningEfforts[0]?.reasoningEffort ??
+          null,
+      };
+    })
+    .filter((item): item is CodexModelCatalogItem => Boolean(item));
+
+  const byModel = new Map<string, CodexModelCatalogItem>();
+  parsed.forEach((item) => {
+    if (!item.hidden || !byModel.has(item.model)) {
+      byModel.set(item.model, item);
+    }
+  });
+  return [...byModel.values()];
 }
 
 export function buildHttpUrl(serverUrl: string, pathname: string): string {
