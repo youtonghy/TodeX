@@ -123,7 +123,7 @@ export function assemblePairingQrChunkPayload(chunks: PairingQrChunk[]): string 
     throw new Error('分段二维码内容不完整');
   }
   const assembled = sortedChunks.map((chunk) => chunk.data).join('');
-  const decoded = decodeBase64Url(assembled);
+  const decoded = decodeBase64UrlBytes(assembled);
   const digest = encodeBase64Url(sha256(decoded));
   if (digest !== firstChunk.checksum) {
     throw new Error('分段二维码校验失败');
@@ -248,12 +248,12 @@ export function createTransportCryptoSession(settings: ConnectionSettings): Tran
       if (!wrapped.nonce || !wrapped.ciphertext) {
         throw new Error('收到的加密帧缺少 nonce 或 ciphertext');
       }
-      const nonce = decodeBase64Url(wrapped.nonce);
+      const nonce = decodeBase64UrlBytes(wrapped.nonce);
       if (nonce.length !== 24 || nonce[0] !== 1) {
         throw new Error('收到的加密帧方向不正确');
       }
       const plaintext = xchacha20poly1305(key, nonce, AAD).decrypt(
-        decodeBase64Url(wrapped.ciphertext),
+        decodeBase64UrlBytes(wrapped.ciphertext),
       );
       return new TextDecoder().decode(plaintext);
     },
@@ -335,6 +335,20 @@ function encodeBase64Url(bytes: Uint8Array): string {
   return output;
 }
 
+function decodeBase64UrlBytes(value: string): Uint8Array {
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+  const globalAtob = (globalThis as unknown as { atob?: (input: string) => string }).atob;
+  if (typeof globalAtob === 'function') {
+    return binaryToBytes(globalAtob(padded));
+  }
+  const nodeBuffer = (globalThis as unknown as { Buffer?: { from: (input: string, encoding: string) => { toString: (encoding: string) => string } } }).Buffer;
+  if (nodeBuffer) {
+    return binaryToBytes(nodeBuffer.from(padded, 'base64').toString('binary'));
+  }
+  return decodeBase64Url(value);
+}
+
 function decodeBase64Url(value: string): Uint8Array {
   const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
   const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
@@ -356,4 +370,12 @@ function decodeBase64Url(value: string): Uint8Array {
     }
   }
   return new Uint8Array(bytes);
+}
+
+function binaryToBytes(binary: string): Uint8Array {
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
 }

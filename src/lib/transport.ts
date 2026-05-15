@@ -2,6 +2,7 @@ import { createRequestId, isObject, type ServerEvent } from './todex';
 
 export const TRANSPORT_VERSION = 1;
 export const TRANSPORT_REASSEMBLY_LIMIT_BYTES = 100 * 1024 * 1024;
+const TRANSPORT_ACK_FLUSH_DELAY_MS = 80;
 
 export type TransportStatus = 'disabled' | 'handshaking' | 'ready' | 'error';
 
@@ -64,6 +65,8 @@ export class TodeXTransportClient {
   private loadSessionCursors: () => Record<string, number>;
   private onStatus?: (status: TransportStatusSnapshot) => void;
   private chunks = new Map<string, PartialChunk>();
+  private pendingAcks = new Map<string, number>();
+  private ackFlushTimer: ReturnType<typeof setTimeout> | null = null;
   private supportsEnvelope = false;
 
   constructor(options: TransportClientOptions) {
@@ -85,6 +88,7 @@ export class TodeXTransportClient {
     this.socket = socket;
     this.encrypt = encrypt;
     this.chunks.clear();
+    this.clearPendingAcks();
     this.supportsEnvelope = true;
     this.setStatus('handshaking', '');
     this.sendEnvelope('transport.hello', {
@@ -100,6 +104,7 @@ export class TodeXTransportClient {
     this.socket = null;
     this.encrypt = (text) => text;
     this.chunks.clear();
+    this.clearPendingAcks();
     this.supportsEnvelope = false;
     this.setStatus(error ? 'error' : 'disabled', error);
   }
@@ -146,10 +151,26 @@ export class TodeXTransportClient {
     if (!sessionId || cursor === null) {
       return;
     }
-    this.sendEnvelope('transport.ack', {
-      sessionId,
-      cursor,
-    });
+    const previousCursor = this.pendingAcks.get(sessionId) ?? 0;
+    if (cursor > previousCursor) {
+      this.pendingAcks.set(sessionId, cursor);
+    }
+    this.scheduleAckFlush();
+  }
+
+  flushAcks(): void {
+    if (this.ackFlushTimer) {
+      clearTimeout(this.ackFlushTimer);
+      this.ackFlushTimer = null;
+    }
+    if (this.pendingAcks.size === 0) {
+      return;
+    }
+    const pending = Array.from(this.pendingAcks.entries());
+    this.pendingAcks.clear();
+    for (const [sessionId, cursor] of pending) {
+      this.sendEnvelope('transport.ack', { sessionId, cursor });
+    }
   }
 
   private eventFromPayload(payload: TransportEventPayload): ServerEvent {
@@ -195,13 +216,22 @@ export class TodeXTransportClient {
       return null;
     }
 
-    const ordered = Array.from({ length: current.total }, (_, index) => current.parts.get(index));
-    if (ordered.some((part) => typeof part !== 'string')) {
-      throw new Error('transport chunk is missing a part');
+    const bytes = new Uint8Array(current.totalBytes);
+    let offset = 0;
+    for (let index = 0; index < current.total; index += 1) {
+      const part = current.parts.get(index);
+      if (typeof part !== 'string') {
+        throw new Error('transport chunk is missing a part');
+      }
+      const decoded = decodeBase64Bytes(part);
+      if (offset + decoded.length > current.totalBytes) {
+        throw new Error('transport chunk decoded size mismatch');
+      }
+      bytes.set(decoded, offset);
+      offset += decoded.length;
     }
-    const bytes = ordered.flatMap((part) => decodeBase64Bytes(part ?? ''));
     this.chunks.delete(chunk.chunkId);
-    if (bytes.length !== current.totalBytes) {
+    if (offset !== current.totalBytes) {
       throw new Error('transport chunk decoded size mismatch');
     }
     return decodeUtf8Bytes(bytes);
@@ -211,6 +241,23 @@ export class TodeXTransportClient {
     this.status = status;
     this.error = error;
     this.onStatus?.(this.snapshot);
+  }
+
+  private scheduleAckFlush(): void {
+    if (this.ackFlushTimer || !this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    this.ackFlushTimer = setTimeout(() => {
+      this.flushAcks();
+    }, TRANSPORT_ACK_FLUSH_DELAY_MS);
+  }
+
+  private clearPendingAcks(): void {
+    if (this.ackFlushTimer) {
+      clearTimeout(this.ackFlushTimer);
+      this.ackFlushTimer = null;
+    }
+    this.pendingAcks.clear();
   }
 }
 
@@ -267,13 +314,16 @@ function stableTransportClientId(): string {
   return `mobile-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
 }
 
-function decodeBase64Bytes(value: string): number[] {
+function decodeBase64Bytes(value: string): Uint8Array {
   const binary = decodeBase64Binary(value);
-  return Array.from(binary, (char) => char.charCodeAt(0));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
 }
 
-function decodeUtf8Bytes(value: number[]): string {
-  const bytes = Uint8Array.from(value);
+function decodeUtf8Bytes(bytes: Uint8Array): string {
   if (typeof TextDecoder !== 'undefined') {
     return new TextDecoder().decode(bytes);
   }

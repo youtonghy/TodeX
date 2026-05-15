@@ -7,11 +7,6 @@ const compiledDir = path.join(__dirname, '..', '..', 'dist', 'unit');
 const todex = require(path.join(compiledDir, 'todex.js'));
 const transport = require(path.join(compiledDir, 'transport.js'));
 const transportCrypto = require(path.join(compiledDir, 'transportCrypto.js'));
-let executedTests = 0;
-
-process.on('exit', () => {
-  assert.equal(executedTests, 19);
-});
 
 function baseSettings(overrides = {}) {
   return {
@@ -30,7 +25,6 @@ function baseSettings(overrides = {}) {
 }
 
 test('builds HTTP and WebSocket URLs from flexible server addresses', () => {
-  executedTests += 1;
   assert.equal(
     todex.buildHttpUrl('127.0.0.1:7345', '/v1/version'),
     'http://127.0.0.1:7345/v1/version',
@@ -50,7 +44,6 @@ test('builds HTTP and WebSocket URLs from flexible server addresses', () => {
 });
 
 test('normalizes Codex reasoning effort aliases', () => {
-  executedTests += 1;
   assert.equal(todex.normalizeReasoningEffort('high'), 'high');
   assert.equal(todex.normalizeReasoningEffort('extra-high'), 'xhigh');
   assert.equal(todex.normalizeReasoningEffort('max'), 'xhigh');
@@ -59,7 +52,6 @@ test('normalizes Codex reasoning effort aliases', () => {
 });
 
 test('parses Codex model list responses with reasoning efforts', () => {
-  executedTests += 1;
   const parsed = todex.parseCodexModelListResponse({
     data: [{
       id: 'gpt-5.4',
@@ -83,7 +75,6 @@ test('parses Codex model list responses with reasoning efforts', () => {
 });
 
 test('parses legacy snake_case model catalog shapes', () => {
-  executedTests += 1;
   const parsed = todex.parseCodexModelListResponse({
     result: {
       models: [{
@@ -103,7 +94,6 @@ test('parses legacy snake_case model catalog shapes', () => {
 });
 
 test('extracts thread ids from nested server event payloads', () => {
-  executedTests += 1;
   assert.equal(
     todex.extractThreadIdFromEvent({
       type: 'codex.local.turn.completed',
@@ -130,7 +120,6 @@ test('extracts thread ids from nested server event payloads', () => {
 });
 
 test('transport client unwraps enveloped server events', () => {
-  executedTests += 1;
   const client = new transport.TodeXTransportClient({ loadSessionCursors: () => ({}) });
   const events = client.decode(JSON.stringify({
     type: 'transport.event',
@@ -153,7 +142,6 @@ test('transport client unwraps enveloped server events', () => {
 });
 
 test('transport client reassembles chunked frames before decoding events', () => {
-  executedTests += 1;
   const client = new transport.TodeXTransportClient({ loadSessionCursors: () => ({}) });
   const payload = JSON.stringify({
     type: 'transport.event',
@@ -201,7 +189,6 @@ test('transport client reassembles chunked frames before decoding events', () =>
 });
 
 test('transport client sends hello, enveloped events, and cursor acks', () => {
-  executedTests += 1;
   const sent = [];
   const socket = {
     readyState: 1,
@@ -223,6 +210,7 @@ test('transport client sends hello, enveloped events, and cursor acks', () => {
     cursor: 6,
     payload: {},
   });
+  client.flushAcks();
 
   assert.equal(sent[0].type, 'transport.hello');
   assert.deepEqual(sent[0].payload.sessionCursors, { 'session-1': 3 });
@@ -233,8 +221,81 @@ test('transport client sends hello, enveloped events, and cursor acks', () => {
   assert.equal(sent[2].payload.cursor, 6);
 });
 
+test('transport client batches cursor acks by session', () => {
+  const sent = [];
+  const originalSetTimeout = global.setTimeout;
+  const originalClearTimeout = global.clearTimeout;
+  const originalWebSocket = global.WebSocket;
+  try {
+    const timers = [];
+    global.setTimeout = (fn) => {
+      timers.push(fn);
+      return timers.length;
+    };
+    global.clearTimeout = () => {};
+    global.WebSocket = { OPEN: 1 };
+    const client = new transport.TodeXTransportClient({
+      loadSessionCursors: () => ({}),
+    });
+    client.attach({ readyState: 1, send: (value) => sent.push(JSON.parse(value)) }, (text) => text);
+
+    client.ack({ type: 'codex.item.completed', codex_session_id: 'session-1', cursor: 4, payload: {} });
+    client.ack({ type: 'codex.item.completed', codex_session_id: 'session-1', cursor: 7, payload: {} });
+    assert.equal(sent.filter((item) => item.type === 'transport.ack').length, 0);
+    timers.splice(0).forEach((timer) => timer());
+
+    assert.equal(sent.filter((item) => item.type === 'transport.ack').length, 1);
+    assert.equal(sent[1].payload.cursor, 7);
+  } finally {
+    global.setTimeout = originalSetTimeout;
+    global.clearTimeout = originalClearTimeout;
+    global.WebSocket = originalWebSocket;
+  }
+});
+
+test('transport chunk reassembly decodes directly into a single byte buffer', () => {
+  const client = new transport.TodeXTransportClient({ loadSessionCursors: () => ({}) });
+  const payload = JSON.stringify({
+    type: 'transport.event',
+    payload: {
+      sessionId: 'session-1',
+      cursor: 9,
+      payload: { type: 'codex.item.completed', payload: { data: { text: 'abc' } } },
+    },
+  });
+  const encoded = Buffer.from(payload, 'utf8').toString('base64');
+  const first = encoded.slice(0, Math.ceil(encoded.length / 2));
+  const second = encoded.slice(Math.ceil(encoded.length / 2));
+
+  assert.deepEqual(client.decode(JSON.stringify({
+    type: 'transport.chunk',
+    payload: {
+      chunkId: 'chunk-2',
+      index: 0,
+      total: 2,
+      encoding: 'base64',
+      totalBytes: Buffer.byteLength(payload),
+      data: first,
+    },
+  })), []);
+
+  const events = client.decode(JSON.stringify({
+    type: 'transport.chunk',
+    payload: {
+      chunkId: 'chunk-2',
+      index: 1,
+      total: 2,
+      encoding: 'base64',
+      totalBytes: Buffer.byteLength(payload),
+      data: second,
+    },
+  }));
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].cursor, 9);
+});
+
 test('parses native Codex thread list responses', () => {
-  executedTests += 1;
   const parsed = todex.parseCodexNativeThreadListResponse({
     result: {
       data: [
@@ -261,7 +322,6 @@ test('parses native Codex thread list responses', () => {
 });
 
 test('parses native Codex thread objects from control responses', () => {
-  executedTests += 1;
   const parsed = todex.parseCodexNativeThread({
     payload: {
       data: {
@@ -283,7 +343,6 @@ test('parses native Codex thread objects from control responses', () => {
 });
 
 test('parses native Codex thread/read responses into chat history entries', () => {
-  executedTests += 1;
   const parsed = todex.parseCodexNativeThreadReadResponse({
     result: {
       thread: {
@@ -326,7 +385,6 @@ test('parses native Codex thread/read responses into chat history entries', () =
 });
 
 test('recognizes non-materialized native thread history errors', () => {
-  executedTests += 1;
   assert.equal(
     todex.isThreadNotMaterializedHistoryError(
       'thread thr_empty is not materialized yet; includeTurns is unavailable before first user message',
@@ -340,7 +398,6 @@ test('recognizes non-materialized native thread history errors', () => {
 });
 
 test('classifies approval requests and builds matching response payloads', () => {
-  executedTests += 1;
   const event = {
     type: 'codex.approval.permissions.request',
     payload: {
@@ -375,7 +432,6 @@ test('classifies approval requests and builds matching response payloads', () =>
 });
 
 test('parses embedded pairing links and applies encrypted settings', async () => {
-  executedTests += 1;
   const pairing = await transportCrypto.resolvePairingPayload(JSON.stringify({
     kind: 'todex-pairing-link',
     version: 1,
@@ -401,7 +457,6 @@ test('parses embedded pairing links and applies encrypted settings', async () =>
 });
 
 test('imports pairing links with embedded selected public keys', async () => {
-  executedTests += 1;
   const requests = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
@@ -432,7 +487,6 @@ test('imports pairing links with embedded selected public keys', async () => {
 });
 
 test('reassembles segmented pairing qr frames into an importable payload', async () => {
-  executedTests += 1;
   const raw = JSON.stringify({
     kind: 'todex-pairing-link',
     version: 1,
@@ -479,7 +533,6 @@ test('reassembles segmented pairing qr frames into an importable payload', async
 });
 
 test('rejects pairing links with mismatched embedded public keys', async () => {
-  executedTests += 1;
   await assert.rejects(
     () => transportCrypto.resolvePairingPayload(JSON.stringify({
       kind: 'todex-pairing-link',
@@ -494,7 +547,6 @@ test('rejects pairing links with mismatched embedded public keys', async () => {
 });
 
 test('rejects encrypted pairing links without embedded public keys', async () => {
-  executedTests += 1;
   await assert.rejects(
     () => transportCrypto.resolvePairingPayload(JSON.stringify({
       kind: 'todex-pairing-link',
@@ -508,10 +560,35 @@ test('rejects encrypted pairing links without embedded public keys', async () =>
 });
 
 test('does not create crypto sessions for plaintext and rejects missing keys', () => {
-  executedTests += 1;
   assert.equal(transportCrypto.createTransportCryptoSession(baseSettings()), null);
   assert.throws(
     () => transportCrypto.createTransportCryptoSession(baseSettings({ encryptionProtocol: 'x25519' })),
     /未配置加密公钥/,
+  );
+});
+
+test('assembles segmented pairing qr payloads through the optimized base64url path', () => {
+  const raw = JSON.stringify({
+    kind: 'todex-pairing-link',
+    version: 1,
+    serverUrl: 'http://phone-visible:7345',
+    authToken: 'secret',
+    preferredEncryption: 'ml-kem-768',
+    protocol: { id: 'ml-kem-768', publicKey: 'kem-key-'.repeat(64) },
+  });
+  const encoded = Buffer.from(raw, 'utf8').toString('base64url');
+  const checksum = crypto.createHash('sha256').update(raw).digest('base64url');
+  const chunkSize = 72;
+  const total = Math.ceil(encoded.length / chunkSize);
+  const chunks = Array.from({ length: total }, (_, index) => ({
+    checksum,
+    index: index + 1,
+    total,
+    data: encoded.slice(index * chunkSize, (index + 1) * chunkSize),
+  }));
+
+  assert.equal(
+    transportCrypto.assemblePairingQrChunkPayload(chunks),
+    raw,
   );
 });

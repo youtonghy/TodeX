@@ -1836,6 +1836,7 @@ export default function App() {
       reconnectTimerRef.current = null;
     }
     if (socketRef.current) {
+      transportClientRef.current?.flushAcks?.();
       try {
         socketRef.current.close();
       } catch {
