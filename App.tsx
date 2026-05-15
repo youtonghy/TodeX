@@ -148,11 +148,34 @@ type PendingThreadAction = {
   workspaceId: string;
   conversationId: string;
   requestId: string;
-  action: 'start' | 'resume' | 'fork' | 'archive' | 'unarchive' | 'rename' | 'rollback' | 'read';
+  action:
+    | 'start'
+    | 'resume'
+    | 'fork'
+    | 'archive'
+    | 'unarchive'
+    | 'rename'
+    | 'rollback'
+    | 'read'
+    | 'detail'
+    | 'turns'
+    | 'items'
+    | 'metadata'
+    | 'memory'
+    | 'memoryReset'
+    | 'unsubscribe'
+    | 'shell'
+    | 'guardian'
+    | 'clean'
+    | 'loaded'
+    | 'inject';
   timeoutId: ReturnType<typeof setTimeout>;
   sourceConversationId?: string;
   title?: string;
   restoreHistory?: boolean;
+  showResult?: boolean;
+  resultTitle?: string;
+  resultDetail?: string;
 };
 
 type ComposerSelection = TextInputSelectionChangeEventData['selection'];
@@ -232,6 +255,41 @@ type ModelPickerPromptState = {
   target: 'workspace' | 'settings';
   conversationId?: string;
 };
+
+type ThreadInfoModalState = {
+  title: string;
+  detail: string;
+  raw?: unknown;
+};
+
+type ThreadCommandPromptState = {
+  conversationId: string;
+  command: 'metadata' | 'memory' | 'shell' | 'items' | 'inject' | 'guardian';
+  title: string;
+  placeholder: string;
+  initialValue: string;
+  warning?: string;
+  multiline?: boolean;
+};
+
+type ThreadMenuAction =
+  | 'resume'
+  | 'fork'
+  | 'archive'
+  | 'unarchive'
+  | 'rollback'
+  | 'compact'
+  | 'detail'
+  | 'history'
+  | 'turns'
+  | 'items'
+  | 'metadata'
+  | 'memory'
+  | 'shell'
+  | 'unsubscribe'
+  | 'loaded'
+  | 'clean'
+  | 'inject';
 
 type TimelineTarget = {
   workspaceId: string;
@@ -784,8 +842,6 @@ const SLASH_COMMANDS: SlashCommand[] = [
   { command: '/model', title: 'Model', description: 'choose what model and reasoning effort to use' },
   { command: '/ide', title: 'IDE Context', description: 'include current selection, open files, and other context from your IDE' },
   { command: '/permissions', title: 'Permissions', description: 'choose what Codex is allowed to do' },
-  { command: '/permission', title: 'Permissions', description: 'alias for /permissions' },
-  { command: '/fast', title: 'Fast', description: 'toggle Fast service tier for later turns' },
   { command: '/keymap', title: 'Keymap', description: 'remap TUI shortcuts' },
   { command: '/vim', title: 'Vim', description: 'toggle Vim mode for the composer' },
   { command: '/setup-default-sandbox', title: 'Setup Default Sandbox', description: 'set up elevated agent sandbox' },
@@ -800,12 +856,10 @@ const SLASH_COMMANDS: SlashCommand[] = [
   { command: '/new', title: 'New', description: 'start a new chat during a conversation' },
   { command: '/resume', title: 'Resume', description: 'resume a saved chat' },
   { command: '/fork', title: 'Fork', description: 'fork the current chat' },
-  { command: '/rollback', title: 'Rollback', description: 'drop recent turns from native thread context' },
   { command: '/init', title: 'Init', description: 'create an AGENTS.md file with instructions for Codex' },
   { command: '/compact', title: 'Compact', description: 'summarize conversation to prevent hitting the context limit' },
   { command: '/plan', title: 'Plan', description: 'switch to Plan mode' },
   { command: '/goal', title: 'Goal', description: 'set or view the goal for a long-running task' },
-  { command: '/collab', title: 'Collab', description: 'change collaboration mode' },
   { command: '/agent', title: 'Agent', description: 'switch the active agent thread' },
   { command: '/subagents', title: 'Subagents', description: 'switch the active agent thread' },
   { command: '/side', title: 'Side', description: 'start a side conversation in an ephemeral fork' },
@@ -818,6 +872,8 @@ const SLASH_COMMANDS: SlashCommand[] = [
   { command: '/title', title: 'Title', description: 'configure terminal title items' },
   { command: '/statusline', title: 'Statusline', description: 'configure status line items' },
   { command: '/theme', title: 'Theme', description: 'choose a syntax highlighting theme' },
+  { command: '/pets', title: 'Pets', description: 'choose or hide the terminal pet' },
+  { command: '/pet', title: 'Pets', description: 'alias for /pets' },
   { command: '/mcp', title: 'MCP', description: 'list configured MCP tools; use /mcp verbose for details' },
   { command: '/apps', title: 'Apps', description: 'manage apps' },
   { command: '/plugins', title: 'Plugins', description: 'browse plugins' },
@@ -1056,6 +1112,122 @@ function conversationPatchFromNativeThread(thread: CodexNativeThread): Partial<C
     updatedAt: thread.updatedAt || Date.now(),
     createdAt: thread.createdAt || Date.now(),
   };
+}
+
+function threadDateLabel(timestamp: number): string {
+  if (!timestamp) {
+    return 'unknown';
+  }
+  return new Date(timestamp).toLocaleString();
+}
+
+function formatThreadSummary(thread: CodexNativeThread): string {
+  const lines = [
+    `Thread: ${thread.id || 'unknown'}`,
+    `Title: ${conversationTitleFromNativeThread(thread)}`,
+    `Status: ${thread.status || 'unknown'}`,
+    `Archived: ${thread.archived ? 'yes' : 'no'}`,
+    `CWD: ${thread.cwd || 'unknown'}`,
+    `Model: ${thread.model || 'unknown'}`,
+    `Session: ${thread.sessionId || 'unknown'}`,
+    `Created: ${threadDateLabel(thread.createdAt)}`,
+    `Updated: ${threadDateLabel(thread.updatedAt)}`,
+  ];
+  if (thread.preview) {
+    lines.push('', thread.preview);
+  }
+  return lines.join('\n');
+}
+
+function valueAtPath(value: unknown, path: string[]): unknown {
+  let current = value;
+  for (const part of path) {
+    if (!current || typeof current !== 'object' || Array.isArray(current)) {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
+}
+
+function resultThreadFromValue(value: unknown): CodexNativeThread | null {
+  return (
+    parseCodexNativeThread(value) ||
+    parseCodexNativeThread(valueAtPath(value, ['thread'])) ||
+    parseCodexNativeThread(valueAtPath(value, ['result', 'thread'])) ||
+    null
+  );
+}
+
+function formatThreadActionResult(action: PendingThreadAction, responseValue: unknown): string {
+  const thread = resultThreadFromValue(responseValue);
+  if (thread && (action.action === 'detail' || action.action === 'metadata' || action.action === 'rollback' || action.action === 'unarchive')) {
+    return formatThreadSummary(thread);
+  }
+  return shortJson(responseValue);
+}
+
+function parseThreadMetadataArgs(args: string[]): { gitInfo: Record<string, string | null>; error?: string } {
+  const gitInfo: Record<string, string | null> = {};
+  let index = 0;
+  while (index < args.length) {
+    const rawKey = args[index]?.toLowerCase();
+    const key =
+      rawKey === 'origin' || rawKey === 'originurl' || rawKey === 'origin-url'
+        ? 'originUrl'
+        : rawKey === 'branch' || rawKey === 'sha'
+          ? rawKey
+          : '';
+    if (!key) {
+      return { gitInfo, error: `未知 metadata 字段: ${args[index]}` };
+    }
+    const next = args[index + 1];
+    if (!next) {
+      return { gitInfo, error: `${args[index]} 需要一个值，或使用 clear/null 清空。` };
+    }
+    gitInfo[key] = /^(clear|null|none|-)$/i.test(next) ? null : next;
+    index += 2;
+  }
+  if (Object.keys(gitInfo).length === 0) {
+    return { gitInfo, error: '请输入 branch、sha 或 origin。' };
+  }
+  return { gitInfo };
+}
+
+function parseThreadMetadataPrompt(value: string): { gitInfo: Record<string, string | null>; error?: string } {
+  const args = value.trim().split(/\s+/).filter(Boolean);
+  return parseThreadMetadataArgs(args);
+}
+
+function parseThreadMemoryMode(value: string): 'enabled' | 'disabled' | 'reset' | '' {
+  const normalized = value.trim().toLowerCase();
+  if (/^(on|enable|enabled|true|1)$/i.test(normalized)) {
+    return 'enabled';
+  }
+  if (/^(off|disable|disabled|false|0)$/i.test(normalized)) {
+    return 'disabled';
+  }
+  if (/^(reset|clear)$/i.test(normalized)) {
+    return 'reset';
+  }
+  return '';
+}
+
+function parsePositiveLimit(value: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(value ?? '', 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return Math.min(parsed, 100);
+}
+
+function parseJsonArrayPrompt(value: string): unknown[] | null {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function nativeThreadPatchFromNotification(eventType: string, data: Record<string, unknown>): Partial<ConversationRecord> | null {
@@ -1687,6 +1859,8 @@ export default function App() {
   const [composerSelections, setComposerSelections] = useState<Record<string, ComposerSelection>>({});
   const [modelCommandPrompt, setModelCommandPrompt] = useState<ModelCommandPromptState | null>(null);
   const [modelPickerPrompt, setModelPickerPrompt] = useState<ModelPickerPromptState | null>(null);
+  const [threadInfoModal, setThreadInfoModal] = useState<ThreadInfoModalState | null>(null);
+  const [threadCommandPrompt, setThreadCommandPrompt] = useState<ThreadCommandPromptState | null>(null);
   const [turnIds, setTurnIds] = useState<Record<string, string>>({});
   const [thinkingConversations, setThinkingConversations] = useState<Record<string, boolean>>({});
   const [threadListStatusByWorkspace, setThreadListStatusByWorkspace] = useState<Record<string, 'idle' | 'loading' | 'ready' | 'error'>>({});
@@ -2453,10 +2627,13 @@ export default function App() {
         : null;
       if (pendingThreadAction) {
         if (event.type === 'codex.control.response') {
-          const nativeThread = parseCodexNativeThread(data.result ?? data);
+          const responseValue = data.result ?? data;
+          const nativeThread = parseCodexNativeThread(responseValue);
           const nativeThreadRead = pendingThreadAction.restoreHistory
-            ? parseCodexNativeThreadReadResponse(data.result ?? data)
+            ? parseCodexNativeThreadReadResponse(responseValue)
             : null;
+          const responseThread = resultThreadFromValue(responseValue);
+          const displayThread = nativeThread || responseThread;
           if (nativeThread) {
             if (pendingThreadAction.action === 'fork') {
               const source = conversationsRef.current.find((item) => item.id === pendingThreadAction.sourceConversationId);
@@ -2526,6 +2703,27 @@ export default function App() {
             updateConversation(pendingThreadAction.conversationId, { archived: false });
           } else if (pendingThreadAction.action === 'rename' && pendingThreadAction.title) {
             updateConversation(pendingThreadAction.conversationId, { title: pendingThreadAction.title });
+          } else if (pendingThreadAction.action === 'unsubscribe') {
+            updateConversation(pendingThreadAction.conversationId, { nativeStatus: 'unsubscribed' });
+          } else if (pendingThreadAction.action === 'memory') {
+            updateConversation(pendingThreadAction.conversationId, { nativeStatus: pendingThreadAction.resultDetail || 'memory updated' });
+          }
+          if (displayThread && displayThread !== nativeThread) {
+            upsertNativeThreads(
+              pendingThreadAction.workspaceId,
+              sessionIdFromEvent(event, data) || conversationsRef.current.find((item) => item.id === pendingThreadAction.conversationId)?.sessionId || '',
+              [displayThread],
+            );
+          }
+          if (pendingThreadAction.showResult) {
+            const title = pendingThreadAction.resultTitle || `${pendingThreadAction.action} result`;
+            const detail = pendingThreadAction.resultDetail || formatThreadActionResult(pendingThreadAction, responseValue);
+            setThreadInfoModal({
+              title,
+              detail,
+              raw: responseValue,
+            });
+            appendTimeline(makeSystemEntry(title, detail.slice(0, 500), pendingThreadAction.workspaceId, pendingThreadAction.conversationId));
           }
           finishPendingThreadAction(pendingThreadAction);
         } else if (protocolError || event.type === 'codex.control.error') {
@@ -3117,7 +3315,7 @@ export default function App() {
     workspace: WorkspaceRecord,
     conversation: ConversationRecord,
     method: string,
-    params: Record<string, unknown>,
+    params: Record<string, unknown> | null,
     requestId = createRequestId('local-method'),
   ) => {
     return sendProtocolMessage('codex.local.request', {
@@ -3339,7 +3537,15 @@ export default function App() {
     action: PendingThreadAction['action'],
     method: string,
     paramsBuilder: (threadId: string, workspace: WorkspaceRecord, conversation: ConversationRecord) => Record<string, unknown>,
-    options: { title?: string; selectResult?: boolean; resultConversationId?: string; restoreHistory?: boolean } = {},
+    options: {
+      title?: string;
+      selectResult?: boolean;
+      resultConversationId?: string;
+      restoreHistory?: boolean;
+      showResult?: boolean;
+      resultTitle?: string;
+      resultDetail?: string;
+    } = {},
   ) => {
     const context = getConversationContext(conversationId);
     if (!context) {
@@ -3375,8 +3581,61 @@ export default function App() {
       sourceConversationId: conversation.id,
       title: options.title,
       restoreHistory: options.restoreHistory,
+      showResult: options.showResult,
+      resultTitle: options.resultTitle,
+      resultDetail: options.resultDetail,
     });
     const sent = sendLocalMethodRequest(workspace, conversation, method, paramsBuilder(threadId, workspace, conversation), requestId);
+    if (!sent) {
+      const pending = pendingThreadActionsRef.current.get(requestId);
+      if (pending) {
+        finishPendingThreadAction(pending, '请先在设置里连接后端。');
+      }
+      return false;
+    }
+    return true;
+  }, [finishPendingThreadAction, getConversationContext, sendLocalMethodRequest, startLocalAdapter]);
+
+  const sendTrackedLocalMethod = useCallback(async (
+    conversationId: string,
+    action: PendingThreadAction['action'],
+    method: string,
+    params: Record<string, unknown> | null | undefined,
+    title: string,
+    detail = '',
+  ) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择一个 Codex thread。');
+      return false;
+    }
+    const { workspace, conversation } = context;
+    try {
+      await startLocalAdapter(workspace, conversation);
+    } catch (error) {
+      setLastError(error instanceof Error ? localTurnErrorMessage(error.message) : '本地会话未启动');
+      return false;
+    }
+    const requestId = createRequestId(`thread-${action}`);
+    const timeoutId = setTimeout(() => {
+      const pending = pendingThreadActionsRef.current.get(requestId);
+      if (!pending) {
+        return;
+      }
+      finishPendingThreadAction(pending, `${method} 请求超时`);
+    }, 10000);
+    pendingThreadActionsRef.current.set(requestId, {
+      workspaceId: workspace.id,
+      conversationId: conversation.id,
+      requestId,
+      action,
+      timeoutId,
+      sourceConversationId: conversation.id,
+      showResult: true,
+      resultTitle: title,
+      resultDetail: detail,
+    });
+    const sent = sendLocalMethodRequest(workspace, conversation, method, params === undefined ? {} : params, requestId);
     if (!sent) {
       const pending = pendingThreadActionsRef.current.get(requestId);
       if (pending) {
@@ -3798,6 +4057,73 @@ export default function App() {
     [modelCatalog],
   );
 
+  const openThreadCommandPrompt = useCallback((conversationId: string, command: ThreadCommandPromptState['command']) => {
+    if (command === 'metadata') {
+      setThreadCommandPrompt({
+        conversationId,
+        command,
+        title: 'Thread metadata',
+        placeholder: 'branch main sha abc123 origin https://...',
+        initialValue: '',
+      });
+      return;
+    }
+    if (command === 'memory') {
+      setThreadCommandPrompt({
+        conversationId,
+        command,
+        title: 'Thread memory',
+        placeholder: 'on / off / reset',
+        initialValue: '',
+        warning: 'reset 会清空 Codex 本地 memory，作用域不是单个 thread。',
+      });
+      return;
+    }
+    if (command === 'shell') {
+      setThreadCommandPrompt({
+        conversationId,
+        command,
+        title: 'Thread shell command',
+        placeholder: 'pwd && git status --short',
+        initialValue: '',
+        warning: '该命令会按 Codex app-server 语义以 unsandboxed full access 运行。',
+        multiline: true,
+      });
+      return;
+    }
+    if (command === 'items') {
+      setThreadCommandPrompt({
+        conversationId,
+        command,
+        title: 'Turn items',
+        placeholder: 'turn_id',
+        initialValue: turnIds[conversationId] || '',
+      });
+      return;
+    }
+    if (command === 'inject') {
+      setThreadCommandPrompt({
+        conversationId,
+        command,
+        title: 'Inject raw items',
+        placeholder: '[{"type":"message","role":"user","content":[{"type":"input_text","text":"note"}]}]',
+        initialValue: '[]',
+        warning: '会直接追加 Responses API items 到 thread 历史。请只粘贴可信 JSON 数组。',
+        multiline: true,
+      });
+      return;
+    }
+    setThreadCommandPrompt({
+      conversationId,
+      command,
+      title: 'Approve denied action',
+      placeholder: '{"event":{...}}',
+      initialValue: '',
+      warning: '需要粘贴 guardian denied action 的原始事件 JSON。',
+      multiline: true,
+    });
+  }, [turnIds]);
+
   const sendSlashCommand = useCallback(
     (input: string, conversationId = activeConversationRef.current) => {
       const trimmed = input.trim();
@@ -3839,7 +4165,7 @@ export default function App() {
         })();
       };
 
-      if (lower === 'permissions' || lower === 'permission') {
+      if (lower === 'permissions') {
         const presetName = rest[0]?.toLowerCase() ?? '';
         const preset = PERMISSION_PRESETS.find((candidate) => candidate.id === presetName || candidate.title.toLowerCase() === presetName);
         if (preset) {
@@ -3863,19 +4189,11 @@ export default function App() {
         return;
       }
 
-      if (lower === 'fast') {
-        const enabled = workspace.serviceTier !== 'priority';
-        updateWorkspace(workspace.id, { serviceTier: enabled ? 'priority' : null });
-        appendTimeline(makeSystemEntry(
-          enabled ? 'Fast mode enabled' : 'Fast mode disabled',
-          enabled ? '后续新 thread 和 turn 会发送 serviceTier=priority。' : '后续请求会回到默认服务层级。',
-          workspace.id,
-          conversation.id,
-        ));
-        return;
-      }
-
       if (lower === 'approve' || lower === 'approval') {
+        if (/^(guardian|denied|override)$/i.test(rest[0] ?? '')) {
+          openThreadCommandPrompt(conversation.id, 'guardian');
+          return;
+        }
         const deny = /^(deny|decline|reject|no)$/i.test(rest[0] ?? '');
         const requestId = rest[1] || selectedRequest?.requestId || '';
         const target = pendingRequests.find((request) => request.requestId === requestId) ?? selectedRequest;
@@ -3968,6 +4286,54 @@ export default function App() {
       }
 
       if (lower === 'status') {
+        const statusScope = rest[0]?.toLowerCase() ?? '';
+        if (/^(thread|detail)$/i.test(statusScope)) {
+          void sendNativeThreadAction(conversation.id, 'detail', 'thread/read', (threadId) => ({ threadId, includeTurns: false }), {
+            showResult: true,
+            resultTitle: 'Thread details',
+          });
+          return;
+        }
+        if (/^(history|read)$/i.test(statusScope)) {
+          void sendNativeThreadAction(conversation.id, 'read', 'thread/read', (threadId) => ({ threadId, includeTurns: true }), {
+            restoreHistory: true,
+            showResult: true,
+            resultTitle: 'Thread history',
+          });
+          return;
+        }
+        if (/^(turns|turn)$/i.test(statusScope)) {
+          void sendNativeThreadAction(conversation.id, 'turns', 'thread/turns/list', (threadId) => ({
+            threadId,
+            limit: parsePositiveLimit(rest[1], 20),
+            sortDirection: 'desc',
+            itemsView: 'summary',
+          }), {
+            showResult: true,
+            resultTitle: 'Thread turns',
+          });
+          return;
+        }
+        if (/^(items|item)$/i.test(statusScope)) {
+          if (rest[1]) {
+            void sendNativeThreadAction(conversation.id, 'items', 'thread/turns/items/list', (threadId) => ({
+              threadId,
+              turnId: rest[1],
+              limit: parsePositiveLimit(rest[2], 50),
+              sortDirection: 'asc',
+            }), {
+              showResult: true,
+              resultTitle: 'Turn items',
+            });
+          } else {
+            openThreadCommandPrompt(conversation.id, 'items');
+          }
+          return;
+        }
+        if (/^(loaded|loaded-threads)$/i.test(statusScope)) {
+          void sendTrackedLocalMethod(conversation.id, 'loaded', 'thread/loaded/list', { limit: parsePositiveLimit(rest[1], 100) }, 'Loaded threads');
+          return;
+        }
         sendWorkspaceCommand(workspace, 'codex.local.status', {}, conversation);
         return;
       }
@@ -3989,9 +4355,10 @@ export default function App() {
       }
 
       if (lower === 'clean') {
-        if (conversation.threadId) {
-          sendLocalMethod('thread/backgroundTerminals/clean', { threadId: conversation.threadId }, 'Background terminals clean requested', '已请求 Codex 清理后台终端。');
-        }
+        void sendNativeThreadAction(conversation.id, 'clean', 'thread/backgroundTerminals/clean', (threadId) => ({ threadId }), {
+          showResult: true,
+          resultTitle: 'Background terminals clean',
+        });
         if (sendWorkspaceCommand(workspace, 'codex.local.stop', { force: false }, conversation)) {
           updateConversation(conversation.id, { localAdapterState: 'stopped' });
         }
@@ -4037,18 +4404,6 @@ export default function App() {
           { selectResult: true },
         );
         addCommandNotice('Thread fork sent', lower === 'side' ? '已请求创建临时 side thread。' : '已请求 fork 当前原生 thread。');
-        return;
-      }
-
-      if (lower === 'rollback') {
-        const count = Math.max(1, Number.parseInt(rest[0] ?? '1', 10) || 1);
-        void sendNativeThreadAction(
-          conversation.id,
-          'rollback',
-          'thread/rollback',
-          (threadId) => ({ threadId, numTurns: count }),
-        );
-        addCommandNotice('Thread rollback sent', `已请求回滚最近 ${count} 个 turn。`);
         return;
       }
 
@@ -4115,7 +4470,14 @@ export default function App() {
       }
 
       if (lower === 'ps') {
-        addCommandNotice('Background terminals', '当前移动端没有独立后台终端列表；可用 /stop 清理当前 thread 的后台终端。');
+        if (/^(clean|clear|stop)$/i.test(rest[0] ?? '')) {
+          void sendNativeThreadAction(conversation.id, 'clean', 'thread/backgroundTerminals/clean', (threadId) => ({ threadId }), {
+            showResult: true,
+            resultTitle: 'Background terminals clean',
+          });
+          return;
+        }
+        void sendTrackedLocalMethod(conversation.id, 'loaded', 'thread/loaded/list', { limit: 100 }, 'Loaded threads');
         return;
       }
 
@@ -4134,7 +4496,7 @@ export default function App() {
         return;
       }
 
-      if (lower === 'ide' || lower === 'keymap' || lower === 'vim' || lower === 'theme' || lower === 'title' || lower === 'statusline') {
+      if (lower === 'ide' || lower === 'keymap' || lower === 'vim' || lower === 'theme' || lower === 'title' || lower === 'statusline' || lower === 'pets' || lower === 'pet') {
         addCommandNotice(`/${lower} recognized`, '这是 TUI/IDE 展示配置命令；移动端已识别，但当前没有等价 app-server 执行动作。');
         return;
       }
@@ -4143,8 +4505,6 @@ export default function App() {
         lower === 'setup-default-sandbox' ||
         lower === 'sandbox-add-read-dir' ||
         lower === 'experimental' ||
-        lower === 'collab' ||
-        lower === 'memories' ||
         lower === 'personality' ||
         lower === 'realtime' ||
         lower === 'settings' ||
@@ -4154,6 +4514,26 @@ export default function App() {
         lower === 'debug-m-update'
       ) {
         addCommandNotice(`/${lower} recognized`, '该命令已加入移动端命令集；当前移动端没有安全的直接执行协议，未作为普通 prompt 发送。');
+        return;
+      }
+
+      if (lower === 'memories') {
+        if (rest.length) {
+          const mode = parseThreadMemoryMode(rest.join(' '));
+          if (mode === 'reset') {
+            void sendTrackedLocalMethod(conversation.id, 'memoryReset', 'memory/reset', null, 'Memory reset');
+            return;
+          }
+          if (mode) {
+            void sendNativeThreadAction(conversation.id, 'memory', 'thread/memoryMode/set', (threadId) => ({ threadId, mode }), {
+              showResult: true,
+              resultTitle: 'Thread memory',
+              resultDetail: `memory mode: ${mode}`,
+            });
+            return;
+          }
+        }
+        openThreadCommandPrompt(conversation.id, 'memory');
         return;
       }
 
@@ -4180,12 +4560,14 @@ export default function App() {
       getConversationContext,
       openModelPicker,
       openPermissionsMenu,
+      openThreadCommandPrompt,
       pendingRequests,
       selectConversation,
       selectedRequest,
       sendApprovalResponse,
       sendLocalTurn,
       sendNativeThreadAction,
+      sendTrackedLocalMethod,
       startLocalAdapter,
       sendWorkspaceCommand,
       attachWorkspaceConversation,
@@ -4303,7 +4685,7 @@ export default function App() {
     }
   }, [attachWorkspaceConversation, sendWorkspaceCommand, turnIds, updateConversation, startLocalAdapter]);
 
-  const runThreadMenuAction = useCallback((conversationId: string, action: 'resume' | 'fork' | 'archive' | 'rollback' | 'compact') => {
+  const runThreadMenuAction = useCallback((conversationId: string, action: ThreadMenuAction) => {
     if (action === 'fork') {
       forkConversation(conversationId);
       return;
@@ -4320,8 +4702,172 @@ export default function App() {
       void sendNativeThreadAction(conversationId, 'rollback', 'thread/rollback', (threadId) => ({ threadId, numTurns: 1 }));
       return;
     }
-    void sendNativeThreadAction(conversationId, 'read', 'thread/compact/start', (threadId) => ({ threadId }));
-  }, [forkConversation, removeConversation, sendNativeThreadAction]);
+    if (action === 'compact') {
+      void sendNativeThreadAction(conversationId, 'read', 'thread/compact/start', (threadId) => ({ threadId }), {
+        showResult: true,
+        resultTitle: 'Compact started',
+      });
+      return;
+    }
+    if (action === 'detail') {
+      void sendNativeThreadAction(conversationId, 'detail', 'thread/read', (threadId) => ({ threadId, includeTurns: false }), {
+        showResult: true,
+        resultTitle: 'Thread details',
+      });
+      return;
+    }
+    if (action === 'history') {
+      void sendNativeThreadAction(conversationId, 'read', 'thread/read', (threadId) => ({ threadId, includeTurns: true }), {
+        restoreHistory: true,
+        showResult: true,
+        resultTitle: 'Thread history',
+      });
+      return;
+    }
+    if (action === 'turns') {
+      void sendNativeThreadAction(conversationId, 'turns', 'thread/turns/list', (threadId) => ({
+        threadId,
+        limit: 20,
+        sortDirection: 'desc',
+        itemsView: 'summary',
+      }), {
+        showResult: true,
+        resultTitle: 'Thread turns',
+      });
+      return;
+    }
+    if (action === 'unarchive') {
+      void sendNativeThreadAction(conversationId, 'unarchive', 'thread/unarchive', (threadId) => ({ threadId }), {
+        showResult: true,
+        resultTitle: 'Thread unarchived',
+      });
+      return;
+    }
+    if (action === 'unsubscribe') {
+      void sendNativeThreadAction(conversationId, 'unsubscribe', 'thread/unsubscribe', (threadId) => ({ threadId }), {
+        showResult: true,
+        resultTitle: 'Thread unsubscribe',
+      });
+      return;
+    }
+    if (action === 'loaded') {
+      void sendTrackedLocalMethod(conversationId, 'loaded', 'thread/loaded/list', { limit: 100 }, 'Loaded threads');
+      return;
+    }
+    if (action === 'clean') {
+      void sendNativeThreadAction(conversationId, 'clean', 'thread/backgroundTerminals/clean', (threadId) => ({ threadId }), {
+        showResult: true,
+        resultTitle: 'Background terminals clean',
+      });
+      return;
+    }
+    openThreadCommandPrompt(conversationId, action);
+  }, [forkConversation, openThreadCommandPrompt, removeConversation, sendNativeThreadAction, sendTrackedLocalMethod]);
+
+  const submitThreadCommandPrompt = useCallback((prompt: ThreadCommandPromptState, value: string) => {
+    const trimmed = value.trim();
+    if (prompt.command === 'metadata') {
+      const parsed = parseThreadMetadataPrompt(trimmed);
+      if (parsed.error) {
+        Alert.alert('Metadata', parsed.error);
+        return;
+      }
+      void sendNativeThreadAction(prompt.conversationId, 'metadata', 'thread/metadata/update', (threadId) => ({
+        threadId,
+        gitInfo: parsed.gitInfo,
+      }), {
+        showResult: true,
+        resultTitle: 'Thread metadata updated',
+      });
+      setThreadCommandPrompt(null);
+      return;
+    }
+    if (prompt.command === 'memory') {
+      const mode = parseThreadMemoryMode(trimmed);
+      if (!mode) {
+        Alert.alert('Memory', '请输入 on、off 或 reset。');
+        return;
+      }
+      if (mode === 'reset') {
+        void sendTrackedLocalMethod(prompt.conversationId, 'memoryReset', 'memory/reset', null, 'Memory reset');
+      } else {
+        void sendNativeThreadAction(prompt.conversationId, 'memory', 'thread/memoryMode/set', (threadId) => ({
+          threadId,
+          mode,
+        }), {
+          showResult: true,
+          resultTitle: 'Thread memory',
+          resultDetail: `memory mode: ${mode}`,
+        });
+      }
+      setThreadCommandPrompt(null);
+      return;
+    }
+    if (prompt.command === 'shell') {
+      if (!trimmed) {
+        Alert.alert('Shell command', '请输入要执行的 shell command。');
+        return;
+      }
+      void sendNativeThreadAction(prompt.conversationId, 'shell', 'thread/shellCommand', (threadId) => ({
+        threadId,
+        command: trimmed,
+      }), {
+        showResult: true,
+        resultTitle: 'Shell command sent',
+        resultDetail: trimmed,
+      });
+      setThreadCommandPrompt(null);
+      return;
+    }
+    if (prompt.command === 'items') {
+      if (!trimmed) {
+        Alert.alert('Turn items', '请输入 turn id。');
+        return;
+      }
+      void sendNativeThreadAction(prompt.conversationId, 'items', 'thread/turns/items/list', (threadId) => ({
+        threadId,
+        turnId: trimmed,
+        limit: 50,
+        sortDirection: 'asc',
+      }), {
+        showResult: true,
+        resultTitle: 'Turn items',
+      });
+      setThreadCommandPrompt(null);
+      return;
+    }
+    if (prompt.command === 'inject') {
+      const items = parseJsonArrayPrompt(trimmed);
+      if (!items) {
+        Alert.alert('Inject items', '请输入 JSON 数组。');
+        return;
+      }
+      void sendNativeThreadAction(prompt.conversationId, 'inject', 'thread/inject_items', (threadId) => ({
+        threadId,
+        items,
+      }), {
+        showResult: true,
+        resultTitle: 'Items injected',
+      });
+      setThreadCommandPrompt(null);
+      return;
+    }
+    if (prompt.command === 'guardian') {
+      try {
+        const event = JSON.parse(trimmed);
+        void sendNativeThreadAction(prompt.conversationId, 'guardian', 'thread/approveGuardianDeniedAction', (threadId) => ({
+          threadId,
+          event,
+        }), {
+          showResult: true,
+          resultTitle: 'Guardian action approved',
+        });
+        setThreadCommandPrompt(null);
+      } catch {
+        Alert.alert('Guardian', '请输入有效 JSON。');
+      }
+    }
+  }, [sendNativeThreadAction, sendTrackedLocalMethod]);
 
   if (!hydrated) {
     return (
@@ -4478,6 +5024,28 @@ export default function App() {
             setModelCommandPrompt(null);
             applyModelCommand(targetConversationId, value.trim().split(/\s+/), false);
           }}
+        />
+          <PromptModal
+          visible={Boolean(threadCommandPrompt)}
+          title={threadCommandPrompt?.title ?? 'Thread'}
+          initialValue={threadCommandPrompt?.initialValue ?? ''}
+          placeholder={threadCommandPrompt?.placeholder ?? ''}
+          warning={threadCommandPrompt?.warning}
+          multiline={threadCommandPrompt?.multiline}
+          submitTitle="发送"
+          onCancel={() => setThreadCommandPrompt(null)}
+          onSubmit={(value) => {
+            if (threadCommandPrompt) {
+              submitThreadCommandPrompt(threadCommandPrompt, value);
+            }
+          }}
+        />
+          <ThreadInfoModal
+          visible={Boolean(threadInfoModal)}
+          title={threadInfoModal?.title ?? ''}
+          detail={threadInfoModal?.detail ?? ''}
+          raw={threadInfoModal?.raw}
+          onClose={() => setThreadInfoModal(null)}
         />
           <ModelPickerModal
           visible={Boolean(modelPickerPrompt)}
@@ -4961,7 +5529,7 @@ function ChatScreen({
   attachWorkspaceConversation: (workspace: WorkspaceRecord, conversation: ConversationRecord) => boolean;
   loadNativeThreadHistory: (conversationId: string, force?: boolean) => boolean;
   runWorkspaceCommand: (workspace: WorkspaceRecord, conversation: ConversationRecord, command: 'start' | 'status' | 'attach' | 'stop' | 'interrupt') => void;
-  runThreadMenuAction: (conversationId: string, action: 'resume' | 'fork' | 'archive' | 'rollback' | 'compact') => void;
+  runThreadMenuAction: (conversationId: string, action: ThreadMenuAction) => void;
   removeWorkspace: (workspaceId: string) => void;
 }) {
   const [menuVisible, setMenuVisible] = useState(false);
@@ -5691,37 +6259,56 @@ function ChatScreen({
 
       <Modal visible={menuVisible} animationType="fade" transparent onRequestClose={() => setMenuVisible(false)}>
         <Pressable style={styles.menuBackdrop} onPress={() => setMenuVisible(false)}>
-          <Card className="w-[260px] gap-1 rounded-lg">
+          <Card className="max-h-[82%] w-[260px] rounded-lg">
             <Card.Title numberOfLines={1}>{workspace.name}</Card.Title>
-            <MenuItem title="Resume Thread" onPress={() => runThreadMenuAction(conversation.id, 'resume')} close={() => setMenuVisible(false)} />
-            <MenuItem title="Fork Thread" onPress={() => runThreadMenuAction(conversation.id, 'fork')} close={() => setMenuVisible(false)} />
-            <MenuItem title="Compact Thread" onPress={() => runThreadMenuAction(conversation.id, 'compact')} close={() => setMenuVisible(false)} />
-            <MenuItem title="Rollback 1 Turn" onPress={() => runThreadMenuAction(conversation.id, 'rollback')} close={() => setMenuVisible(false)} />
-            <MenuItem title="启动" onPress={() => runWorkspaceCommand(workspace, conversation, 'start')} close={() => setMenuVisible(false)} />
-            <MenuItem title="状态" onPress={() => runWorkspaceCommand(workspace, conversation, 'status')} close={() => setMenuVisible(false)} />
-            <MenuItem title="附加" onPress={() => runWorkspaceCommand(workspace, conversation, 'attach')} close={() => setMenuVisible(false)} />
-            <MenuItem title="中断" onPress={() => runWorkspaceCommand(workspace, conversation, 'interrupt')} close={() => setMenuVisible(false)} />
-            <MenuItem title="停止" onPress={() => runWorkspaceCommand(workspace, conversation, 'stop')} close={() => setMenuVisible(false)} />
-            <MenuItem
-              title="设置"
-              onPress={() => navigation.navigate('Settings')}
-              close={() => setMenuVisible(false)}
-            />
-            <MenuItem
-              title="归档 Thread"
-              danger
-              onPress={() => runThreadMenuAction(conversation.id, 'archive')}
-              close={() => setMenuVisible(false)}
-            />
-            <MenuItem
-              title="移除工作区"
-              danger
-              onPress={() => {
-                removeWorkspace(workspace.id);
-                navigation.popToTop();
-              }}
-              close={() => setMenuVisible(false)}
-            />
+            <ScrollView style={styles.menuScroll} contentContainerStyle={styles.menuScrollContent}>
+              <MenuItem title="Thread Details" onPress={() => runThreadMenuAction(conversation.id, 'detail')} close={() => setMenuVisible(false)} />
+              <MenuItem title="Thread History" onPress={() => runThreadMenuAction(conversation.id, 'history')} close={() => setMenuVisible(false)} />
+              <MenuItem title="Thread Turns" onPress={() => runThreadMenuAction(conversation.id, 'turns')} close={() => setMenuVisible(false)} />
+              <MenuItem title="Turn Items" onPress={() => runThreadMenuAction(conversation.id, 'items')} close={() => setMenuVisible(false)} />
+              <MenuItem title="Loaded Threads" onPress={() => runThreadMenuAction(conversation.id, 'loaded')} close={() => setMenuVisible(false)} />
+              <MenuItem title="Resume Thread" onPress={() => runThreadMenuAction(conversation.id, 'resume')} close={() => setMenuVisible(false)} />
+              <MenuItem title="Fork Thread" onPress={() => runThreadMenuAction(conversation.id, 'fork')} close={() => setMenuVisible(false)} />
+              <MenuItem title="Compact Thread" onPress={() => runThreadMenuAction(conversation.id, 'compact')} close={() => setMenuVisible(false)} />
+              <MenuItem title="Rollback 1 Turn" onPress={() => runThreadMenuAction(conversation.id, 'rollback')} close={() => setMenuVisible(false)} />
+              <MenuItem title="Thread Metadata" onPress={() => runThreadMenuAction(conversation.id, 'metadata')} close={() => setMenuVisible(false)} />
+              <MenuItem title="Thread Memory" onPress={() => runThreadMenuAction(conversation.id, 'memory')} close={() => setMenuVisible(false)} />
+              <MenuItem title="Shell Command" onPress={() => runThreadMenuAction(conversation.id, 'shell')} close={() => setMenuVisible(false)} />
+              <MenuItem title="Inject Items" onPress={() => runThreadMenuAction(conversation.id, 'inject')} close={() => setMenuVisible(false)} />
+              <MenuItem title="Clean Terminals" onPress={() => runThreadMenuAction(conversation.id, 'clean')} close={() => setMenuVisible(false)} />
+              <MenuItem title="Unarchive Thread" onPress={() => runThreadMenuAction(conversation.id, 'unarchive')} close={() => setMenuVisible(false)} />
+              <MenuItem title="启动" onPress={() => runWorkspaceCommand(workspace, conversation, 'start')} close={() => setMenuVisible(false)} />
+              <MenuItem title="状态" onPress={() => runWorkspaceCommand(workspace, conversation, 'status')} close={() => setMenuVisible(false)} />
+              <MenuItem title="附加" onPress={() => runWorkspaceCommand(workspace, conversation, 'attach')} close={() => setMenuVisible(false)} />
+              <MenuItem title="中断" onPress={() => runWorkspaceCommand(workspace, conversation, 'interrupt')} close={() => setMenuVisible(false)} />
+              <MenuItem title="停止" onPress={() => runWorkspaceCommand(workspace, conversation, 'stop')} close={() => setMenuVisible(false)} />
+              <MenuItem
+                title="设置"
+                onPress={() => navigation.navigate('Settings')}
+                close={() => setMenuVisible(false)}
+              />
+              <MenuItem
+                title="归档 Thread"
+                danger
+                onPress={() => runThreadMenuAction(conversation.id, 'archive')}
+                close={() => setMenuVisible(false)}
+              />
+              <MenuItem
+                title="取消订阅 Thread"
+                danger
+                onPress={() => runThreadMenuAction(conversation.id, 'unsubscribe')}
+                close={() => setMenuVisible(false)}
+              />
+              <MenuItem
+                title="移除工作区"
+                danger
+                onPress={() => {
+                  removeWorkspace(workspace.id);
+                  navigation.popToTop();
+                }}
+                close={() => setMenuVisible(false)}
+              />
+            </ScrollView>
           </Card>
         </Pressable>
       </Modal>
@@ -6466,6 +7053,9 @@ function PromptModal({
   title,
   initialValue,
   placeholder,
+  warning,
+  multiline = false,
+  submitTitle = '保存',
   onCancel,
   onSubmit,
 }: {
@@ -6473,6 +7063,9 @@ function PromptModal({
   title: string;
   initialValue: string;
   placeholder: string;
+  warning?: string;
+  multiline?: boolean;
+  submitTitle?: string;
   onCancel: () => void;
   onSubmit: (value: string) => void;
 }) {
@@ -6494,14 +7087,64 @@ function PromptModal({
             onChangeText={setValue}
             placeholder={placeholder}
             placeholderTextColor="#8a93a1"
-            style={styles.input}
+            style={[styles.input, multiline ? styles.inputMultiline : null]}
             autoCapitalize="none"
             autoCorrect={false}
             autoFocus
+            multiline={multiline}
+            textAlignVertical={multiline ? 'top' : 'center'}
           />
+          {warning ? <Text style={styles.warningText}>{warning}</Text> : null}
           <Row>
-            <ActionButton title="保存" onPress={() => onSubmit(value)} />
+            <ActionButton title={submitTitle} onPress={() => onSubmit(value)} />
             <ActionButton title="取消" onPress={onCancel} tone="ghost" />
+          </Row>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function ThreadInfoModal({
+  visible,
+  title,
+  detail,
+  raw,
+  onClose,
+}: {
+  visible: boolean;
+  title: string;
+  detail: string;
+  raw?: unknown;
+  onClose: () => void;
+}) {
+  const rawText = raw === undefined ? '' : shortJson(raw);
+  const copyDetail = async () => {
+    await Clipboard.setStringAsync(rawText || detail);
+    Alert.alert('已复制', 'Thread 结果已复制到剪贴板。');
+  };
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.threadInfoSheet}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle} numberOfLines={1}>{title}</Text>
+            <Pressable onPress={onClose}>
+              <Text style={styles.modalClose}>关闭</Text>
+            </Pressable>
+          </View>
+          <ScrollView style={styles.threadInfoScroll} contentContainerStyle={styles.threadInfoContent}>
+            {detail ? <Text selectable style={styles.threadInfoText}>{detail}</Text> : null}
+            {rawText ? (
+              <View style={styles.threadRawBlock}>
+                <Text style={styles.threadRawTitle}>Raw JSON</Text>
+                <Text selectable style={styles.threadRawText}>{rawText}</Text>
+              </View>
+            ) : null}
+          </ScrollView>
+          <Row>
+            <ActionButton title="复制" onPress={copyDetail} tone="ghost" />
+            <ActionButton title="关闭" onPress={onClose} />
           </Row>
         </View>
       </View>
@@ -6953,6 +7596,56 @@ const styles = StyleSheet.create({
     padding: 18,
     paddingBottom: 28,
     gap: 14,
+  },
+  threadInfoSheet: {
+    maxHeight: '88%',
+    backgroundColor: '#ffffff',
+    borderTopLeftRadius: 8,
+    borderTopRightRadius: 8,
+    padding: 18,
+    paddingBottom: 28,
+    gap: 14,
+  },
+  threadInfoScroll: {
+    maxHeight: 420,
+  },
+  threadInfoContent: {
+    gap: 12,
+    paddingBottom: 2,
+  },
+  threadInfoText: {
+    color: '#17202a',
+    fontSize: 13,
+    lineHeight: 19,
+    fontFamily: Platform.select({
+      ios: 'Menlo',
+      android: 'monospace',
+      default: 'monospace',
+    }),
+  },
+  threadRawBlock: {
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d8e0e7',
+    backgroundColor: '#f7f9fa',
+    padding: 10,
+    gap: 8,
+  },
+  threadRawTitle: {
+    color: '#66717c',
+    fontSize: 11,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+  },
+  threadRawText: {
+    color: '#26323d',
+    fontSize: 12,
+    lineHeight: 17,
+    fontFamily: Platform.select({
+      ios: 'Menlo',
+      android: 'monospace',
+      default: 'monospace',
+    }),
   },
   modalHeader: {
     flexDirection: 'row',
@@ -7699,6 +8392,13 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#d8e0e7',
     overflow: 'hidden',
+  },
+  menuScroll: {
+    maxHeight: 520,
+  },
+  menuScrollContent: {
+    gap: 4,
+    paddingBottom: 4,
   },
   menuTitle: {
     color: '#17202a',
