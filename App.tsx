@@ -110,6 +110,7 @@ type RootStackParamList = {
   Workspaces: undefined;
   Conversations: { workspaceId: string };
   Chat: { workspaceId: string; conversationId: string };
+  SlashCommands: { workspaceId: string; conversationId: string };
   Settings: undefined;
 };
 
@@ -669,7 +670,10 @@ type SlashCommand = {
   command: string;
   title: string;
   description: string;
+  category: SlashCommandCategory;
 };
+
+type SlashCommandCategory = 'core' | 'thread' | 'context' | 'runtime' | 'settings' | 'debug';
 
 type WorkspaceEntry = {
   name: string;
@@ -839,60 +843,71 @@ const CHAT_ATTACH_REPLAY_LIMIT = 200;
 const CHAT_BOTTOM_FOLLOW_THRESHOLD = 72;
 
 const SLASH_COMMANDS: SlashCommand[] = [
-  { command: '/model', title: 'Model', description: 'choose what model and reasoning effort to use' },
-  { command: '/ide', title: 'IDE Context', description: 'include current selection, open files, and other context from your IDE' },
-  { command: '/permissions', title: 'Permissions', description: 'choose what Codex is allowed to do' },
-  { command: '/keymap', title: 'Keymap', description: 'remap TUI shortcuts' },
-  { command: '/vim', title: 'Vim', description: 'toggle Vim mode for the composer' },
-  { command: '/setup-default-sandbox', title: 'Setup Default Sandbox', description: 'set up elevated agent sandbox' },
-  { command: '/sandbox-add-read-dir', title: 'Sandbox Read Root', description: 'let sandbox read a directory' },
-  { command: '/experimental', title: 'Experimental', description: 'toggle experimental features' },
-  { command: '/approve', title: 'Approve', description: 'approve one retry of a recent auto-review denial' },
-  { command: '/memories', title: 'Memories', description: 'configure memory use and generation' },
-  { command: '/skills', title: 'Skills', description: 'use skills to improve how Codex performs specific tasks' },
-  { command: '/hooks', title: 'Hooks', description: 'view and manage lifecycle hooks' },
-  { command: '/review', title: 'Review', description: 'review my current changes and find issues' },
-  { command: '/rename', title: 'Rename', description: 'rename the current thread' },
-  { command: '/new', title: 'New', description: 'start a new chat during a conversation' },
-  { command: '/resume', title: 'Resume', description: 'resume a saved chat' },
-  { command: '/fork', title: 'Fork', description: 'fork the current chat' },
-  { command: '/init', title: 'Init', description: 'create an AGENTS.md file with instructions for Codex' },
-  { command: '/compact', title: 'Compact', description: 'summarize conversation to prevent hitting the context limit' },
-  { command: '/plan', title: 'Plan', description: 'switch to Plan mode' },
-  { command: '/goal', title: 'Goal', description: 'set or view the goal for a long-running task' },
-  { command: '/agent', title: 'Agent', description: 'switch the active agent thread' },
-  { command: '/subagents', title: 'Subagents', description: 'switch the active agent thread' },
-  { command: '/side', title: 'Side', description: 'start a side conversation in an ephemeral fork' },
-  { command: '/copy', title: 'Copy', description: 'copy last response as markdown' },
-  { command: '/raw', title: 'Raw', description: 'toggle raw scrollback mode for copy-friendly selection' },
-  { command: '/diff', title: 'Diff', description: 'show git diff including untracked files' },
-  { command: '/mention', title: 'Mention', description: 'mention a file' },
-  { command: '/status', title: 'Status', description: 'show current session configuration and token usage' },
-  { command: '/debug-config', title: 'Debug Config', description: 'show config layers and requirement sources' },
-  { command: '/title', title: 'Title', description: 'configure terminal title items' },
-  { command: '/statusline', title: 'Statusline', description: 'configure status line items' },
-  { command: '/theme', title: 'Theme', description: 'choose a syntax highlighting theme' },
-  { command: '/pets', title: 'Pets', description: 'choose or hide the terminal pet' },
-  { command: '/pet', title: 'Pets', description: 'alias for /pets' },
-  { command: '/mcp', title: 'MCP', description: 'list configured MCP tools; use /mcp verbose for details' },
-  { command: '/apps', title: 'Apps', description: 'manage apps' },
-  { command: '/plugins', title: 'Plugins', description: 'browse plugins' },
-  { command: '/logout', title: 'Logout', description: 'log out of Codex' },
-  { command: '/quit', title: 'Quit', description: 'exit Codex' },
-  { command: '/exit', title: 'Exit', description: 'exit Codex' },
-  { command: '/feedback', title: 'Feedback', description: 'send logs to maintainers' },
-  { command: '/rollout', title: 'Rollout', description: 'print the rollout file path' },
-  { command: '/ps', title: 'PS', description: 'list background terminals' },
-  { command: '/stop', title: 'Stop', description: 'stop all background terminals' },
-  { command: '/clean', title: 'Clean', description: 'alias for /stop' },
-  { command: '/clear', title: 'Clear', description: 'clear the terminal and start a new chat' },
-  { command: '/personality', title: 'Personality', description: 'choose a communication style for Codex' },
-  { command: '/realtime', title: 'Realtime', description: 'toggle realtime voice mode' },
-  { command: '/settings', title: 'Settings', description: 'configure realtime microphone/speaker' },
-  { command: '/test-approval', title: 'Test Approval', description: 'test approval request' },
-  { command: '/debug-m-drop', title: 'Debug Memory Drop', description: 'debug memory drop' },
-  { command: '/debug-m-update', title: 'Debug Memory Update', description: 'debug memory update' },
+  { command: '/model', title: 'Model', description: 'choose what model and reasoning effort to use', category: 'settings' },
+  { command: '/ide', title: 'IDE Context', description: 'include current selection, open files, and other context from your IDE', category: 'context' },
+  { command: '/permissions', title: 'Permissions', description: 'choose what Codex is allowed to do', category: 'settings' },
+  { command: '/keymap', title: 'Keymap', description: 'remap TUI shortcuts', category: 'settings' },
+  { command: '/vim', title: 'Vim', description: 'toggle Vim mode for the composer', category: 'settings' },
+  { command: '/setup-default-sandbox', title: 'Setup Default Sandbox', description: 'set up elevated agent sandbox', category: 'settings' },
+  { command: '/sandbox-add-read-dir', title: 'Sandbox Read Root', description: 'let sandbox read a directory', category: 'settings' },
+  { command: '/experimental', title: 'Experimental', description: 'toggle experimental features', category: 'settings' },
+  { command: '/approve', title: 'Approve', description: 'approve one retry of a recent auto-review denial', category: 'runtime' },
+  { command: '/memories', title: 'Memories', description: 'configure memory use and generation', category: 'settings' },
+  { command: '/skills', title: 'Skills', description: 'use skills to improve how Codex performs specific tasks', category: 'context' },
+  { command: '/hooks', title: 'Hooks', description: 'view and manage lifecycle hooks', category: 'context' },
+  { command: '/review', title: 'Review', description: 'review my current changes and find issues', category: 'context' },
+  { command: '/rename', title: 'Rename', description: 'rename the current thread', category: 'thread' },
+  { command: '/new', title: 'New', description: 'start a new chat during a conversation', category: 'thread' },
+  { command: '/resume', title: 'Resume', description: 'resume a saved chat', category: 'thread' },
+  { command: '/fork', title: 'Fork', description: 'fork the current chat', category: 'thread' },
+  { command: '/init', title: 'Init', description: 'create an AGENTS.md file with instructions for Codex', category: 'context' },
+  { command: '/compact', title: 'Compact', description: 'summarize conversation to prevent hitting the context limit', category: 'thread' },
+  { command: '/plan', title: 'Plan', description: 'switch to Plan mode', category: 'core' },
+  { command: '/goal', title: 'Goal', description: 'set or view the goal for a long-running task', category: 'thread' },
+  { command: '/agent', title: 'Agent', description: 'switch the active agent thread', category: 'thread' },
+  { command: '/subagents', title: 'Subagents', description: 'switch the active agent thread', category: 'thread' },
+  { command: '/side', title: 'Side', description: 'start a side conversation in an ephemeral fork', category: 'thread' },
+  { command: '/copy', title: 'Copy', description: 'copy last response as markdown', category: 'context' },
+  { command: '/raw', title: 'Raw', description: 'toggle raw scrollback mode for copy-friendly selection', category: 'context' },
+  { command: '/diff', title: 'Diff', description: 'show git diff including untracked files', category: 'context' },
+  { command: '/mention', title: 'Mention', description: 'mention a file', category: 'context' },
+  { command: '/status', title: 'Status', description: 'show current session configuration and token usage', category: 'core' },
+  { command: '/debug-config', title: 'Debug Config', description: 'show config layers and requirement sources', category: 'settings' },
+  { command: '/title', title: 'Title', description: 'configure terminal title items', category: 'settings' },
+  { command: '/statusline', title: 'Statusline', description: 'configure status line items', category: 'settings' },
+  { command: '/theme', title: 'Theme', description: 'choose a syntax highlighting theme', category: 'settings' },
+  { command: '/pets', title: 'Pets', description: 'choose or hide the terminal pet', category: 'settings' },
+  { command: '/pet', title: 'Pets', description: 'alias for /pets', category: 'settings' },
+  { command: '/mcp', title: 'MCP', description: 'list configured MCP tools; use /mcp verbose for details', category: 'context' },
+  { command: '/apps', title: 'Apps', description: 'manage apps', category: 'context' },
+  { command: '/plugins', title: 'Plugins', description: 'browse plugins', category: 'context' },
+  { command: '/logout', title: 'Logout', description: 'log out of Codex', category: 'settings' },
+  { command: '/quit', title: 'Quit', description: 'exit Codex', category: 'runtime' },
+  { command: '/exit', title: 'Exit', description: 'exit Codex', category: 'runtime' },
+  { command: '/feedback', title: 'Feedback', description: 'send logs to maintainers', category: 'settings' },
+  { command: '/rollout', title: 'Rollout', description: 'print the rollout file path', category: 'thread' },
+  { command: '/ps', title: 'PS', description: 'list background terminals', category: 'runtime' },
+  { command: '/stop', title: 'Stop', description: 'stop all background terminals', category: 'runtime' },
+  { command: '/clean', title: 'Clean', description: 'alias for /stop', category: 'runtime' },
+  { command: '/clear', title: 'Clear', description: 'clear the terminal and start a new chat', category: 'thread' },
+  { command: '/personality', title: 'Personality', description: 'choose a communication style for Codex', category: 'settings' },
+  { command: '/realtime', title: 'Realtime', description: 'toggle realtime voice mode', category: 'settings' },
+  { command: '/settings', title: 'Settings', description: 'configure realtime microphone/speaker', category: 'settings' },
+  { command: '/test-approval', title: 'Test Approval', description: 'test approval request', category: 'debug' },
+  { command: '/debug-m-drop', title: 'Debug Memory Drop', description: 'debug memory drop', category: 'debug' },
+  { command: '/debug-m-update', title: 'Debug Memory Update', description: 'debug memory update', category: 'debug' },
 ];
+
+const SLASH_COMMAND_CATEGORY_ORDER: SlashCommandCategory[] = ['core', 'thread', 'context', 'runtime', 'settings', 'debug'];
+
+const SLASH_COMMAND_CATEGORY_LABELS: Record<SlashCommandCategory, string> = {
+  core: '核心',
+  thread: 'Thread',
+  context: '上下文',
+  runtime: '运行时',
+  settings: '设置',
+  debug: '调试',
+};
 
 const PERMISSION_PRESETS: PermissionPreset[] = [
   {
@@ -4967,9 +4982,25 @@ export default function App() {
                   loadNativeThreadHistory={loadNativeThreadHistory}
                   runWorkspaceCommand={runWorkspaceCommand}
                   runThreadMenuAction={runThreadMenuAction}
+                  sendSlashCommand={sendSlashCommand}
                   removeWorkspace={removeWorkspace}
                 />
               )}
+            </Stack.Screen>
+            <Stack.Screen name="SlashCommands" options={{ title: 'Slash Commands' }}>
+              {(props) => {
+                const conversation = conversations.find((item) => item.id === props.route.params.conversationId) ?? null;
+                const workspace = workspaces.find((item) => item.id === props.route.params.workspaceId) ?? null;
+                return (
+                  <SlashCommandsScreen
+                    {...props}
+                    workspace={workspace}
+                    conversation={conversation}
+                    runThreadMenuAction={runThreadMenuAction}
+                    sendSlashCommand={sendSlashCommand}
+                  />
+                );
+              }}
             </Stack.Screen>
             <Stack.Screen name="Settings" options={{ title: '设置' }}>
               {(props) => (
@@ -5504,6 +5535,7 @@ function ChatScreen({
   loadNativeThreadHistory,
   runWorkspaceCommand,
   runThreadMenuAction,
+  sendSlashCommand,
   removeWorkspace,
 }: NativeStackScreenProps<RootStackParamList, 'Chat'> & {
   settings: ConnectionSettings;
@@ -5530,6 +5562,7 @@ function ChatScreen({
   loadNativeThreadHistory: (conversationId: string, force?: boolean) => boolean;
   runWorkspaceCommand: (workspace: WorkspaceRecord, conversation: ConversationRecord, command: 'start' | 'status' | 'attach' | 'stop' | 'interrupt') => void;
   runThreadMenuAction: (conversationId: string, action: ThreadMenuAction) => void;
+  sendSlashCommand: (input: string, conversationId?: string) => void;
   removeWorkspace: (workspaceId: string) => void;
 }) {
   const [menuVisible, setMenuVisible] = useState(false);
@@ -5601,7 +5634,7 @@ function ChatScreen({
           item.title.toLowerCase().includes(slashQuery) ||
           item.description.toLowerCase().includes(slashQuery)
         );
-      }).slice(0, 6)
+      })
     : [];
   const mentionTrigger = slashSuggestions.length === 0 ? findMentionTrigger(chatDraft, composerSelection.start) : null;
   const mentionSuggestions = buildMentionSuggestions(mentionTrigger, mentionEntries);
@@ -6129,23 +6162,29 @@ function ChatScreen({
       <View style={[styles.composer, { paddingBottom: composerPaddingBottom }]}>
         {slashSuggestions.length > 0 ? (
           <Surface variant="secondary" className="mb-2 overflow-hidden rounded-lg">
-            {slashSuggestions.map((item) => (
-              <Button
-                key={item.command}
-                variant="ghost"
-                className="min-h-12 justify-start rounded-none px-3"
-                onPress={() => {
-                  const nextText = `${item.command} `;
-                  setChatDraft(nextText);
-                  setComposerSelection({ start: nextText.length, end: nextText.length });
-                }}
-              >
-                <View className="min-w-0 flex-1">
-                  <HeroText className="font-semibold text-foreground" numberOfLines={1}>{item.command}</HeroText>
-                  <HeroText className="text-xs text-muted" numberOfLines={1}>{item.description || item.title}</HeroText>
-                </View>
-              </Button>
-            ))}
+            <ScrollView
+              keyboardShouldPersistTaps="handled"
+              style={styles.slashSuggestionScroll}
+              contentContainerStyle={styles.slashSuggestionContent}
+            >
+              {slashSuggestions.map((item) => (
+                <Button
+                  key={item.command}
+                  variant="ghost"
+                  className="min-h-12 justify-start rounded-none px-3"
+                  onPress={() => {
+                    const nextText = `${item.command} `;
+                    setChatDraft(nextText);
+                    setComposerSelection({ start: nextText.length, end: nextText.length });
+                  }}
+                >
+                  <View className="min-w-0 flex-1">
+                    <HeroText className="font-semibold text-foreground" numberOfLines={1}>{item.command}</HeroText>
+                    <HeroText className="text-xs text-muted" numberOfLines={1}>{item.description || item.title}</HeroText>
+                  </View>
+                </Button>
+              ))}
+            </ScrollView>
           </Surface>
         ) : null}
         {mentionSuggestions.length > 0 ? (
@@ -6277,6 +6316,11 @@ function ChatScreen({
               <MenuItem title="Inject Items" onPress={() => runThreadMenuAction(conversation.id, 'inject')} close={() => setMenuVisible(false)} />
               <MenuItem title="Clean Terminals" onPress={() => runThreadMenuAction(conversation.id, 'clean')} close={() => setMenuVisible(false)} />
               <MenuItem title="Unarchive Thread" onPress={() => runThreadMenuAction(conversation.id, 'unarchive')} close={() => setMenuVisible(false)} />
+              <MenuItem
+                title="Slash Commands"
+                onPress={() => navigation.navigate('SlashCommands', { workspaceId: workspace.id, conversationId: conversation.id })}
+                close={() => setMenuVisible(false)}
+              />
               <MenuItem title="启动" onPress={() => runWorkspaceCommand(workspace, conversation, 'start')} close={() => setMenuVisible(false)} />
               <MenuItem title="状态" onPress={() => runWorkspaceCommand(workspace, conversation, 'status')} close={() => setMenuVisible(false)} />
               <MenuItem title="附加" onPress={() => runWorkspaceCommand(workspace, conversation, 'attach')} close={() => setMenuVisible(false)} />
@@ -6340,6 +6384,116 @@ function ChatScreen({
           </Card>
         </Pressable>
       </Modal>
+    </Surface>
+  );
+}
+
+function SlashCommandsScreen({
+  navigation,
+  workspace,
+  conversation,
+  runThreadMenuAction,
+  sendSlashCommand,
+}: NativeStackScreenProps<RootStackParamList, 'SlashCommands'> & {
+  workspace: WorkspaceRecord | null;
+  conversation: ConversationRecord | null;
+  runThreadMenuAction: (conversationId: string, action: ThreadMenuAction) => void;
+  sendSlashCommand: (input: string, conversationId?: string) => void;
+}) {
+  const runSlash = useCallback((command: string) => {
+    if (!conversation) {
+      Alert.alert('未选择对话', '请先回到一个 Codex 对话。');
+      return;
+    }
+    sendSlashCommand(command, conversation.id);
+  }, [conversation, sendSlashCommand]);
+
+  const runThreadAction = useCallback((action: ThreadMenuAction) => {
+    if (!conversation) {
+      Alert.alert('未选择对话', '请先回到一个 Codex 对话。');
+      return;
+    }
+    runThreadMenuAction(conversation.id, action);
+  }, [conversation, runThreadMenuAction]);
+
+  const slashGroups = SLASH_COMMAND_CATEGORY_ORDER
+    .map((category) => ({
+      category,
+      commands: SLASH_COMMANDS.filter((item) => item.category === category),
+    }))
+    .filter((group) => group.commands.length > 0);
+
+  return (
+    <Surface className="flex-1 bg-background">
+      <ScrollView contentContainerStyle={styles.pageContent}>
+        <View style={styles.commandPageHeader}>
+          <Text style={styles.commandPageTitle}>Slash Commands</Text>
+          <Text style={styles.commandPageSubtitle} numberOfLines={2}>
+            {workspace?.name || '当前工作区'} · {SLASH_COMMANDS.length} commands
+          </Text>
+        </View>
+
+        <View style={styles.commandQuickPanel}>
+          <Text style={styles.commandSectionTitle}>二级操作</Text>
+          <View style={styles.commandActionGrid}>
+            <ActionButton title="Thread 详情" onPress={() => runSlash('/status thread')} tone="ghost" />
+            <ActionButton title="历史" onPress={() => runSlash('/status history')} tone="ghost" />
+            <ActionButton title="Turns" onPress={() => runSlash('/status turns')} tone="ghost" />
+            <ActionButton title="Items" onPress={() => runThreadAction('items')} tone="ghost" />
+            <ActionButton title="Loaded" onPress={() => runSlash('/status loaded')} tone="ghost" />
+            <ActionButton title="Memory" onPress={() => runSlash('/memories')} tone="ghost" />
+            <ActionButton title="Metadata" onPress={() => runThreadAction('metadata')} tone="ghost" />
+            <ActionButton title="Shell" onPress={() => runThreadAction('shell')} tone="ghost" />
+            <ActionButton title="Inject" onPress={() => runThreadAction('inject')} tone="ghost" />
+            <ActionButton title="Rollback" onPress={() => runThreadAction('rollback')} tone="ghost" />
+            <ActionButton title="Compact" onPress={() => runSlash('/compact')} tone="ghost" />
+            <ActionButton title="Clean" onPress={() => runSlash('/ps clean')} tone="ghost" />
+          </View>
+        </View>
+
+        {slashGroups.map((group) => (
+          <View key={group.category} style={styles.commandSection}>
+            <Text style={styles.commandSectionTitle}>{SLASH_COMMAND_CATEGORY_LABELS[group.category]}</Text>
+            <View style={styles.commandList}>
+              {group.commands.map((item) => (
+                <Pressable
+                  key={item.command}
+                  style={styles.commandListItem}
+                  onPress={() => {
+                    if (item.command === '/model') {
+                      runSlash('/model');
+                      return;
+                    }
+                    if (item.command === '/permissions') {
+                      runSlash('/permissions');
+                      return;
+                    }
+                    if (item.command === '/memories') {
+                      runSlash('/memories');
+                      return;
+                    }
+                    if (item.command === '/status') {
+                      runSlash('/status');
+                      return;
+                    }
+                    if (item.command === '/settings') {
+                      navigation.navigate('Settings');
+                      return;
+                    }
+                    runSlash(item.command);
+                  }}
+                >
+                  <View style={styles.commandListText}>
+                    <Text style={styles.commandName} numberOfLines={1}>{item.command}</Text>
+                    <Text style={styles.commandDescription} numberOfLines={2}>{item.description}</Text>
+                  </View>
+                  <StyledIonicons name="chevron-forward" size={16} className="text-muted" />
+                </Pressable>
+              ))}
+            </View>
+          </View>
+        ))}
+      </ScrollView>
     </Surface>
   );
 }
@@ -7699,6 +7853,76 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     letterSpacing: 0,
   },
+  commandPageHeader: {
+    gap: 6,
+  },
+  commandPageTitle: {
+    color: '#17202a',
+    fontSize: 24,
+    fontWeight: '800',
+    letterSpacing: 0,
+  },
+  commandPageSubtitle: {
+    color: '#66717c',
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '700',
+  },
+  commandQuickPanel: {
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d8e0e7',
+    padding: 12,
+    gap: 12,
+  },
+  commandActionGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  commandSection: {
+    gap: 10,
+  },
+  commandSectionTitle: {
+    color: '#17202a',
+    fontSize: 15,
+    fontWeight: '800',
+    letterSpacing: 0,
+  },
+  commandList: {
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d8e0e7',
+    overflow: 'hidden',
+  },
+  commandListItem: {
+    minHeight: 58,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e7ecef',
+  },
+  commandListText: {
+    flex: 1,
+    minWidth: 0,
+    gap: 3,
+  },
+  commandName: {
+    color: '#17202a',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  commandDescription: {
+    color: '#66717c',
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: '600',
+  },
   formBlock: {
     backgroundColor: '#ffffff',
     borderRadius: 8,
@@ -8282,6 +8506,12 @@ const styles = StyleSheet.create({
   slashDescription: {
     color: '#66717c',
     fontSize: 12,
+  },
+  slashSuggestionScroll: {
+    maxHeight: 320,
+  },
+  slashSuggestionContent: {
+    paddingVertical: 2,
   },
   mentionPanel: {
     width: '100%',
