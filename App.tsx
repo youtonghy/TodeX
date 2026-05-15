@@ -112,6 +112,7 @@ type RootStackParamList = {
   Conversations: { workspaceId: string };
   Chat: { workspaceId: string; conversationId: string };
   SlashCommands: { workspaceId: string; conversationId: string };
+  SlashCommandAction: { workspaceId: string; conversationId: string; command: string };
   Experimental: { workspaceId: string; conversationId: string };
   GitDiff: { workspaceId: string; conversationId: string };
   Settings: undefined;
@@ -1078,6 +1079,38 @@ const SLASH_COMMAND_CATEGORY_LABELS: Record<SlashCommandCategory, string> = {
   settings: '设置',
   debug: '调试',
 };
+
+const DIRECT_SLASH_COMMANDS = new Set([
+  '/compact',
+  '/init',
+  '/mention',
+  '/copy',
+  '/raw',
+  '/vim',
+  '/rollout',
+  '/debug-m-drop',
+  '/debug-m-update',
+]);
+
+function canonicalSlashCommand(command: string): string {
+  const normalized = command.trim().toLowerCase();
+  if (normalized === '/pet') {
+    return '/pets';
+  }
+  if (normalized === '/clean') {
+    return '/stop';
+  }
+  return normalized.startsWith('/') ? normalized : `/${normalized}`;
+}
+
+function slashCommandDefinition(command: string): SlashCommand | null {
+  const canonical = canonicalSlashCommand(command);
+  return SLASH_COMMANDS.find((item) => canonicalSlashCommand(item.command) === canonical) ?? null;
+}
+
+function slashCommandNeedsActionPage(command: string): boolean {
+  return !DIRECT_SLASH_COMMANDS.has(canonicalSlashCommand(command));
+}
 
 const PERMISSION_PRESETS: PermissionPreset[] = [
   {
@@ -4706,6 +4739,19 @@ export default function App() {
 
       if (lower === 'goal') {
         const subcommand = rest[0]?.toLowerCase() ?? '';
+        if (subcommand === 'pause' || subcommand === 'resume') {
+          const status = subcommand === 'pause' ? 'paused' : 'active';
+          updateConversation(conversation.id, {
+            goalStatus: status,
+          });
+          sendThreadMethod(
+            'thread/goal/set',
+            (threadId) => ({ threadId, status }),
+            'Goal command sent',
+            `已发送 thread/goal/set status=${status}。`,
+          );
+          return;
+        }
         const objective = subcommand === 'set' ? rest.slice(1).join(' ').trim() : rest.join(' ').trim();
         const method = subcommand === 'clear' ? 'thread/goal/clear' : objective ? 'thread/goal/set' : 'thread/goal/get';
         if (method === 'thread/goal/set') {
@@ -5467,6 +5513,27 @@ export default function App() {
                     workspace={workspace}
                     conversation={conversation}
                     runThreadMenuAction={runThreadMenuAction}
+                    sendSlashCommand={sendSlashCommand}
+                    openGitDiff={openGitDiff}
+                  />
+                );
+              }}
+            </Stack.Screen>
+            <Stack.Screen name="SlashCommandAction" options={{ title: 'Command' }}>
+              {(props) => {
+                const conversation = conversations.find((item) => item.id === props.route.params.conversationId) ?? null;
+                const workspace = workspaces.find((item) => item.id === props.route.params.workspaceId) ?? null;
+                return (
+                  <SlashCommandActionScreen
+                    {...props}
+                    workspace={workspace}
+                    conversation={conversation}
+                    settings={settings}
+                    modelCatalog={modelCatalog}
+                    modelCatalogStatus={modelCatalogStatus}
+                    modelCatalogError={modelCatalogError}
+                    refreshModelCatalog={requestModelCatalog}
+                    applyWorkspaceModelSelection={applyWorkspaceModelSelection}
                     sendSlashCommand={sendSlashCommand}
                     openGitDiff={openGitDiff}
                   />
@@ -6990,6 +7057,22 @@ function SlashCommandsScreen({
     });
   }, [conversation?.id, navigation, route.params.conversationId, route.params.workspaceId, workspace?.id]);
 
+  const openCommandAction = useCallback((command: string) => {
+    if (!conversation) {
+      Alert.alert('未选择对话', '请先回到一个 Codex 对话。');
+      return;
+    }
+    if (!slashCommandNeedsActionPage(command)) {
+      runSlash(command);
+      return;
+    }
+    navigation.navigate('SlashCommandAction', {
+      workspaceId: workspace?.id ?? route.params.workspaceId,
+      conversationId: conversation.id,
+      command,
+    });
+  }, [conversation, navigation, route.params.workspaceId, runSlash, workspace?.id]);
+
   const slashGroups = SLASH_COMMAND_CATEGORY_ORDER
     .map((category) => ({
       category,
@@ -7035,22 +7118,6 @@ function SlashCommandsScreen({
                   key={item.command}
                   style={styles.commandListItem}
                   onPress={() => {
-                    if (item.command === '/model') {
-                      runSlash('/model');
-                      return;
-                    }
-                    if (item.command === '/permissions') {
-                      runSlash('/permissions');
-                      return;
-                    }
-                    if (item.command === '/memories') {
-                      runSlash('/memories');
-                      return;
-                    }
-                    if (item.command === '/status') {
-                      runSlash('/status');
-                      return;
-                    }
                     if (item.command === '/diff') {
                       openDiff();
                       return;
@@ -7063,7 +7130,7 @@ function SlashCommandsScreen({
                       navigation.navigate('Settings');
                       return;
                     }
-                    runSlash(item.command);
+                    openCommandAction(item.command);
                   }}
                 >
                   <View style={styles.commandListText}>
@@ -7076,6 +7143,377 @@ function SlashCommandsScreen({
             </View>
           </View>
         ))}
+      </ScrollView>
+    </Surface>
+  );
+}
+
+function SlashCommandActionScreen({
+  navigation,
+  route,
+  workspace,
+  conversation,
+  settings,
+  modelCatalog,
+  modelCatalogStatus,
+  modelCatalogError,
+  refreshModelCatalog,
+  applyWorkspaceModelSelection,
+  sendSlashCommand,
+  openGitDiff,
+}: NativeStackScreenProps<RootStackParamList, 'SlashCommandAction'> & {
+  workspace: WorkspaceRecord | null;
+  conversation: ConversationRecord | null;
+  settings: ConnectionSettings;
+  modelCatalog: CodexModelCatalogItem[];
+  modelCatalogStatus: 'idle' | 'loading' | 'ready' | 'error';
+  modelCatalogError: string;
+  refreshModelCatalog: () => boolean;
+  applyWorkspaceModelSelection: (conversationId: string, model: string, reasoningEffort: string | null) => void;
+  sendSlashCommand: (input: string, conversationId?: string) => void;
+  openGitDiff: (conversationId: string) => void;
+}) {
+  const command = canonicalSlashCommand(route.params.command);
+  const definition = slashCommandDefinition(command);
+  const title = definition?.title ?? command.replace(/^\//, '');
+  const description = definition?.description ?? '该命令不在当前 Codex 命令表中。';
+  const [textValue, setTextValue] = useState('');
+  const [reasoningEffort, setReasoningEffort] = useState<string | null>(
+    normalizeReasoningEffort(workspace?.reasoningEffort ?? settings.defaultReasoningEffort),
+  );
+  const safeCatalog = modelCatalog.length ? modelCatalog : FALLBACK_CODEX_MODELS;
+  const currentModel = workspace?.model || settings.defaultModel;
+  const activeConversationId = conversation?.id ?? route.params.conversationId;
+
+  useEffect(() => {
+    setTextValue('');
+    setReasoningEffort(normalizeReasoningEffort(workspace?.reasoningEffort ?? settings.defaultReasoningEffort));
+  }, [command, settings.defaultReasoningEffort, workspace?.reasoningEffort]);
+
+  const runSlash = useCallback((input: string) => {
+    if (!conversation) {
+      Alert.alert('未选择对话', '请先回到一个 Codex 对话。');
+      return;
+    }
+    sendSlashCommand(input, conversation.id);
+  }, [conversation, sendSlashCommand]);
+
+  const commandWithText = useCallback((base: string) => {
+    const trimmed = textValue.trim();
+    runSlash(trimmed ? `${base} ${trimmed}` : base);
+  }, [runSlash, textValue]);
+
+  const openSettings = useCallback(() => {
+    navigation.navigate('Settings');
+  }, [navigation]);
+
+  const openDiff = useCallback(() => {
+    if (!conversation) {
+      Alert.alert('未选择对话', '请先回到一个 Codex 对话。');
+      return;
+    }
+    openGitDiff(conversation.id);
+  }, [conversation, openGitDiff]);
+
+  const renderModelControls = () => (
+    <>
+      <View style={styles.commandDetailCard}>
+        <Text style={styles.commandDetailLabel}>当前模型</Text>
+        <Text style={styles.commandDetailValue}>{modelDisplayLabel(currentModel, safeCatalog)}</Text>
+        <Text style={styles.commandDetailHint}>Reasoning: {reasoningEffortLabel(workspace?.reasoningEffort ?? settings.defaultReasoningEffort)}</Text>
+        <View style={styles.commandActionGrid}>
+          <ActionButton title="刷新模型" onPress={refreshModelCatalog} tone="ghost" disabled={modelCatalogStatus === 'loading'} />
+          <ActionButton title="手动应用" onPress={() => commandWithText('/model')} tone="ghost" />
+        </View>
+        {modelCatalogError ? <Text style={styles.warningText}>{modelCatalogError}</Text> : null}
+        <TextInput
+          style={styles.input}
+          value={textValue}
+          onChangeText={setTextValue}
+          placeholder="gpt-5.5 high 或 --model gpt-5.5 --effort high"
+          autoCapitalize="none"
+          autoCorrect={false}
+        />
+      </View>
+      <View style={styles.commandDetailCard}>
+        <Text style={styles.commandSectionTitle}>模型列表</Text>
+        <ScrollView style={styles.modelPickerList} contentContainerStyle={styles.modelPickerListContent}>
+          {safeCatalog.map((model) => {
+            const selected = model.model === currentModel;
+            const defaultEffort = model.defaultReasoningEffort ?? defaultReasoningForModel(model.model, safeCatalog);
+            return (
+              <Pressable
+                key={model.model}
+                style={[styles.modelOption, selected ? styles.modelOptionActive : null]}
+                onPress={() => {
+                  if (!conversation) {
+                    return;
+                  }
+                  applyWorkspaceModelSelection(conversation.id, model.model, defaultEffort);
+                }}
+              >
+                <View style={styles.modelOptionHeader}>
+                  <Text style={[styles.modelOptionTitle, selected ? styles.modelOptionTitleActive : null]} numberOfLines={1}>
+                    {model.displayName || model.model}
+                  </Text>
+                  {model.isDefault ? <Text style={styles.modelDefaultBadge}>default</Text> : null}
+                </View>
+                {model.description ? <Text style={styles.modelOptionDescription} numberOfLines={2}>{model.description}</Text> : null}
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+        <ReasoningEffortSelector
+          label="思考强度"
+          options={reasoningOptionsForModel(currentModel, safeCatalog)}
+          value={reasoningEffort}
+          defaultValue={defaultReasoningForModel(currentModel, safeCatalog)}
+          onChange={(value) => {
+            setReasoningEffort(value);
+            if (conversation) {
+              applyWorkspaceModelSelection(conversation.id, currentModel, value);
+            }
+          }}
+        />
+      </View>
+    </>
+  );
+
+  const renderPermissionsControls = () => (
+    <View style={styles.commandDetailCard}>
+      <Text style={styles.commandDetailLabel}>当前权限</Text>
+      <Text style={styles.commandDetailValue}>{workspace?.approvalPolicy || settings.approvalPolicy} · {workspace?.sandboxMode || settings.sandboxMode}</Text>
+      {PERMISSION_PRESETS.map((preset) => (
+        <Pressable key={preset.id} style={styles.commandChoiceItem} onPress={() => runSlash(`/permissions ${preset.id}`)}>
+          <View style={styles.commandListText}>
+            <Text style={styles.commandName}>{preset.title}</Text>
+            <Text style={styles.commandDescription}>{preset.description}</Text>
+          </View>
+          <StyledIonicons name="checkmark-circle-outline" size={18} className="text-muted" />
+        </Pressable>
+      ))}
+    </View>
+  );
+
+  const renderThreadControls = () => {
+    if (command === '/rename') {
+      return (
+        <View style={styles.commandDetailCard}>
+          <TextInput style={styles.input} value={textValue} onChangeText={setTextValue} placeholder={conversation?.title || 'New thread name'} />
+          <ActionButton title="重命名" onPress={() => commandWithText('/rename')} />
+        </View>
+      );
+    }
+    if (command === '/goal') {
+      return (
+        <View style={styles.commandDetailCard}>
+          <Text style={styles.commandDetailLabel}>当前目标</Text>
+          <Text style={styles.commandDetailHint}>{conversation?.goalObjective || 'none'} · {conversation?.goalStatus || 'unknown'}</Text>
+          <TextInput style={[styles.input, styles.inputMultiline]} value={textValue} onChangeText={setTextValue} placeholder="Objective" multiline />
+          <View style={styles.commandActionGrid}>
+            <ActionButton title="设置目标" onPress={() => commandWithText('/goal set')} />
+            <ActionButton title="查看" onPress={() => runSlash('/goal')} tone="ghost" />
+            <ActionButton title="暂停" onPress={() => runSlash('/goal pause')} tone="ghost" />
+            <ActionButton title="继续" onPress={() => runSlash('/goal resume')} tone="ghost" />
+            <ActionButton title="清除" onPress={() => runSlash('/goal clear')} tone="danger" />
+          </View>
+        </View>
+      );
+    }
+    if (command === '/resume') {
+      return (
+        <View style={styles.commandDetailCard}>
+          <Text style={styles.commandDetailHint}>Codex 支持按会话 id/name resume；当前移动端协议已实现当前 thread resume 和 loaded thread 查询。</Text>
+          <View style={styles.commandActionGrid}>
+            <ActionButton title="恢复当前 thread" onPress={() => runSlash('/resume')} />
+            <ActionButton title="查看 loaded threads" onPress={() => runSlash('/status loaded')} tone="ghost" />
+          </View>
+        </View>
+      );
+    }
+    if (command === '/fork' || command === '/side') {
+      return (
+        <View style={styles.commandDetailCard}>
+          <Text style={styles.commandDetailHint}>{command === '/side' ? '创建临时 side conversation。' : 'Fork 当前 Codex thread。'}</Text>
+          <ActionButton title={command === '/side' ? '创建 Side' : 'Fork Thread'} onPress={() => runSlash(command)} />
+        </View>
+      );
+    }
+    return null;
+  };
+
+  const renderCatalogControls = () => {
+    if (command === '/skills') {
+      return (
+        <View style={styles.commandDetailCard}>
+          <Text style={styles.commandDetailHint}>打开 Skill 选择器，选择后会作为下一条消息的上下文注入。</Text>
+          <View style={styles.commandActionGrid}>
+            <ActionButton title="打开 Skills" onPress={() => runSlash('/skills')} />
+            <ActionButton title="刷新 Skills" onPress={() => runSlash('/skills reload')} tone="ghost" />
+          </View>
+        </View>
+      );
+    }
+    if (command === '/mcp') {
+      return (
+        <View style={styles.commandDetailCard}>
+          <View style={styles.commandActionGrid}>
+            <ActionButton title="MCP 状态" onPress={() => runSlash('/mcp')} />
+            <ActionButton title="Verbose" onPress={() => runSlash('/mcp verbose')} tone="ghost" />
+          </View>
+        </View>
+      );
+    }
+    if (command === '/hooks' || command === '/apps' || command === '/plugins') {
+      return (
+        <View style={styles.commandDetailCard}>
+          <View style={styles.commandActionGrid}>
+            <ActionButton title="读取列表" onPress={() => runSlash(command)} />
+            {command === '/apps' ? <ActionButton title="强制刷新" onPress={() => runSlash('/apps refresh')} tone="ghost" /> : null}
+          </View>
+        </View>
+      );
+    }
+    return null;
+  };
+
+  const renderRuntimeControls = () => {
+    if (command === '/status') {
+      return (
+        <View style={styles.commandDetailCard}>
+          <View style={styles.commandActionGrid}>
+            <ActionButton title="Session 状态" onPress={() => runSlash('/status')} />
+            <ActionButton title="Thread 详情" onPress={() => runSlash('/status thread')} tone="ghost" />
+            <ActionButton title="历史" onPress={() => runSlash('/status history')} tone="ghost" />
+            <ActionButton title="Turns" onPress={() => runSlash('/status turns')} tone="ghost" />
+            <ActionButton title="Loaded" onPress={() => runSlash('/status loaded')} tone="ghost" />
+          </View>
+          <TextInput style={styles.input} value={textValue} onChangeText={setTextValue} placeholder="turn_id for items" autoCapitalize="none" />
+          <ActionButton title="读取 Turn Items" onPress={() => commandWithText('/status items')} tone="ghost" />
+        </View>
+      );
+    }
+    if (command === '/ps' || command === '/stop') {
+      return (
+        <View style={styles.commandDetailCard}>
+          <View style={styles.commandActionGrid}>
+            <ActionButton title="列出后台任务" onPress={() => runSlash('/ps')} />
+            <ActionButton title="清理后台终端" onPress={() => runSlash('/ps clean')} tone="ghost" />
+            <ActionButton title="停止本地会话" onPress={() => runSlash('/stop')} tone="danger" />
+          </View>
+        </View>
+      );
+    }
+    if (command === '/approve') {
+      return (
+        <View style={styles.commandDetailCard}>
+          <View style={styles.commandActionGrid}>
+            <ActionButton title="批准当前请求" onPress={() => runSlash('/approve')} />
+            <ActionButton title="拒绝当前请求" onPress={() => runSlash('/approve deny')} tone="danger" />
+            <ActionButton title="Guardian override" onPress={() => runSlash('/approve guardian')} tone="ghost" />
+          </View>
+        </View>
+      );
+    }
+    if (command === '/logout' || command === '/quit' || command === '/exit') {
+      return (
+        <View style={styles.commandDetailCard}>
+          <ActionButton title={command === '/logout' ? '登出 Codex' : '停止本地会话'} onPress={() => runSlash(command)} tone="danger" />
+        </View>
+      );
+    }
+    return null;
+  };
+
+  const renderPromptControls = () => {
+    if (command === '/review') {
+      return (
+        <View style={styles.commandDetailCard}>
+          <TextInput style={[styles.input, styles.inputMultiline]} value={textValue} onChangeText={setTextValue} placeholder="自定义 review instructions，可留空检查未提交变更" multiline />
+          <ActionButton title="开始 Review" onPress={() => commandWithText('/review')} />
+        </View>
+      );
+    }
+    if (command === '/plan') {
+      return (
+        <View style={styles.commandDetailCard}>
+          <TextInput style={[styles.input, styles.inputMultiline]} value={textValue} onChangeText={setTextValue} placeholder="Plan topic" multiline />
+          <ActionButton title="进入 Plan" onPress={() => commandWithText('/plan')} />
+        </View>
+      );
+    }
+    return null;
+  };
+
+  const renderSettingsControls = () => {
+    if (command === '/memories') {
+      return (
+        <View style={styles.commandDetailCard}>
+          <View style={styles.commandActionGrid}>
+            <ActionButton title="开启" onPress={() => runSlash('/memories on')} />
+            <ActionButton title="关闭" onPress={() => runSlash('/memories off')} tone="ghost" />
+            <ActionButton title="重置" onPress={() => runSlash('/memories reset')} tone="danger" />
+          </View>
+        </View>
+      );
+    }
+    if (command === '/experimental') {
+      return (
+        <View style={styles.commandDetailCard}>
+          <ActionButton title="打开实验功能" onPress={() => navigation.navigate('Experimental', { workspaceId: workspace?.id ?? route.params.workspaceId, conversationId: activeConversationId })} />
+        </View>
+      );
+    }
+    if (command === '/settings') {
+      return (
+        <View style={styles.commandDetailCard}>
+          <ActionButton title="打开设置" onPress={openSettings} />
+        </View>
+      );
+    }
+    if (command === '/diff') {
+      return (
+        <View style={styles.commandDetailCard}>
+          <ActionButton title="打开 Git Diff" onPress={openDiff} />
+        </View>
+      );
+    }
+    if (command === '/sandbox-add-read-dir') {
+      return (
+        <View style={styles.commandDetailCard}>
+          <TextInput style={styles.input} value={textValue} onChangeText={setTextValue} placeholder="/absolute/path" autoCapitalize="none" />
+          <ActionButton title="添加只读目录" onPress={() => commandWithText('/sandbox-add-read-dir')} />
+        </View>
+      );
+    }
+    return null;
+  };
+
+  const body =
+    command === '/model'
+      ? renderModelControls()
+      : command === '/permissions'
+        ? renderPermissionsControls()
+        : renderThreadControls() ??
+          renderCatalogControls() ??
+          renderRuntimeControls() ??
+          renderPromptControls() ??
+          renderSettingsControls() ?? (
+            <View style={styles.commandDetailCard}>
+              <Text style={styles.commandDetailHint}>该命令在 Codex TUI 中是本地 TUI/IDE 配置或实验命令；移动端没有等价安全协议时只记录识别结果，不会把它作为普通 prompt 发送。</Text>
+              <ActionButton title="执行兼容动作" onPress={() => runSlash(command)} tone="ghost" />
+            </View>
+          );
+
+  return (
+    <Surface className="flex-1 bg-background">
+      <ScrollView contentContainerStyle={styles.pageContent}>
+        <View style={styles.commandPageHeader}>
+          <Text style={styles.commandPageTitle}>{title}</Text>
+          <Text style={styles.commandPageSubtitle} numberOfLines={3}>{description}</Text>
+          <Text style={styles.commandDetailCommand}>{command}</Text>
+        </View>
+        {body}
       </ScrollView>
     </Surface>
   );
@@ -8080,7 +8518,7 @@ function SkillPickerModal({
             <Button size="sm" variant="secondary" isDisabled={status === 'loading'} onPress={onRefresh} className="rounded-lg">
               <Button.Label>刷新</Button.Label>
             </Button>
-            <Button size="sm" variant="solid" isDisabled={!conversationId} onPress={onClose} className="rounded-lg">
+            <Button size="sm" variant="primary" isDisabled={!conversationId} onPress={onClose} className="rounded-lg">
               <Button.Label>完成</Button.Label>
             </Button>
           </View>
@@ -8706,6 +9144,54 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 18,
     fontWeight: '700',
+  },
+  commandDetailCommand: {
+    alignSelf: 'flex-start',
+    color: '#17202a',
+    fontSize: 13,
+    fontWeight: '800',
+    backgroundColor: '#edf0f2',
+    borderWidth: 1,
+    borderColor: '#d8e0e7',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  commandDetailCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d8e0e7',
+    padding: 14,
+    gap: 12,
+  },
+  commandDetailLabel: {
+    color: '#66717c',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  commandDetailValue: {
+    color: '#17202a',
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  commandDetailHint: {
+    color: '#66717c',
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: '600',
+  },
+  commandChoiceItem: {
+    minHeight: 72,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d8e0e7',
+    backgroundColor: '#f7f9fa',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
   },
   commandQuickPanel: {
     backgroundColor: '#ffffff',
