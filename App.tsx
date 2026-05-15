@@ -777,7 +777,7 @@ const SOCKET_EVENT_BATCH_SIZE = 24;
 const MAX_TIMELINE_ITEMS = 260;
 const MAX_EVENTS = 220;
 const RECONNECT_DELAY_MS = 2500;
-const RECONNECT_REPLAY_LIMIT = 5000;
+const CHAT_ATTACH_REPLAY_LIMIT = 200;
 const CHAT_BOTTOM_FOLLOW_THRESHOLD = 72;
 
 const SLASH_COMMANDS: SlashCommand[] = [
@@ -1655,7 +1655,6 @@ export default function App() {
   const pendingServerEventFrameRef = useRef<number | null>(null);
   const transportClientRef = useRef<TodeXTransportClient | null>(null);
   const autoConnectAttemptedRef = useRef(false);
-  const attachedSessionIdsRef = useRef(new Set<string>());
   const sessionCursorsRef = useRef(new Map<string, number>());
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const manualDisconnectRef = useRef(false);
@@ -1846,7 +1845,6 @@ export default function App() {
     }
     socketCryptoRef.current = null;
     transportClientRef.current?.detach();
-    attachedSessionIdsRef.current.clear();
     pendingServerEventsRef.current = [];
     if (pendingServerEventFrameRef.current !== null) {
       cancelAnimationFrame(pendingServerEventFrameRef.current);
@@ -2811,7 +2809,6 @@ export default function App() {
       socketCryptoRef.current = crypto;
 
       socket.onopen = () => {
-        attachedSessionIdsRef.current.clear();
         const transport = new TodeXTransportClient({
           loadSessionCursors: getSessionCursorSnapshot,
           onStatus: setTransportStatus,
@@ -3112,7 +3109,7 @@ export default function App() {
     const afterCursor = sessionCursorsRef.current.get(sessionId) ?? null;
     return sendWorkspaceCommand(workspace, 'codex.local.attach', {
       afterCursor,
-      replayLimit: RECONNECT_REPLAY_LIMIT,
+      replayLimit: CHAT_ATTACH_REPLAY_LIMIT,
     }, conversation);
   }, [sendWorkspaceCommand]);
 
@@ -3133,18 +3130,6 @@ export default function App() {
       conversationId: conversation.id,
     });
   }, [sendProtocolMessage]);
-
-  useEffect(() => {
-    if (connectionState !== 'open' || !activeWorkspace || !activeConversation?.sessionId) {
-      return;
-    }
-    const sessionId = sessionIdForConversation(activeWorkspace, activeConversation);
-    if (attachedSessionIdsRef.current.has(sessionId)) {
-      return;
-    }
-    attachedSessionIdsRef.current.add(sessionId);
-    attachWorkspaceConversation(activeWorkspace, activeConversation);
-  }, [activeConversation, activeWorkspace, attachWorkspaceConversation, connectionState]);
 
   const startLocalAdapter = useCallback(
     (workspace: WorkspaceRecord, conversation: ConversationRecord) => {
@@ -3427,13 +3412,6 @@ export default function App() {
     );
     return true;
   }, [getConversationContext, sendNativeThreadAction]);
-
-  useEffect(() => {
-    if (connectionState !== 'open' || !activeConversation?.threadId) {
-      return;
-    }
-    loadNativeThreadHistory(activeConversation.id);
-  }, [activeConversation?.id, activeConversation?.threadId, activeConversation?.updatedAt, connectionState, loadNativeThreadHistory]);
 
   const createConversation = useCallback((workspaceId: string) => {
     const workspace = workspacesRef.current.find((item) => item.id === workspaceId);
@@ -4400,7 +4378,6 @@ export default function App() {
                   {...props}
                   workspaces={workspaces}
                   conversations={conversations}
-                  timeline={timeline}
                   activeConversationId={activeConversationId}
                   activeTurns={turnIds}
                   connectionState={connectionState}
@@ -4432,6 +4409,7 @@ export default function App() {
                   isThinking={thinkingConversations[props.route.params.conversationId] === true}
                   turnId={turnIds[props.route.params.conversationId] ?? ''}
                   lastError={lastError}
+                  connectionState={connectionState}
                   setChatDraft={(value) => setConversationChatDraft(props.route.params.conversationId, value)}
                   setComposerAttachments={(value) => setConversationAttachments(props.route.params.conversationId, value)}
                   setComposerSelection={(value) => setConversationComposerSelection(props.route.params.conversationId, value)}
@@ -4439,6 +4417,8 @@ export default function App() {
                   stopThinking={stopThinking}
                   sendApprovalResponse={sendApprovalResponse}
                   selectConversation={selectConversation}
+                  attachWorkspaceConversation={attachWorkspaceConversation}
+                  loadNativeThreadHistory={loadNativeThreadHistory}
                   runWorkspaceCommand={runWorkspaceCommand}
                   runThreadMenuAction={runThreadMenuAction}
                   removeWorkspace={removeWorkspace}
@@ -4741,7 +4721,6 @@ function ConversationListScreen({
   route,
   workspaces,
   conversations,
-  timeline,
   activeConversationId,
   activeTurns,
   connectionState,
@@ -4757,7 +4736,6 @@ function ConversationListScreen({
 }: NativeStackScreenProps<RootStackParamList, 'Conversations'> & {
   workspaces: WorkspaceRecord[];
   conversations: ConversationRecord[];
-  timeline: TimelineEntry[];
   activeConversationId: string;
   activeTurns: Record<string, string>;
   connectionState: ConnectionState;
@@ -4774,16 +4752,6 @@ function ConversationListScreen({
   const [renamingConversation, setRenamingConversation] = useState<ConversationRecord | null>(null);
   const workspace = workspaces.find((item) => item.id === route.params.workspaceId) ?? null;
   const workspaceConversations = conversations.filter((conversation) => conversation.workspaceId === route.params.workspaceId && conversation.archived !== true);
-  const latestVisibleByConversation = useMemo(() => {
-    const latest = new Map<string, TimelineEntry>();
-    for (const entry of timeline) {
-      if (!entry.conversationId || latest.has(entry.conversationId) || !isVisibleConversationEntry(entry)) {
-        continue;
-      }
-      latest.set(entry.conversationId, entry);
-    }
-    return latest;
-  }, [timeline]);
 
   useEffect(() => {
     selectWorkspace(route.params.workspaceId);
@@ -4827,7 +4795,7 @@ function ConversationListScreen({
   }, [createConversation, navigation, route.params.workspaceId, workspace?.name]);
 
   const conversationTitle = (conversation: ConversationRecord) => {
-    return conversation.title || conversationPreviewText(latestVisibleByConversation.get(conversation.id));
+    return conversation.title || conversation.preview || 'Untitled thread';
   };
 
   const openConversationActions = (conversation: ConversationRecord) => {
@@ -4886,7 +4854,7 @@ function ConversationListScreen({
         <EmptyState text="还没有对话。点右上角 + 创建一个纯粹的新对话。" />
       ) : (
         workspaceConversations.map((conversation) => {
-          const preview = conversation.title || conversation.preview || conversationPreviewText(latestVisibleByConversation.get(conversation.id));
+          const preview = conversation.title || conversation.preview || 'Untitled thread';
           const running = Boolean(activeTurns[conversation.id]);
           const highlighted = isConversationHighlighted(conversation, activeConversationId, activeTurns);
           const statusLabel = running ? '运行中' : conversation.nativeStatus || nowLabel(conversation.updatedAt);
@@ -4956,6 +4924,7 @@ function ChatScreen({
   isThinking,
   turnId,
   lastError,
+  connectionState,
   setChatDraft,
   setComposerAttachments,
   setComposerSelection,
@@ -4963,6 +4932,8 @@ function ChatScreen({
   stopThinking,
   sendApprovalResponse,
   selectConversation,
+  attachWorkspaceConversation,
+  loadNativeThreadHistory,
   runWorkspaceCommand,
   runThreadMenuAction,
   removeWorkspace,
@@ -4979,6 +4950,7 @@ function ChatScreen({
   isThinking: boolean;
   turnId: string;
   lastError: string;
+  connectionState: ConnectionState;
   setChatDraft: Dispatch<SetStateAction<string>>;
   setComposerAttachments: Dispatch<SetStateAction<ComposerAttachmentDraft[]>>;
   setComposerSelection: Dispatch<SetStateAction<TextInputSelectionChangeEventData['selection']>>;
@@ -4986,6 +4958,8 @@ function ChatScreen({
   stopThinking: (conversationId: string) => void;
   sendApprovalResponse: (accepted: boolean, request: PendingRequest) => boolean;
   selectConversation: (workspaceId: string, conversationId: string) => void;
+  attachWorkspaceConversation: (workspace: WorkspaceRecord, conversation: ConversationRecord) => boolean;
+  loadNativeThreadHistory: (conversationId: string, force?: boolean) => boolean;
   runWorkspaceCommand: (workspace: WorkspaceRecord, conversation: ConversationRecord, command: 'start' | 'status' | 'attach' | 'stop' | 'interrupt') => void;
   runThreadMenuAction: (conversationId: string, action: 'resume' | 'fork' | 'archive' | 'rollback' | 'compact') => void;
   removeWorkspace: (workspaceId: string) => void;
@@ -4998,6 +4972,7 @@ function ChatScreen({
   const messageScrollRef = useRef<ScrollView | null>(null);
   const shouldFollowLatestRef = useRef(true);
   const initialLatestScrollRef = useRef(true);
+  const attachedSessionKeyRef = useRef('');
   const composerInputRef = useRef<TextInput | null>(null);
   const autoExpandedProgressIdsRef = useRef<Set<string>>(new Set());
   const autoExpandedRequestIdsRef = useRef<Map<string, string[]>>(new Map());
@@ -5062,6 +5037,29 @@ function ChatScreen({
     : [];
   const mentionTrigger = slashSuggestions.length === 0 ? findMentionTrigger(chatDraft, composerSelection.start) : null;
   const mentionSuggestions = buildMentionSuggestions(mentionTrigger, mentionEntries);
+
+  useEffect(() => {
+    if (connectionState !== 'open' || !workspace || !conversation?.sessionId) {
+      if (connectionState !== 'open') {
+        attachedSessionKeyRef.current = '';
+      }
+      return;
+    }
+    const sessionId = sessionIdForConversation(workspace, conversation);
+    const attachKey = `${workspace.id}:${sessionId}`;
+    if (attachedSessionKeyRef.current === attachKey) {
+      return;
+    }
+    attachedSessionKeyRef.current = attachKey;
+    attachWorkspaceConversation(workspace, conversation);
+  }, [attachWorkspaceConversation, connectionState, conversation?.id, conversation?.sessionId, workspace?.id]);
+
+  useEffect(() => {
+    if (connectionState !== 'open' || !conversation?.threadId) {
+      return;
+    }
+    loadNativeThreadHistory(conversation.id);
+  }, [connectionState, conversation?.id, conversation?.threadId, conversation?.updatedAt, loadNativeThreadHistory]);
 
   const scrollToLatest = useCallback((animated = false) => {
     requestAnimationFrame(() => {
