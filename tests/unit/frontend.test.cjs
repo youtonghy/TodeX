@@ -10,7 +10,7 @@ const transportCrypto = require(path.join(compiledDir, 'transportCrypto.js'));
 let executedTests = 0;
 
 process.on('exit', () => {
-  assert.equal(executedTests, 17);
+  assert.equal(executedTests, 18);
 });
 
 function baseSettings(overrides = {}) {
@@ -280,6 +280,49 @@ test('parses native Codex thread objects from control responses', () => {
   assert.equal(parsed.id, 'thr_forked');
   assert.equal(parsed.title, 'forked work');
   assert.equal(parsed.archived, false);
+});
+
+test('parses native Codex thread/read responses into chat history entries', () => {
+  executedTests += 1;
+  const parsed = todex.parseCodexNativeThreadReadResponse({
+    result: {
+      thread: {
+        id: 'thr_cli_1',
+        name: 'CLI created task',
+        preview: 'Fix the history sync',
+        cwd: '/workspace/app',
+        createdAt: 1700000000,
+        updatedAt: 1700000060,
+        turns: [
+          {
+            id: 'turn_1',
+            startedAt: 1700000001,
+            completedAt: 1700000005,
+            items: [
+              {
+                type: 'userMessage',
+                id: 'user_1',
+                content: [{ type: 'text', text: 'CLI user prompt' }],
+              },
+              {
+                type: 'agentMessage',
+                id: 'agent_1',
+                text: 'APP should display this answer',
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+
+  assert.ok(parsed);
+  assert.equal(parsed.thread.id, 'thr_cli_1');
+  assert.deepEqual(parsed.history.map((entry) => [entry.kind, entry.title, entry.subtitle]), [
+    ['outgoing', 'You', 'CLI user prompt'],
+    ['incoming', 'Codex', 'APP should display this answer'],
+  ]);
+  assert.equal(parsed.history[0].at, 1700000005000);
 });
 
 test('classifies approval requests and builds matching response payloads', () => {

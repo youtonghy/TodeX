@@ -70,8 +70,10 @@ import {
   parseCodexModelListResponse,
   parseCodexNativeThread,
   parseCodexNativeThreadListResponse,
+  parseCodexNativeThreadReadResponse,
   sandboxPolicyForMode,
   shortJson,
+  type CodexThreadHistoryEntry,
 } from './src/lib/todex';
 import { loadJson, loadSecret, saveJson, saveSecret } from './src/lib/storage';
 import {
@@ -136,6 +138,7 @@ type PendingThreadAction = {
   timeoutId: ReturnType<typeof setTimeout>;
   sourceConversationId?: string;
   title?: string;
+  restoreHistory?: boolean;
 };
 
 type ComposerSelection = TextInputSelectionChangeEventData['selection'];
@@ -1497,6 +1500,18 @@ function makeOutgoingEntry(
   };
 }
 
+function timelineEntryFromNativeHistoryEntry(
+  entry: CodexThreadHistoryEntry,
+  workspaceId: string,
+  conversationId: string,
+): TimelineEntry {
+  return {
+    ...entry,
+    workspaceId,
+    conversationId,
+  };
+}
+
 function isVisibleConversationEntry(entry: TimelineEntry): boolean {
   if (entry.kind === 'outgoing' || entry.kind === 'incoming') {
     return true;
@@ -1629,6 +1644,7 @@ export default function App() {
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const manualDisconnectRef = useRef(false);
   const healthProbeSeqRef = useRef(0);
+  const loadedNativeThreadHistoryRef = useRef(new Map<string, number>());
 
   const [hydrated, setHydrated] = useState(false);
   const [autoConnectEnabled, setAutoConnectEnabled] = useState(false);
@@ -2416,6 +2432,9 @@ export default function App() {
       if (pendingThreadAction) {
         if (event.type === 'codex.control.response') {
           const nativeThread = parseCodexNativeThread(data.result ?? data);
+          const nativeThreadRead = pendingThreadAction.restoreHistory
+            ? parseCodexNativeThreadReadResponse(data.result ?? data)
+            : null;
           if (nativeThread) {
             if (pendingThreadAction.action === 'fork') {
               const source = conversationsRef.current.find((item) => item.id === pendingThreadAction.sourceConversationId);
@@ -2456,6 +2475,23 @@ export default function App() {
                 [nativeThread],
               );
             }
+          }
+          if (nativeThreadRead) {
+            const restored = nativeThreadRead.history.map((entry) =>
+              timelineEntryFromNativeHistoryEntry(
+                entry,
+                pendingThreadAction.workspaceId,
+                pendingThreadAction.conversationId,
+              ),
+            );
+            setTimeline((current) => {
+              const remaining = current.filter((entry) => entry.conversationId !== pendingThreadAction.conversationId);
+              return [...restored, ...remaining].slice(0, MAX_TIMELINE_ITEMS);
+            });
+            loadedNativeThreadHistoryRef.current.set(
+              nativeThreadRead.thread.id,
+              nativeThreadRead.thread.updatedAt,
+            );
           }
           if (pendingThreadAction.action === 'archive') {
             updateConversation(pendingThreadAction.conversationId, { archived: true, nativeStatus: 'archived' });
@@ -3271,6 +3307,7 @@ export default function App() {
       limit: 100,
       sortKey: 'updated_at',
       sortDirection: 'desc',
+      sourceKinds: ['cli', 'vscode', 'appServer'],
     }, requestId);
     if (!sent) {
       finishPendingThreadList(pendingThreadListsRef.current.get(workspaceId)!, '请先在设置里连接后端。');
@@ -3284,7 +3321,7 @@ export default function App() {
     action: PendingThreadAction['action'],
     method: string,
     paramsBuilder: (threadId: string, workspace: WorkspaceRecord, conversation: ConversationRecord) => Record<string, unknown>,
-    options: { title?: string; selectResult?: boolean; resultConversationId?: string } = {},
+    options: { title?: string; selectResult?: boolean; resultConversationId?: string; restoreHistory?: boolean } = {},
   ) => {
     const context = getConversationContext(conversationId);
     if (!context) {
@@ -3319,6 +3356,7 @@ export default function App() {
       timeoutId,
       sourceConversationId: conversation.id,
       title: options.title,
+      restoreHistory: options.restoreHistory,
     });
     const sent = sendLocalMethodRequest(workspace, conversation, method, paramsBuilder(threadId, workspace, conversation), requestId);
     if (!sent) {
@@ -3330,6 +3368,36 @@ export default function App() {
     }
     return true;
   }, [finishPendingThreadAction, getConversationContext, sendLocalMethodRequest, startLocalAdapter]);
+
+  const loadNativeThreadHistory = useCallback((conversationId: string, force = false) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      return false;
+    }
+    const threadId = normalizeThreadId(context.conversation.threadId);
+    if (!threadId) {
+      return false;
+    }
+    const loadedAt = loadedNativeThreadHistoryRef.current.get(threadId) ?? 0;
+    if (!force && loadedAt >= context.conversation.updatedAt) {
+      return true;
+    }
+    void sendNativeThreadAction(
+      conversationId,
+      'read',
+      'thread/read',
+      (currentThreadId) => ({ threadId: currentThreadId, includeTurns: true }),
+      { restoreHistory: true },
+    );
+    return true;
+  }, [getConversationContext, sendNativeThreadAction]);
+
+  useEffect(() => {
+    if (connectionState !== 'open' || !activeConversation?.threadId) {
+      return;
+    }
+    loadNativeThreadHistory(activeConversation.id);
+  }, [activeConversation?.id, activeConversation?.threadId, activeConversation?.updatedAt, connectionState, loadNativeThreadHistory]);
 
   const createConversation = useCallback((workspaceId: string) => {
     const workspace = workspacesRef.current.find((item) => item.id === workspaceId);
@@ -3927,7 +3995,13 @@ export default function App() {
           setLastError('当前记录还没有可 resume 的原生 thread。');
           return;
         }
-        sendThreadMethod('thread/resume', (threadId) => ({ threadId }), 'Thread resume sent', '已请求 Codex app-server resume 当前原生 thread。');
+        void sendNativeThreadAction(
+          conversation.id,
+          'resume',
+          'thread/resume',
+          (threadId) => ({ threadId }),
+          { restoreHistory: true },
+        );
         return;
       }
 
@@ -4223,7 +4297,7 @@ export default function App() {
       return;
     }
     if (action === 'resume') {
-      void sendNativeThreadAction(conversationId, 'resume', 'thread/resume', (threadId) => ({ threadId }));
+      void sendNativeThreadAction(conversationId, 'resume', 'thread/resume', (threadId) => ({ threadId }), { restoreHistory: true });
       return;
     }
     if (action === 'rollback') {

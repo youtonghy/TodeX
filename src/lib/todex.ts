@@ -63,6 +63,15 @@ export type CodexNativeThread = {
   raw: Record<string, unknown>;
 };
 
+export type CodexThreadHistoryEntry = {
+  id: string;
+  kind: 'incoming' | 'outgoing';
+  title: string;
+  subtitle: string;
+  raw: string;
+  at: number;
+};
+
 export type ServerEvent = {
   event_id?: string;
   id?: string;
@@ -509,6 +518,47 @@ function threadObjectFromResponse(value: unknown): Record<string, unknown> | nul
   return typeof thread.id === 'string' ? thread : null;
 }
 
+function textFromContent(value: unknown): string {
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (!Array.isArray(value)) {
+    return '';
+  }
+  return value
+    .map((part) => {
+      if (typeof part === 'string') {
+        return part;
+      }
+      if (!isObject(part)) {
+        return '';
+      }
+      if (typeof part.text === 'string') {
+        return part.text;
+      }
+      if (typeof part.name === 'string' && part.name) {
+        return `@${part.name}`;
+      }
+      if (typeof part.path === 'string' && part.path) {
+        return part.path;
+      }
+      if (typeof part.url === 'string' && part.url) {
+        return part.url;
+      }
+      return '';
+    })
+    .filter(Boolean)
+    .join('');
+}
+
+function textFromThreadItem(item: Record<string, unknown>): string {
+  const directText = item.text ?? item.message ?? item.summary;
+  if (typeof directText === 'string') {
+    return directText;
+  }
+  return textFromContent(item.content);
+}
+
 export function parseCodexNativeThread(value: unknown): CodexNativeThread | null {
   const thread = threadObjectFromResponse(value);
   if (!thread) {
@@ -551,6 +601,55 @@ export function parseCodexNativeThreadListResponse(value: unknown): CodexNativeT
   const byId = new Map<string, CodexNativeThread>();
   parsed.forEach((thread) => byId.set(thread.id, thread));
   return [...byId.values()];
+}
+
+export function parseCodexNativeThreadReadResponse(value: unknown): {
+  thread: CodexNativeThread;
+  history: CodexThreadHistoryEntry[];
+} | null {
+  const thread = parseCodexNativeThread(value);
+  const rawThread = threadObjectFromResponse(value);
+  if (!thread || !rawThread) {
+    return null;
+  }
+
+  const turns = Array.isArray(rawThread.turns) ? rawThread.turns : [];
+  const history: CodexThreadHistoryEntry[] = [];
+
+  turns.forEach((turn, turnIndex) => {
+    if (!isObject(turn)) {
+      return;
+    }
+    const turnId = stringField(turn, ['id', 'turnId', 'turn_id']) || `turn-${turnIndex}`;
+    const at = timestampField(turn, ['completedAt', 'completed_at', 'startedAt', 'started_at'], thread.updatedAt);
+    const items = Array.isArray(turn.items) ? turn.items : [];
+    items.forEach((item, itemIndex) => {
+      if (!isObject(item)) {
+        return;
+      }
+      const type = stringField(item, ['type', 'itemType', 'item_type']);
+      const text = textFromThreadItem(item).trim();
+      if (!text) {
+        return;
+      }
+      const itemId = stringField(item, ['id', 'itemId', 'item_id']) || `${turnId}-${itemIndex}`;
+      const outgoing = type === 'userMessage' || type === 'user_message';
+      const incoming = type === 'agentMessage' || type === 'agent_message';
+      if (!outgoing && !incoming) {
+        return;
+      }
+      history.push({
+        id: `native-${thread.id}-${itemId}`,
+        kind: outgoing ? 'outgoing' : 'incoming',
+        title: outgoing ? 'You' : 'Codex',
+        subtitle: text,
+        raw: shortJson(item),
+        at,
+      });
+    });
+  });
+
+  return { thread, history };
 }
 
 export function eventId(event: ServerEvent): string {
