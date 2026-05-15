@@ -4867,30 +4867,19 @@ function ConversationListScreen({
   return (
     <Surface className="flex-1 bg-background">
       <ScrollView contentContainerStyle={styles.listContent}>
-      <Card variant="transparent" className="mx-4 mb-2 border border-separator bg-surface-secondary">
-        <Card.Body className="gap-1">
-          <Card.Title numberOfLines={1}>{workspace.name}</Card.Title>
-          <Card.Description numberOfLines={2}>{workspace.path}</Card.Description>
-        </Card.Body>
-      </Card>
-    <ScrollView contentContainerStyle={styles.listContent}>
-      <View style={styles.workspaceSummary}>
-        <Text style={styles.summaryTitle} numberOfLines={1}>
-          {workspace.name}
-        </Text>
-        <Text style={styles.summaryPath} numberOfLines={2}>
-          {workspace.path}
-        </Text>
-        <View style={styles.threadToolbar}>
-          <Text style={styles.threadToolbarText}>
+        <Card variant="transparent" className="mx-4 mb-2 border border-separator bg-surface-secondary">
+          <Card.Body className="gap-1">
+            <Card.Title numberOfLines={1}>{workspace.name}</Card.Title>
+            <Card.Description numberOfLines={2}>{workspace.path}</Card.Description>
+            <HeroText className="text-xs text-muted" numberOfLines={1}>
             {threadListStatus === 'loading'
               ? '正在同步 Codex 原生 threads'
               : threadListError
                 ? threadListError
                 : `${workspaceConversations.length} 个原生 thread`}
-          </Text>
-        </View>
-      </View>
+            </HeroText>
+          </Card.Body>
+        </Card>
 
       {workspaceConversations.length === 0 ? (
         <EmptyState text="还没有对话。点右上角 + 创建一个纯粹的新对话。" />
@@ -4922,20 +4911,12 @@ function ConversationListScreen({
                     {preview}
                   </HeroText>
                   <Chip color={running ? 'success' : 'default'} size="sm" variant={running ? 'primary' : 'secondary'}>
-                    {running ? '运行中' : nowLabel(conversation.updatedAt)}
+                    {statusLabel}
                   </Chip>
                 </View>
                 <HeroText className="mt-1 text-xs text-muted" numberOfLines={1}>
                   {running ? '正在处理当前对话' : nowLabel(conversation.updatedAt)}
                 </HeroText>
-                  </Text>
-                  <Text style={[styles.itemTag, running && styles.itemTagActive]}>
-                    {statusLabel}
-                  </Text>
-                </View>
-                <Text style={styles.itemBody} numberOfLines={1}>
-                  {conversation.threadId ? `thread ${conversation.threadId}` : '正在创建原生 thread'}
-                </Text>
               </View>
             </Button>
           );
@@ -5713,8 +5694,6 @@ function ChatScreen({
         <Pressable style={styles.menuBackdrop} onPress={() => setMenuVisible(false)}>
           <Card className="w-[260px] gap-1 rounded-lg">
             <Card.Title numberOfLines={1}>{workspace.name}</Card.Title>
-          <View style={styles.menuSheet}>
-            <Text style={styles.menuTitle}>{workspace.name}</Text>
             <MenuItem title="Resume Thread" onPress={() => runThreadMenuAction(conversation.id, 'resume')} close={() => setMenuVisible(false)} />
             <MenuItem title="Fork Thread" onPress={() => runThreadMenuAction(conversation.id, 'fork')} close={() => setMenuVisible(false)} />
             <MenuItem title="Compact Thread" onPress={() => runThreadMenuAction(conversation.id, 'compact')} close={() => setMenuVisible(false)} />
@@ -5979,28 +5958,26 @@ function SettingsScreen({
               </View>
               <HeroText className="text-sm font-semibold text-foreground">{latencyLabelOf(connectionHealth.latencyMs)}</HeroText>
             </View>
-            <View className="mt-3 flex-row justify-between gap-3">
-              <HeroText className="text-xs text-muted">WebSocket: {connectionState}</HeroText>
-              <HeroText className="text-xs text-muted">
-            <View style={styles.connectionMetaRow}>
-              <Text style={styles.connectionMeta}>WebSocket: {runtimeStatus.socket}</Text>
-              <Text style={styles.connectionMeta}>Transport: {runtimeStatus.transport.status}</Text>
-            </View>
-            <View style={styles.connectionMetaRow}>
-              <Text style={styles.connectionMeta}>Daemon: {runtimeStatus.daemon}</Text>
-              <Text style={styles.connectionMeta}>Codex: {runtimeStatus.codexAdapter}</Text>
-            </View>
-            <View style={styles.connectionMetaRow}>
-              <Text style={styles.connectionMeta}>Turn: {runtimeStatus.turn}</Text>
-              <Text style={styles.connectionMeta}>
-                {connectionHealth.lastCheckedAt ? `检测: ${nowLabel(connectionHealth.lastCheckedAt)}` : '检测: --'}
-              </HeroText>
+            <View className="mt-3 gap-1">
+              <View className="flex-row justify-between gap-3">
+                <HeroText className="text-xs text-muted">WebSocket: {runtimeStatus.socket}</HeroText>
+                <HeroText className="text-xs text-muted">Transport: {runtimeStatus.transport.status}</HeroText>
+              </View>
+              <View className="flex-row justify-between gap-3">
+                <HeroText className="text-xs text-muted">Daemon: {runtimeStatus.daemon}</HeroText>
+                <HeroText className="text-xs text-muted">Codex: {runtimeStatus.codexAdapter}</HeroText>
+              </View>
+              <View className="flex-row justify-between gap-3">
+                <HeroText className="text-xs text-muted">Turn: {runtimeStatus.turn}</HeroText>
+                <HeroText className="text-xs text-muted">
+                  {connectionHealth.lastCheckedAt ? `检测: ${nowLabel(connectionHealth.lastCheckedAt)}` : '检测: --'}
+                </HeroText>
+              </View>
             </View>
           </Surface>
             {runtimeStatus.transport.error ? (
               <Text style={styles.connectionErrorText} numberOfLines={2}>{runtimeStatus.transport.error}</Text>
             ) : null}
-          </View>
           <Field
             label="Server URL"
             value={settings.serverUrl}
