@@ -40,6 +40,10 @@ npm install
 npm run start
 ```
 
+`npm run start` 会以 LAN 模式启动 Expo，方便同一局域网内的真机从开发机加载应用；如果网络禁止局域网发现，可以改用 `npm run start:tunnel`。只在模拟器或本机浏览器调试时，可以用 `npm run start:localhost`。
+
+`npm run start` starts Expo in LAN mode so physical devices on the same network can load the app from your development machine. If LAN discovery is blocked, use `npm run start:tunnel`. For simulator-only or local-browser development, use `npm run start:localhost`.
+
 也可以直接启动目标平台：
 
 ```bash
@@ -137,6 +141,8 @@ The app persists settings, workspaces, conversations, timeline data, mention his
 ## 连接信息 / Connection Notes
 
 - 默认后端地址：`http://127.0.0.1:7345`
+- 真机调试时不要使用 `127.0.0.1` 连接后端；在 App 设置里改成开发机的局域网地址，例如 `http://192.168.88.240:7345`
+- 后端服务需要监听 `0.0.0.0` 或开发机的局域网地址，并确保 macOS 防火墙允许对应端口（Expo 默认 `8081`，后端默认 `7345`）
 - 默认 tenant：`local`
 - 默认目录：`/home/dev/projects`
 - 默认模型：`gpt-5.5`
@@ -144,6 +150,8 @@ The app persists settings, workspaces, conversations, timeline data, mention his
 - 默认沙盒：`workspace-write`
 
 - Default backend URL: `http://127.0.0.1:7345`
+- For physical device testing, do not use `127.0.0.1` for the backend; set the app to your development machine's LAN address, for example `http://192.168.88.240:7345`
+- The backend must listen on `0.0.0.0` or the development machine's LAN address, and macOS Firewall must allow the relevant ports (Expo defaults to `8081`, backend defaults to `7345`)
 - Default tenant: `local`
 - Default workspace path: `/home/dev/projects`
 - Default model: `gpt-5.5`

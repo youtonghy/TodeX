@@ -58,6 +58,7 @@ import { withUniwind } from 'uniwind';
 
 import {
   ConnectionSettings,
+  CodexNativeThread,
   CodexModelCatalogItem,
   CodexReasoningEffortOption,
   DEFAULT_REASONING_EFFORT_OPTIONS,
@@ -76,12 +77,17 @@ import {
   eventPayloadData,
   extractThreadIdFromEvent,
   inferApprovalResponseType,
+  isThreadNotMaterializedHistoryError,
   normalizeReasoningEffort,
   normalizeThreadId,
   normalizeServerUrl,
   parseCodexModelListResponse,
+  parseCodexNativeThread,
+  parseCodexNativeThreadListResponse,
+  parseCodexNativeThreadReadResponse,
   sandboxPolicyForMode,
   shortJson,
+  type CodexThreadHistoryEntry,
 } from './src/lib/todex';
 import { loadJson, loadSecret, saveJson, saveSecret } from './src/lib/storage';
 import {
@@ -93,6 +99,12 @@ import {
   type PairingQrChunk,
   type TransportCryptoSession,
 } from './src/lib/transportCrypto';
+import {
+  TodeXTransportClient,
+  type TransportStatusSnapshot,
+  cursorFromEvent as transportCursorFromEvent,
+  sessionIdFromEvent as transportSessionIdFromEvent,
+} from './src/lib/transport';
 
 type RootStackParamList = {
   Workspaces: undefined;
@@ -112,6 +124,9 @@ type ConversationRecord = {
   id: string;
   workspaceId: string;
   title: string;
+  preview?: string;
+  nativeStatus?: string;
+  archived?: boolean;
   sessionId: string;
   threadId: string;
   localAdapterState?: LocalAdapterState;
@@ -122,9 +137,32 @@ type ConversationRecord = {
   updatedAt: number;
 };
 
+type PendingThreadList = {
+  workspaceId: string;
+  sessionId: string;
+  requestId: string;
+  timeoutId: ReturnType<typeof setTimeout>;
+};
+
+type PendingThreadAction = {
+  workspaceId: string;
+  conversationId: string;
+  requestId: string;
+  action: 'start' | 'resume' | 'fork' | 'archive' | 'unarchive' | 'rename' | 'rollback' | 'read';
+  timeoutId: ReturnType<typeof setTimeout>;
+  sourceConversationId?: string;
+  title?: string;
+  restoreHistory?: boolean;
+};
+
 type ComposerSelection = TextInputSelectionChangeEventData['selection'];
 
 const DEFAULT_COMPOSER_SELECTION: ComposerSelection = { start: 0, end: 0 };
+const DEFAULT_TRANSPORT_STATUS: TransportStatusSnapshot = {
+  status: 'disabled',
+  clientId: '',
+  error: '',
+};
 
 type PairingChunkCollector = {
   checksum: string;
@@ -202,6 +240,14 @@ type TimelineTarget = {
 
 type ConnectionState = 'idle' | 'connecting' | 'open' | 'closed' | 'error';
 
+type RuntimeStatusState = {
+  socket: ConnectionState;
+  transport: TransportStatusSnapshot;
+  daemon: ConnectionHealth['status'];
+  codexAdapter: LocalAdapterState | 'unknown';
+  turn: 'idle' | 'running';
+};
+
 type ConnectionHealth = {
   status: 'unknown' | 'checking' | 'online' | 'offline';
   latencyMs: number | null;
@@ -224,7 +270,7 @@ function isConversationHighlighted(conversation: ConversationRecord, activeConve
 }
 
 function sessionIdForConversation(workspace: WorkspaceRecord, conversation: ConversationRecord): string {
-  return conversation.sessionId || workspace.sessionId || createSessionId(workspace.name);
+  return workspace.sessionId || conversation.sessionId || createSessionId(workspace.name);
 }
 
 function commandWorkspaceForConversation(workspace: WorkspaceRecord, conversation: ConversationRecord): WorkspaceRecord {
@@ -754,6 +800,7 @@ const SLASH_COMMANDS: SlashCommand[] = [
   { command: '/new', title: 'New', description: 'start a new chat during a conversation' },
   { command: '/resume', title: 'Resume', description: 'resume a saved chat' },
   { command: '/fork', title: 'Fork', description: 'fork the current chat' },
+  { command: '/rollback', title: 'Rollback', description: 'drop recent turns from native thread context' },
   { command: '/init', title: 'Init', description: 'create an AGENTS.md file with instructions for Codex' },
   { command: '/compact', title: 'Compact', description: 'summarize conversation to prevent hitting the context limit' },
   { command: '/plan', title: 'Plan', description: 'switch to Plan mode' },
@@ -995,6 +1042,55 @@ function compactGoalLabel(conversation: ConversationRecord): string {
   return `Goal · ${conversation.goalStatus}`;
 }
 
+function conversationTitleFromNativeThread(thread: CodexNativeThread): string {
+  return thread.name || thread.preview || thread.title || thread.id;
+}
+
+function conversationPatchFromNativeThread(thread: CodexNativeThread): Partial<ConversationRecord> {
+  return {
+    title: conversationTitleFromNativeThread(thread),
+    preview: thread.preview,
+    nativeStatus: thread.status,
+    archived: thread.archived,
+    threadId: thread.id,
+    updatedAt: thread.updatedAt || Date.now(),
+    createdAt: thread.createdAt || Date.now(),
+  };
+}
+
+function nativeThreadPatchFromNotification(eventType: string, data: Record<string, unknown>): Partial<ConversationRecord> | null {
+  const threadId = threadIdFromEventData({ type: eventType, payload: data } as ServerEvent, data);
+  if (!threadId) {
+    return null;
+  }
+  if (eventType === 'codex.thread/archived' || eventType === 'codex.thread.archived' || data.method === 'thread/archived') {
+    return { archived: true, nativeStatus: 'archived', updatedAt: Date.now() };
+  }
+  if (eventType === 'codex.thread/unarchived' || eventType === 'codex.thread.unarchived' || data.method === 'thread/unarchived') {
+    return { archived: false, nativeStatus: '', updatedAt: Date.now() };
+  }
+  if (eventType === 'codex.thread/closed' || eventType === 'codex.thread.closed' || data.method === 'thread/closed') {
+    return { nativeStatus: 'closed', updatedAt: Date.now() };
+  }
+  if (eventType === 'codex.thread/status/changed' || eventType === 'codex.thread.status.changed' || data.method === 'thread/status/changed') {
+    const status = typeof data.status === 'string'
+      ? data.status
+      : data.status && typeof data.status === 'object' && !Array.isArray(data.status)
+        ? String((data.status as Record<string, unknown>).type ?? (data.status as Record<string, unknown>).state ?? '')
+        : '';
+    return { nativeStatus: status, updatedAt: Date.now() };
+  }
+  if (eventType === 'codex.thread/name/updated' || eventType === 'codex.thread.name.updated' || data.method === 'thread/name/updated') {
+    const title = typeof data.threadName === 'string'
+      ? data.threadName
+      : typeof data.thread_name === 'string'
+        ? data.thread_name
+        : '';
+    return title ? { title, updatedAt: Date.now() } : { title: '', updatedAt: Date.now() };
+  }
+  return null;
+}
+
 function goalPatchFromEventData(data: Record<string, unknown>): Pick<ConversationRecord, 'goalStatus' | 'goalObjective'> | null {
   const result = data.result;
   const resultObject = result && typeof result === 'object' && !Array.isArray(result)
@@ -1225,31 +1321,22 @@ function objectPayloadOf(event: ServerEvent): Record<string, unknown> {
 }
 
 function sessionIdFromEvent(event: ServerEvent, data = eventPayloadData(event)): string {
-  const payload = objectPayloadOf(event);
+  const direct = transportSessionIdFromEvent(event);
+  if (direct) {
+    return direct;
+  }
   const candidates = [
-    event.codex_session_id,
     data.codexSessionId,
     data.codex_session_id,
     data.sessionId,
     data.session_id,
-    payload.codexSessionId,
-    payload.codex_session_id,
-    payload.sessionId,
-    payload.session_id,
   ];
   const value = candidates.find((candidate) => typeof candidate === 'string' && candidate.trim());
   return typeof value === 'string' ? value : '';
 }
 
 function cursorFromEvent(event: ServerEvent): number | null {
-  if (typeof event.cursor === 'number' && Number.isFinite(event.cursor)) {
-    return event.cursor;
-  }
-  if (typeof event.cursor === 'string') {
-    const parsed = Number(event.cursor);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
+  return transportCursorFromEvent(event);
 }
 
 function threadIdFromEventData(event: ServerEvent, data = eventPayloadData(event)): string {
@@ -1429,6 +1516,18 @@ function makeOutgoingEntry(
   };
 }
 
+function timelineEntryFromNativeHistoryEntry(
+  entry: CodexThreadHistoryEntry,
+  workspaceId: string,
+  conversationId: string,
+): TimelineEntry {
+  return {
+    ...entry,
+    workspaceId,
+    conversationId,
+  };
+}
+
 function isVisibleConversationEntry(entry: TimelineEntry): boolean {
   if (entry.kind === 'outgoing' || entry.kind === 'incoming') {
     return true;
@@ -1509,6 +1608,9 @@ function createDefaultConversation(workspace: WorkspaceRecord): ConversationReco
     id: createRequestId('conversation'),
     workspaceId: workspace.id,
     title: '默认对话',
+    preview: '',
+    nativeStatus: '',
+    archived: false,
     sessionId: workspace.sessionId || createSessionId(workspace.name),
     threadId: '',
     localAdapterState: 'idle',
@@ -1525,6 +1627,9 @@ function forkConversationRecord(conversation: ConversationRecord, title?: string
     ...conversation,
     id: createRequestId('conversation'),
     title: title?.trim() || `${conversation.title || '新对话'} fork`,
+    preview: '',
+    nativeStatus: '',
+    archived: false,
     sessionId: createSessionId(`${conversation.title || 'conversation'}_fork`),
     threadId: '',
     localAdapterState: 'idle',
@@ -1542,16 +1647,21 @@ export default function App() {
   const conversationsRef = useRef<ConversationRecord[]>([]);
   const pendingLocalStartsRef = useRef(new Map<string, PendingLocalStart>());
   const pendingThreadStartsRef = useRef(new Map<string, PendingThreadStart>());
+  const pendingThreadListsRef = useRef(new Map<string, PendingThreadList>());
+  const pendingThreadActionsRef = useRef(new Map<string, PendingThreadAction>());
   const pendingModelListRef = useRef<PendingModelList | null>(null);
   const pendingJsonSavesRef = useRef(new Map<string, PendingJsonSave>());
   const pendingServerEventsRef = useRef<ServerEvent[]>([]);
   const pendingServerEventFrameRef = useRef<number | null>(null);
+  const transportClientRef = useRef<TodeXTransportClient | null>(null);
   const autoConnectAttemptedRef = useRef(false);
   const attachedSessionIdsRef = useRef(new Set<string>());
   const sessionCursorsRef = useRef(new Map<string, number>());
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const manualDisconnectRef = useRef(false);
   const healthProbeSeqRef = useRef(0);
+  const loadedNativeThreadHistoryRef = useRef(new Map<string, number>());
+  const unmaterializedNativeThreadIdsRef = useRef(new Set<string>());
 
   const [hydrated, setHydrated] = useState(false);
   const [autoConnectEnabled, setAutoConnectEnabled] = useState(false);
@@ -1562,6 +1672,7 @@ export default function App() {
   const [activeConversationId, setActiveConversationId] = useState('');
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
   const [connectionHealth, setConnectionHealth] = useState<ConnectionHealth>(defaultConnectionHealth);
+  const [transportStatus, setTransportStatus] = useState<TransportStatusSnapshot>(DEFAULT_TRANSPORT_STATUS);
   const [remoteModelCatalog, setRemoteModelCatalog] = useState<CodexModelCatalogItem[]>([]);
   const [modelCatalogStatus, setModelCatalogStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [modelCatalogError, setModelCatalogError] = useState('');
@@ -1579,6 +1690,8 @@ export default function App() {
   const [modelPickerPrompt, setModelPickerPrompt] = useState<ModelPickerPromptState | null>(null);
   const [turnIds, setTurnIds] = useState<Record<string, string>>({});
   const [thinkingConversations, setThinkingConversations] = useState<Record<string, boolean>>({});
+  const [threadListStatusByWorkspace, setThreadListStatusByWorkspace] = useState<Record<string, 'idle' | 'loading' | 'ready' | 'error'>>({});
+  const [threadListErrorByWorkspace, setThreadListErrorByWorkspace] = useState<Record<string, string>>({});
   const queuedChatDraftsRef = useRef<Record<string, QueuedChatSubmission[]>>({});
   const queuedChatDispatchingRef = useRef(new Set<string>());
   const sendQueuedChatDraftRef = useRef<(submission: QueuedChatSubmission, conversationId: string) => Promise<boolean>>(async () => false);
@@ -1708,6 +1821,10 @@ export default function App() {
     scheduleJsonSave(SESSION_CURSORS_STORAGE_KEY, cursors, SESSION_CURSOR_SAVE_DEBOUNCE_MS);
   }, [scheduleJsonSave]);
 
+  const getSessionCursorSnapshot = useCallback(() => {
+    return Object.fromEntries(sessionCursorsRef.current.entries());
+  }, []);
+
   const closeSocket = useCallback((manual = true) => {
     if (manual) {
       manualDisconnectRef.current = true;
@@ -1727,6 +1844,7 @@ export default function App() {
       socketRef.current = null;
     }
     socketCryptoRef.current = null;
+    transportClientRef.current?.detach();
     attachedSessionIdsRef.current.clear();
     pendingServerEventsRef.current = [];
     if (pendingServerEventFrameRef.current !== null) {
@@ -1817,6 +1935,9 @@ export default function App() {
                   ...conversation,
                   sessionId,
                   threadId,
+                  preview: conversation.preview || '',
+                  nativeStatus: conversation.nativeStatus || '',
+                  archived: conversation.archived === true,
                   localAdapterState: 'idle' as LocalAdapterState,
                   mode: (conversation.mode === 'plan' ? 'plan' : 'implement') as ConversationRecord['mode'],
                   goalStatus: conversation.goalStatus || '',
@@ -1923,6 +2044,14 @@ export default function App() {
     [activeConversationId, conversations],
   );
 
+  const runtimeStatus = useMemo<RuntimeStatusState>(() => ({
+    socket: connectionState,
+    transport: transportStatus,
+    daemon: connectionHealth.status,
+    codexAdapter: activeConversation?.localAdapterState ?? activeWorkspace?.localAdapterState ?? 'unknown',
+    turn: activeTurnId ? 'running' : 'idle',
+  }), [activeConversation?.localAdapterState, activeTurnId, activeWorkspace?.localAdapterState, connectionHealth.status, connectionState, transportStatus]);
+
   const getConversationContext = useCallback((conversationId = activeConversationRef.current): ConversationContext | null => {
     const conversation = conversationsRef.current.find((item) => item.id === conversationId) ?? null;
     const workspace = conversation
@@ -1984,6 +2113,52 @@ export default function App() {
     );
   }, []);
 
+  const upsertNativeThreads = useCallback((workspaceId: string, sessionId: string, threads: CodexNativeThread[]) => {
+    if (!threads.length) {
+      return;
+    }
+    setConversations((current) => {
+      const next = [...current];
+      for (const thread of threads) {
+        const threadId = normalizeThreadId(thread.id);
+        if (!threadId) {
+          continue;
+        }
+        const existingIndex = next.findIndex(
+          (conversation) =>
+            conversation.workspaceId === workspaceId &&
+            normalizeThreadId(conversation.threadId) === threadId,
+        );
+        const patch = conversationPatchFromNativeThread(thread);
+        if (existingIndex >= 0) {
+          next[existingIndex] = {
+            ...next[existingIndex],
+            ...patch,
+            sessionId: next[existingIndex].sessionId || sessionId,
+          };
+          continue;
+        }
+        next.push({
+          id: createRequestId('thread'),
+          workspaceId,
+          title: patch.title || threadId,
+          preview: patch.preview || '',
+          nativeStatus: patch.nativeStatus || '',
+          archived: patch.archived === true,
+          sessionId,
+          threadId,
+          localAdapterState: 'idle',
+          mode: 'implement',
+          goalStatus: '',
+          goalObjective: '',
+          createdAt: patch.createdAt || Date.now(),
+          updatedAt: patch.updatedAt || Date.now(),
+        });
+      }
+      return next.sort((a, b) => b.updatedAt - a.updatedAt);
+    });
+  }, []);
+
   const resetWorkspaceSession = useCallback(
     (workspace: WorkspaceRecord) => {
       updateWorkspace(workspace.id, {
@@ -2026,8 +2201,11 @@ export default function App() {
     const sessionId = sessionIdFromEvent(event, data);
     const threadId = threadIdFromEventData(event, data);
     const conversations = conversationsRef.current;
+    const byThread = threadId
+      ? conversations.find((conversation) => normalizeThreadId(conversation.threadId) === threadId)
+      : null;
     const bySession = sessionId ? conversations.find((conversation) => conversation.sessionId === sessionId) : null;
-    if (sessionId && !bySession) {
+    if (sessionId && !bySession && !byThread) {
       return {
         workspaceId: '',
         conversationId: '',
@@ -2036,10 +2214,7 @@ export default function App() {
         threadId,
       };
     }
-    const byThread = !sessionId && threadId
-      ? conversations.find((conversation) => normalizeThreadId(conversation.threadId) === threadId)
-      : null;
-    const conversation = bySession ?? byThread ?? conversations.find((item) => item.id === activeConversationRef.current) ?? null;
+    const conversation = byThread ?? bySession ?? conversations.find((item) => item.id === activeConversationRef.current) ?? null;
 
     return {
       workspaceId: conversation?.workspaceId ?? activeWorkspaceRef.current,
@@ -2096,6 +2271,35 @@ export default function App() {
     },
     [],
   );
+
+  const finishPendingThreadList = useCallback((pending: PendingThreadList, errorMessage = '') => {
+    clearTimeout(pending.timeoutId);
+    pendingThreadListsRef.current.delete(pending.workspaceId);
+    setThreadListStatusByWorkspace((current) => ({
+      ...current,
+      [pending.workspaceId]: errorMessage ? 'error' : 'ready',
+    }));
+    setThreadListErrorByWorkspace((current) => ({
+      ...current,
+      [pending.workspaceId]: errorMessage,
+    }));
+    if (errorMessage) {
+      setLastError(errorMessage);
+    }
+  }, []);
+
+  const finishPendingThreadAction = useCallback((pending: PendingThreadAction, errorMessage = '') => {
+    clearTimeout(pending.timeoutId);
+    pendingThreadActionsRef.current.delete(pending.requestId);
+    if (errorMessage) {
+      if (pending.action === 'fork' && pending.sourceConversationId && pending.conversationId !== pending.sourceConversationId) {
+        setConversations((current) => current.filter((conversation) => conversation.id !== pending.conversationId));
+      }
+      setLastError(errorMessage);
+      return;
+    }
+    setLastError('');
+  }, []);
 
   const findPendingLocalStart = useCallback((event: ServerEvent, data: Record<string, unknown>) => {
     const pendingStarts = [...pendingLocalStartsRef.current.values()];
@@ -2158,6 +2362,7 @@ export default function App() {
           return;
         }
         sessionCursorsRef.current.set(sessionId, cursor);
+        transportClientRef.current?.ack(event);
         persistSessionCursors();
       }
       setEvents((current) => [event, ...current].slice(0, MAX_EVENTS));
@@ -2176,6 +2381,14 @@ export default function App() {
       ) {
         updateConversation(target.conversation.id, goalPatch);
       }
+      const threadPatch = nativeThreadPatchFromNotification(event.type, data);
+      const threadPatchId = threadPatch ? threadIdFromEventData(event, data) : '';
+      if (threadPatch && threadPatchId) {
+        const existing = conversationsRef.current.find((conversation) => normalizeThreadId(conversation.threadId) === threadPatchId);
+        if (existing) {
+          updateConversation(existing.id, threadPatch);
+        }
+      }
       const chatEntry = classifyChatEvent(event, target.workspaceId, target.conversationId);
       if (chatEntry) {
         upsertChatTimeline(chatEntry, event.type === 'codex.item.agentMessage.delta');
@@ -2183,11 +2396,17 @@ export default function App() {
           setConversationThinking(targetConversationId, false);
         }
       }
+      const protocolError = extractProtocolError(event.type, data);
+      const pendingLocalStartForError = event.type === 'codex.control.error'
+        ? findPendingLocalStart(event, data)
+        : null;
+      const suppressProgressError =
+        Boolean(pendingLocalStartForError) ||
+        (protocolError ? isThreadNotMaterializedHistoryError(protocolError) : false);
       const progressEntry = classifyProgressEvent(event, target.workspaceId, target.conversationId);
-      if (progressEntry) {
+      if (progressEntry && !suppressProgressError) {
         upsertChatTimeline(progressEntry, false);
       }
-      const protocolError = extractProtocolError(event.type, data);
       if (event.type === 'codex.control.request.accepted' && data.operation === 'codex.local.turn') {
         setConversationThinking(targetConversationId, true);
       }
@@ -2215,6 +2434,107 @@ export default function App() {
           setModelCatalogError(localTurnErrorMessage(protocolError || 'model/list 请求失败'));
           clearTimeout(pendingModelList.timeoutId);
           pendingModelListRef.current = null;
+        }
+      }
+      const maybeThreadRequestId = typeof maybeModelListRequestId === 'string' ? maybeModelListRequestId : '';
+      const pendingThreadList = maybeThreadRequestId
+        ? [...pendingThreadListsRef.current.values()].find((item) => item.requestId === maybeThreadRequestId)
+        : null;
+      if (pendingThreadList) {
+        if (event.type === 'codex.control.response') {
+          const threads = parseCodexNativeThreadListResponse(data.result ?? data);
+          upsertNativeThreads(pendingThreadList.workspaceId, pendingThreadList.sessionId, threads);
+          finishPendingThreadList(pendingThreadList);
+        } else if (protocolError || event.type === 'codex.control.error') {
+          finishPendingThreadList(pendingThreadList, localTurnErrorMessage(protocolError || 'thread/list 请求失败'));
+        }
+      }
+      const pendingThreadAction = maybeThreadRequestId
+        ? pendingThreadActionsRef.current.get(maybeThreadRequestId) ?? null
+        : null;
+      if (pendingThreadAction) {
+        if (event.type === 'codex.control.response') {
+          const nativeThread = parseCodexNativeThread(data.result ?? data);
+          const nativeThreadRead = pendingThreadAction.restoreHistory
+            ? parseCodexNativeThreadReadResponse(data.result ?? data)
+            : null;
+          if (nativeThread) {
+            if (pendingThreadAction.action === 'fork') {
+              const source = conversationsRef.current.find((item) => item.id === pendingThreadAction.sourceConversationId);
+              setConversations((current) =>
+                [
+                  {
+                    ...(source ?? {
+                      id: pendingThreadAction.conversationId,
+                      workspaceId: pendingThreadAction.workspaceId,
+                      title: conversationTitleFromNativeThread(nativeThread),
+                      sessionId: sessionIdFromEvent(event, data),
+                      threadId: nativeThread.id,
+                      localAdapterState: 'idle' as LocalAdapterState,
+                      mode: 'implement' as ConversationRecord['mode'],
+                      goalStatus: '',
+                      goalObjective: '',
+                      createdAt: nativeThread.createdAt || Date.now(),
+                      updatedAt: nativeThread.updatedAt || Date.now(),
+                    }),
+                    id: pendingThreadAction.conversationId,
+                    workspaceId: pendingThreadAction.workspaceId,
+                    sessionId: source?.sessionId || sessionIdFromEvent(event, data),
+                    localAdapterState: 'idle' as LocalAdapterState,
+                    mode: source?.mode ?? 'implement',
+                    goalStatus: '',
+                    goalObjective: '',
+                    ...conversationPatchFromNativeThread(nativeThread),
+                  },
+                  ...current.filter((conversation) => conversation.id !== pendingThreadAction.conversationId),
+                ].sort((a, b) => b.updatedAt - a.updatedAt),
+              );
+              setActiveWorkspaceId(pendingThreadAction.workspaceId);
+              setActiveConversationId(pendingThreadAction.conversationId);
+            } else {
+              upsertNativeThreads(
+                pendingThreadAction.workspaceId,
+                sessionIdFromEvent(event, data) || conversationsRef.current.find((item) => item.id === pendingThreadAction.conversationId)?.sessionId || '',
+                [nativeThread],
+              );
+            }
+          }
+          if (nativeThreadRead) {
+            if (nativeThreadRead.history.length > 0) {
+              unmaterializedNativeThreadIdsRef.current.delete(nativeThreadRead.thread.id);
+            }
+            const restored = nativeThreadRead.history
+              .map((entry) =>
+                timelineEntryFromNativeHistoryEntry(
+                  entry,
+                  pendingThreadAction.workspaceId,
+                  pendingThreadAction.conversationId,
+                ),
+              )
+              .reverse();
+            setTimeline((current) => {
+              const remaining = current.filter((entry) => entry.conversationId !== pendingThreadAction.conversationId);
+              return [...restored, ...remaining].slice(0, MAX_TIMELINE_ITEMS);
+            });
+            loadedNativeThreadHistoryRef.current.set(
+              nativeThreadRead.thread.id,
+              nativeThreadRead.thread.updatedAt,
+            );
+          }
+          if (pendingThreadAction.action === 'archive') {
+            updateConversation(pendingThreadAction.conversationId, { archived: true, nativeStatus: 'archived' });
+          } else if (pendingThreadAction.action === 'unarchive') {
+            updateConversation(pendingThreadAction.conversationId, { archived: false });
+          } else if (pendingThreadAction.action === 'rename' && pendingThreadAction.title) {
+            updateConversation(pendingThreadAction.conversationId, { title: pendingThreadAction.title });
+          }
+          finishPendingThreadAction(pendingThreadAction);
+        } else if (protocolError || event.type === 'codex.control.error') {
+          if (pendingThreadAction.restoreHistory && protocolError && isThreadNotMaterializedHistoryError(protocolError)) {
+            finishPendingThreadAction(pendingThreadAction);
+          } else {
+            finishPendingThreadAction(pendingThreadAction, localTurnErrorMessage(protocolError || `${pendingThreadAction.action} 请求失败`));
+          }
         }
       }
       const turnId = turnIdFromEventData(data);
@@ -2277,7 +2597,7 @@ export default function App() {
           settlePendingLocalStart(pending);
         }
       } else if (event.type === 'codex.control.error') {
-        const pending = findPendingLocalStart(event, data);
+        const pending = pendingLocalStartForError ?? findPendingLocalStart(event, data);
         if (pending) {
           settlePendingLocalStart(pending, protocolError || '本地会话启动失败');
         }
@@ -2347,11 +2667,11 @@ export default function App() {
         }
         setConversationThinking(conversation?.id ?? targetConversationId, false);
       }
-      if (protocolError && !isLocalAdapterAlreadyRunning(protocolError)) {
+      if (protocolError && !isLocalAdapterAlreadyRunning(protocolError) && !isThreadNotMaterializedHistoryError(protocolError)) {
         setLastError(localTurnErrorMessage(protocolError));
       }
     },
-    [appendTimeline, findPendingLocalStart, persistSessionCursors, resetWorkspaceSession, resolveTimelineTarget, settlePendingLocalStart, settlePendingThreadStart, setConversationThinking, setConversationTurnId, updateConversation, upsertChatTimeline],
+    [appendTimeline, findPendingLocalStart, finishPendingThreadAction, finishPendingThreadList, persistSessionCursors, resetWorkspaceSession, resolveTimelineTarget, settlePendingLocalStart, settlePendingThreadStart, setConversationThinking, setConversationTurnId, updateConversation, upsertChatTimeline, upsertNativeThreads],
   );
 
   const scheduleServerEventDrain = useCallback(() => {
@@ -2491,6 +2811,12 @@ export default function App() {
 
       socket.onopen = () => {
         attachedSessionIdsRef.current.clear();
+        const transport = new TodeXTransportClient({
+          loadSessionCursors: getSessionCursorSnapshot,
+          onStatus: setTransportStatus,
+        });
+        transportClientRef.current = transport;
+        transport.attach(socket, (text) => socketCryptoRef.current?.encryptClientText(text) ?? text);
         setConnectionState('open');
         void checkConnectionHealth();
         void refreshServerVersion();
@@ -2499,8 +2825,9 @@ export default function App() {
       socket.onmessage = (event) => {
         try {
           const text = socketCryptoRef.current?.decryptServerText(String(event.data)) ?? String(event.data);
-          const data = JSON.parse(text) as ServerEvent;
-          enqueueServerEvent(data);
+          const transport = transportClientRef.current;
+          const events = transport ? transport.decode(text) : [JSON.parse(text) as ServerEvent];
+          events.forEach(enqueueServerEvent);
         } catch (error) {
           setLastError(error instanceof Error ? error.message : 'failed to parse websocket message');
         }
@@ -2513,14 +2840,17 @@ export default function App() {
 
       socket.onclose = () => {
         setConnectionState((current) => (current === 'open' || current === 'connecting' ? 'closed' : current));
-        socketCryptoRef.current = null;
+        if (socketRef.current === socket) {
+          socketCryptoRef.current = null;
+          transportClientRef.current?.detach();
+        }
       };
     } catch (error) {
       setConnectionState('error');
       socketCryptoRef.current = null;
       setLastError(error instanceof Error ? error.message : 'failed to connect');
     }
-  }, [checkConnectionHealth, closeSocket, enqueueServerEvent, pushSystem, refreshServerVersion, settings]);
+  }, [checkConnectionHealth, closeSocket, enqueueServerEvent, getSessionCursorSnapshot, pushSystem, refreshServerVersion, settings]);
 
   useEffect(() => {
     if (!hydrated || !autoConnectEnabled || manualDisconnectRef.current) {
@@ -2568,9 +2898,11 @@ export default function App() {
         return false;
       }
 
-      const message = { id: requestId, type, payload };
-      const json = JSON.stringify(message);
-      socket.send(socketCryptoRef.current?.encryptClientText(json) ?? json);
+      const message = transportClientRef.current?.send(type, payload, requestId);
+      if (!message) {
+        setLastError('请先在设置里连接后端。');
+        return false;
+      }
       if (type === 'codex.local.turn') {
         appendTimeline(makeOutgoingEntry(
           message,
@@ -2690,33 +3022,6 @@ export default function App() {
     setLastError('');
   }, []);
 
-  const createConversation = useCallback((workspaceId: string) => {
-    const workspace = workspaces.find((item) => item.id === workspaceId);
-    if (!workspace) {
-      Alert.alert('未找到工作区', '请返回后重新选择工作区。');
-      return null;
-    }
-
-    const count = conversations.filter((conversation) => conversation.workspaceId === workspaceId).length;
-    const next: ConversationRecord = {
-      id: createRequestId('conversation'),
-      workspaceId,
-      title: '',
-      sessionId: createSessionId(`${workspace.name}_${count + 1}`),
-      threadId: '',
-      localAdapterState: 'idle',
-      mode: 'implement',
-      goalStatus: '',
-      goalObjective: '',
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    };
-    setConversations((current) => [next, ...current]);
-    setActiveWorkspaceId(workspaceId);
-    setActiveConversationId(next.id);
-    return next;
-  }, [conversations, workspaces]);
-
   const removeWorkspace = useCallback(
     (workspaceId: string) => {
       const removedConversationIds = conversations
@@ -2788,52 +3093,6 @@ export default function App() {
     return { workspace: nextWorkspace, conversation: nextConversations[0] ?? null };
   }, [conversations, workspaces]);
 
-  const renameConversation = useCallback((conversationId: string, title: string) => {
-    const nextTitle = title.trim();
-    if (!nextTitle) {
-      Alert.alert('标题不能为空', '请输入新的对话标题。');
-      return;
-    }
-    updateConversation(conversationId, { title: nextTitle });
-  }, [updateConversation]);
-
-  const forkConversation = useCallback((conversationId: string) => {
-    const conversation = conversations.find((item) => item.id === conversationId);
-    if (!conversation) {
-      Alert.alert('未找到对话', '请返回后重新选择对话。');
-      return null;
-    }
-    const nextConversation = forkConversationRecord(conversation);
-    setConversations((current) => [nextConversation, ...current]);
-    setActiveWorkspaceId(nextConversation.workspaceId);
-    setActiveConversationId(nextConversation.id);
-    return nextConversation;
-  }, [conversations]);
-
-  const removeConversation = useCallback((conversationId: string) => {
-    const conversation = conversations.find((item) => item.id === conversationId);
-    if (!conversation) {
-      return;
-    }
-    const workspaceConversations = conversations.filter((item) => item.workspaceId === conversation.workspaceId);
-    setConversations((current) => current.filter((item) => item.id !== conversationId));
-    setTimeline((current) => current.filter((entry) => entry.conversationId !== conversationId));
-    const pruneConversationState = <T,>(current: Record<string, T>) => {
-      const next = { ...current };
-      delete next[conversationId];
-      return next;
-    };
-    setChatDrafts(pruneConversationState);
-    setQueuedChatDrafts(pruneConversationState);
-    setComposerSelections(pruneConversationState);
-    setTurnIds(pruneConversationState);
-    setThinkingConversations(pruneConversationState);
-    if (activeConversationId === conversationId) {
-      const next = workspaceConversations.find((item) => item.id !== conversationId);
-      setActiveConversationId(next?.id ?? '');
-    }
-  }, [activeConversationId, conversations]);
-
   const sendWorkspaceCommand = useCallback(
     (workspace: WorkspaceRecord, type: string, extra: Record<string, unknown> = {}, conversation?: ConversationRecord | null) => {
       const sessionId = conversation ? sessionIdForConversation(workspace, conversation) : workspace.sessionId;
@@ -2855,6 +3114,24 @@ export default function App() {
       replayLimit: RECONNECT_REPLAY_LIMIT,
     }, conversation);
   }, [sendWorkspaceCommand]);
+
+  const sendLocalMethodRequest = useCallback((
+    workspace: WorkspaceRecord,
+    conversation: ConversationRecord,
+    method: string,
+    params: Record<string, unknown>,
+    requestId = createRequestId('local-method'),
+  ) => {
+    return sendProtocolMessage('codex.local.request', {
+      codexSessionId: sessionIdForConversation(workspace, conversation),
+      tenantId: workspace.tenantId,
+      method,
+      params,
+    }, requestId, {
+      workspaceId: workspace.id,
+      conversationId: conversation.id,
+    });
+  }, [sendProtocolMessage]);
 
   useEffect(() => {
     if (connectionState !== 'open' || !activeWorkspace || !activeConversation?.sessionId) {
@@ -2950,6 +3227,13 @@ export default function App() {
       if (!forceNewThread && currentThreadId) {
         return Promise.resolve(currentThreadId);
       }
+      if (forceNewThread) {
+        setConversations((current) =>
+          current.map((item) =>
+            item.id === conversation.id ? { ...item, threadId: '', updatedAt: Date.now() } : item,
+          ),
+        );
+      }
 
       const existingPending = pendingThreadStartsRef.current.get(conversation.id);
       if (existingPending) {
@@ -2992,7 +3276,6 @@ export default function App() {
           tenantId: workspace.tenantId,
           method: 'thread/start',
           params: {
-            ephemeral: true,
             cwd: workspace.path,
             model: workspace.model || settings.defaultModel || undefined,
             reasoningEffort: workspace.reasoningEffort || settings.defaultReasoningEffort || undefined,
@@ -3013,6 +3296,272 @@ export default function App() {
     },
     [sendProtocolMessage, settings.approvalPolicy, settings.defaultModel, settings.defaultReasoningEffort, settings.sandboxMode],
   );
+
+  const requestNativeThreadList = useCallback(async (workspaceId: string, includeArchived = false) => {
+    const workspace = workspacesRef.current.find((item) => item.id === workspaceId);
+    const conversation =
+      conversationsRef.current.find((item) => item.workspaceId === workspaceId) ??
+      (workspace ? createDefaultConversation(workspace) : null);
+    if (!workspace || !conversation) {
+      setLastError('未找到工作区，无法刷新 Codex threads。');
+      return false;
+    }
+    try {
+      await startLocalAdapter(workspace, conversation);
+    } catch (error) {
+      setLastError(error instanceof Error ? localTurnErrorMessage(error.message) : '本地会话未启动');
+      return false;
+    }
+    const existing = pendingThreadListsRef.current.get(workspaceId);
+    if (existing) {
+      clearTimeout(existing.timeoutId);
+    }
+    const requestId = createRequestId('thread-list');
+    const sessionId = sessionIdForConversation(workspace, conversation);
+    const timeoutId = setTimeout(() => {
+      const pending = pendingThreadListsRef.current.get(workspaceId);
+      if (pending?.requestId !== requestId) {
+        return;
+      }
+      finishPendingThreadList(pending, 'thread/list 请求超时');
+    }, 10000);
+    pendingThreadListsRef.current.set(workspaceId, {
+      workspaceId,
+      sessionId,
+      requestId,
+      timeoutId,
+    });
+    setThreadListStatusByWorkspace((current) => ({ ...current, [workspaceId]: 'loading' }));
+    setThreadListErrorByWorkspace((current) => ({ ...current, [workspaceId]: '' }));
+    const sent = sendLocalMethodRequest(workspace, conversation, 'thread/list', {
+      cwd: workspace.path,
+      archived: includeArchived ? true : false,
+      limit: 100,
+      sortKey: 'updated_at',
+      sortDirection: 'desc',
+      sourceKinds: ['cli', 'vscode', 'appServer'],
+    }, requestId);
+    if (!sent) {
+      finishPendingThreadList(pendingThreadListsRef.current.get(workspaceId)!, '请先在设置里连接后端。');
+      return false;
+    }
+    return true;
+  }, [finishPendingThreadList, sendLocalMethodRequest, startLocalAdapter]);
+
+  const sendNativeThreadAction = useCallback(async (
+    conversationId: string,
+    action: PendingThreadAction['action'],
+    method: string,
+    paramsBuilder: (threadId: string, workspace: WorkspaceRecord, conversation: ConversationRecord) => Record<string, unknown>,
+    options: { title?: string; selectResult?: boolean; resultConversationId?: string; restoreHistory?: boolean } = {},
+  ) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择一个 Codex thread。');
+      return false;
+    }
+    const { workspace, conversation } = context;
+    try {
+      await startLocalAdapter(workspace, conversation);
+    } catch (error) {
+      setLastError(error instanceof Error ? localTurnErrorMessage(error.message) : '本地会话未启动');
+      return false;
+    }
+    const threadId = normalizeThreadId(conversation.threadId);
+    if (!threadId) {
+      setLastError('当前记录还没有原生 thread id。');
+      return false;
+    }
+    const requestId = createRequestId(`thread-${action}`);
+    const timeoutId = setTimeout(() => {
+      const pending = pendingThreadActionsRef.current.get(requestId);
+      if (!pending) {
+        return;
+      }
+      finishPendingThreadAction(pending, `${method} 请求超时`);
+    }, 10000);
+    pendingThreadActionsRef.current.set(requestId, {
+      workspaceId: workspace.id,
+      conversationId: options.resultConversationId ?? (options.selectResult && action === 'fork' ? createRequestId('thread') : conversation.id),
+      requestId,
+      action,
+      timeoutId,
+      sourceConversationId: conversation.id,
+      title: options.title,
+      restoreHistory: options.restoreHistory,
+    });
+    const sent = sendLocalMethodRequest(workspace, conversation, method, paramsBuilder(threadId, workspace, conversation), requestId);
+    if (!sent) {
+      const pending = pendingThreadActionsRef.current.get(requestId);
+      if (pending) {
+        finishPendingThreadAction(pending, '请先在设置里连接后端。');
+      }
+      return false;
+    }
+    return true;
+  }, [finishPendingThreadAction, getConversationContext, sendLocalMethodRequest, startLocalAdapter]);
+
+  const loadNativeThreadHistory = useCallback((conversationId: string, force = false) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      return false;
+    }
+    const threadId = normalizeThreadId(context.conversation.threadId);
+    if (!threadId) {
+      return false;
+    }
+    const loadedAt = loadedNativeThreadHistoryRef.current.get(threadId) ?? 0;
+    if (!force && loadedAt >= context.conversation.updatedAt) {
+      return true;
+    }
+    if (!force && unmaterializedNativeThreadIdsRef.current.has(threadId)) {
+      return true;
+    }
+    void sendNativeThreadAction(
+      conversationId,
+      'read',
+      'thread/read',
+      (currentThreadId) => ({ threadId: currentThreadId, includeTurns: true }),
+      { restoreHistory: true },
+    );
+    return true;
+  }, [getConversationContext, sendNativeThreadAction]);
+
+  useEffect(() => {
+    if (connectionState !== 'open' || !activeConversation?.threadId) {
+      return;
+    }
+    loadNativeThreadHistory(activeConversation.id);
+  }, [activeConversation?.id, activeConversation?.threadId, activeConversation?.updatedAt, connectionState, loadNativeThreadHistory]);
+
+  const createConversation = useCallback((workspaceId: string) => {
+    const workspace = workspacesRef.current.find((item) => item.id === workspaceId);
+    if (!workspace) {
+      Alert.alert('未找到工作区', '请返回后重新选择工作区。');
+      return null;
+    }
+
+    const nextConversation = createDefaultConversation(workspace);
+    setConversations((current) => [nextConversation, ...current]);
+    setActiveWorkspaceId(workspace.id);
+    setActiveConversationId(nextConversation.id);
+    appendTimeline(makeSystemEntry('New native thread', '正在通过 Codex 原生 thread/start 创建新对话。', workspace.id, nextConversation.id));
+
+    void (async () => {
+      try {
+        await startLocalAdapter(workspace, nextConversation);
+        const threadId = await ensureThreadId(workspace, nextConversation, true);
+        unmaterializedNativeThreadIdsRef.current.add(threadId);
+        void requestNativeThreadList(workspace.id).catch(() => undefined);
+      } catch (error) {
+        const message = error instanceof Error ? localTurnErrorMessage(error.message) : '创建原生 thread 失败';
+        setLastError(message);
+      }
+    })();
+
+    return nextConversation;
+  }, [appendTimeline, ensureThreadId, requestNativeThreadList, startLocalAdapter]);
+
+  const renameConversation = useCallback((conversationId: string, title: string) => {
+    const nextTitle = title.trim();
+    if (!nextTitle) {
+      Alert.alert('名称不能为空', '请输入新的对话标题。');
+      return;
+    }
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择一个 Codex thread。');
+      return;
+    }
+    updateConversation(conversationId, { title: nextTitle });
+    void sendNativeThreadAction(
+      conversationId,
+      'rename',
+      'thread/name/set',
+      (threadId) => ({ threadId, name: nextTitle }),
+      { title: nextTitle },
+    );
+  }, [getConversationContext, sendNativeThreadAction, updateConversation]);
+
+  const forkConversation = useCallback((conversationId: string) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择一个 Codex thread。');
+      return null;
+    }
+    const { workspace, conversation } = context;
+    const threadId = normalizeThreadId(conversation.threadId);
+    if (!threadId) {
+      setLastError('当前记录还没有可 fork 的原生 thread。');
+      return null;
+    }
+
+    const nextConversation = {
+      ...forkConversationRecord(conversation),
+      workspaceId: workspace.id,
+      sessionId: sessionIdForConversation(workspace, conversation),
+      title: `${conversation.title || 'Thread'} fork`,
+    };
+    setConversations((current) => [nextConversation, ...current]);
+    setActiveWorkspaceId(workspace.id);
+    setActiveConversationId(nextConversation.id);
+    void sendNativeThreadAction(
+      conversation.id,
+      'fork',
+      'thread/fork',
+      (sourceThreadId) => ({
+        threadId: sourceThreadId,
+        cwd: workspace.path,
+        model: workspace.model || settings.defaultModel || undefined,
+        approvalPolicy: workspace.approvalPolicy || settings.approvalPolicy || undefined,
+        sandbox: workspace.sandboxMode || settings.sandboxMode || undefined,
+      }),
+      { selectResult: true, resultConversationId: nextConversation.id },
+    );
+    return nextConversation;
+  }, [getConversationContext, sendNativeThreadAction, settings.approvalPolicy, settings.defaultModel, settings.sandboxMode]);
+
+  const removeConversation = useCallback((conversationId: string) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      return;
+    }
+    const { workspace, conversation } = context;
+    const nextActive = conversationsRef.current.find(
+      (item) => item.workspaceId === workspace.id && item.id !== conversationId && item.archived !== true,
+    );
+    updateConversation(conversationId, { archived: true, nativeStatus: 'archived' });
+    setChatDrafts((current) => {
+      const { [conversationId]: _removed, ...rest } = current;
+      return rest;
+    });
+    setQueuedChatDrafts((current) => {
+      const { [conversationId]: _removed, ...rest } = current;
+      return rest;
+    });
+    setComposerSelections((current) => {
+      const { [conversationId]: _removed, ...rest } = current;
+      return rest;
+    });
+    setComposerAttachments((current) => {
+      const { [conversationId]: _removed, ...rest } = current;
+      return rest;
+    });
+    setTurnIds((current) => {
+      const { [conversationId]: _removed, ...rest } = current;
+      return rest;
+    });
+    setThinkingConversations((current) => {
+      const { [conversationId]: _removed, ...rest } = current;
+      return rest;
+    });
+    if (activeConversationRef.current === conversationId) {
+      setActiveConversationId(nextActive?.id ?? '');
+    }
+    if (normalizeThreadId(conversation.threadId)) {
+      void sendNativeThreadAction(conversationId, 'archive', 'thread/archive', (threadId) => ({ threadId }));
+    }
+  }, [getConversationContext, sendNativeThreadAction, updateConversation]);
 
   const sendLocalTurn = useCallback(
     async (
@@ -3073,6 +3622,7 @@ export default function App() {
         workspaceId: workspace.id,
         conversationId: conversation.id,
       })) {
+        unmaterializedNativeThreadIdsRef.current.delete(threadId);
         setConversations((current) =>
           current.map((conversation) =>
             conversation.id === context.conversation.id
@@ -3477,6 +4027,52 @@ export default function App() {
         return;
       }
 
+      if (lower === 'resume') {
+        if (!normalizeThreadId(conversation.threadId)) {
+          setLastError('当前记录还没有可 resume 的原生 thread。');
+          return;
+        }
+        void sendNativeThreadAction(
+          conversation.id,
+          'resume',
+          'thread/resume',
+          (threadId) => ({ threadId }),
+          { restoreHistory: true },
+        );
+        return;
+      }
+
+      if (lower === 'fork' || lower === 'side') {
+        void sendNativeThreadAction(
+          conversation.id,
+          'fork',
+          'thread/fork',
+          (threadId) => ({
+            threadId,
+            cwd: workspace.path,
+            model: workspace.model || settings.defaultModel || undefined,
+            approvalPolicy: workspace.approvalPolicy || settings.approvalPolicy || undefined,
+            sandbox: workspace.sandboxMode || settings.sandboxMode || undefined,
+            ephemeral: lower === 'side',
+          }),
+          { selectResult: true },
+        );
+        addCommandNotice('Thread fork sent', lower === 'side' ? '已请求创建临时 side thread。' : '已请求 fork 当前原生 thread。');
+        return;
+      }
+
+      if (lower === 'rollback') {
+        const count = Math.max(1, Number.parseInt(rest[0] ?? '1', 10) || 1);
+        void sendNativeThreadAction(
+          conversation.id,
+          'rollback',
+          'thread/rollback',
+          (threadId) => ({ threadId, numTurns: count }),
+        );
+        addCommandNotice('Thread rollback sent', `已请求回滚最近 ${count} 个 turn。`);
+        return;
+      }
+
       if (lower === 'mention') {
         setConversationChatDraft(conversation.id, '@');
         setConversationComposerSelection(conversation.id, { start: 1, end: 1 });
@@ -3549,7 +4145,7 @@ export default function App() {
         return;
       }
 
-      if (lower === 'resume' || lower === 'fork' || lower === 'side' || lower === 'agent' || lower === 'subagents') {
+      if (lower === 'agent' || lower === 'subagents') {
         addCommandNotice(`/${lower} recognized`, '移动端以工作区和对话列表管理会话；该命令已识别，等价操作请使用当前导航中的对话入口。');
         return;
       }
@@ -3610,6 +4206,7 @@ export default function App() {
       selectedRequest,
       sendApprovalResponse,
       sendLocalTurn,
+      sendNativeThreadAction,
       startLocalAdapter,
       sendWorkspaceCommand,
       attachWorkspaceConversation,
@@ -3727,6 +4324,26 @@ export default function App() {
     }
   }, [attachWorkspaceConversation, sendWorkspaceCommand, turnIds, updateConversation, startLocalAdapter]);
 
+  const runThreadMenuAction = useCallback((conversationId: string, action: 'resume' | 'fork' | 'archive' | 'rollback' | 'compact') => {
+    if (action === 'fork') {
+      forkConversation(conversationId);
+      return;
+    }
+    if (action === 'archive') {
+      removeConversation(conversationId);
+      return;
+    }
+    if (action === 'resume') {
+      void sendNativeThreadAction(conversationId, 'resume', 'thread/resume', (threadId) => ({ threadId }), { restoreHistory: true });
+      return;
+    }
+    if (action === 'rollback') {
+      void sendNativeThreadAction(conversationId, 'rollback', 'thread/rollback', (threadId) => ({ threadId, numTurns: 1 }));
+      return;
+    }
+    void sendNativeThreadAction(conversationId, 'read', 'thread/compact/start', (threadId) => ({ threadId }));
+  }, [forkConversation, removeConversation, sendNativeThreadAction]);
+
   if (!hydrated) {
     return (
       <GestureHandlerRootView style={styles.appRoot}>
@@ -3785,7 +4402,11 @@ export default function App() {
                   timeline={timeline}
                   activeConversationId={activeConversationId}
                   activeTurns={turnIds}
+                  connectionState={connectionState}
+                  threadListStatus={threadListStatusByWorkspace[props.route.params.workspaceId] ?? 'idle'}
+                  threadListError={threadListErrorByWorkspace[props.route.params.workspaceId] ?? ''}
                   createConversation={createConversation}
+                  refreshNativeThreads={requestNativeThreadList}
                   selectWorkspace={selectWorkspace}
                   selectConversation={selectConversation}
                   renameConversation={renameConversation}
@@ -3818,6 +4439,7 @@ export default function App() {
                   sendApprovalResponse={sendApprovalResponse}
                   selectConversation={selectConversation}
                   runWorkspaceCommand={runWorkspaceCommand}
+                  runThreadMenuAction={runThreadMenuAction}
                   removeWorkspace={removeWorkspace}
                 />
               )}
@@ -3842,6 +4464,7 @@ export default function App() {
                   activeWorkspace={activeWorkspace}
                   pendingRequestCount={pendingRequests.length}
                   turnId={activeTurnId}
+                  runtimeStatus={runtimeStatus}
                   connectionState={connectionState}
                   connectionHealth={connectionHealth}
                   lastError={lastError}
@@ -4120,7 +4743,11 @@ function ConversationListScreen({
   timeline,
   activeConversationId,
   activeTurns,
+  connectionState,
+  threadListStatus,
+  threadListError,
   createConversation,
+  refreshNativeThreads,
   selectWorkspace,
   selectConversation,
   renameConversation,
@@ -4132,7 +4759,11 @@ function ConversationListScreen({
   timeline: TimelineEntry[];
   activeConversationId: string;
   activeTurns: Record<string, string>;
+  connectionState: ConnectionState;
+  threadListStatus: 'idle' | 'loading' | 'ready' | 'error';
+  threadListError: string;
   createConversation: (workspaceId: string) => ConversationRecord | null;
+  refreshNativeThreads: (workspaceId: string, includeArchived?: boolean) => Promise<boolean>;
   selectWorkspace: (workspaceId: string) => void;
   selectConversation: (workspaceId: string, conversationId: string) => void;
   renameConversation: (conversationId: string, title: string) => void;
@@ -4141,7 +4772,7 @@ function ConversationListScreen({
 }) {
   const [renamingConversation, setRenamingConversation] = useState<ConversationRecord | null>(null);
   const workspace = workspaces.find((item) => item.id === route.params.workspaceId) ?? null;
-  const workspaceConversations = conversations.filter((conversation) => conversation.workspaceId === route.params.workspaceId);
+  const workspaceConversations = conversations.filter((conversation) => conversation.workspaceId === route.params.workspaceId && conversation.archived !== true);
   const latestVisibleByConversation = useMemo(() => {
     const latest = new Map<string, TimelineEntry>();
     for (const entry of timeline) {
@@ -4157,19 +4788,39 @@ function ConversationListScreen({
     selectWorkspace(route.params.workspaceId);
   }, [route.params.workspaceId, selectWorkspace]);
 
+  useEffect(() => {
+    if (!workspace || connectionState !== 'open') {
+      return;
+    }
+    let cancelled = false;
+    const sync = () => {
+      if (!cancelled) {
+        void refreshNativeThreads(workspace.id);
+      }
+    };
+    sync();
+    const timer = setInterval(sync, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [connectionState, refreshNativeThreads, workspace?.id, workspace?.path]);
+
   useLayoutEffect(() => {
     navigation.setOptions({
       title: workspace?.name ?? '对话',
       headerRight: () => (
-        <HeaderIconButton
-          label="+"
-          onPress={() => {
-            const next = createConversation(route.params.workspaceId);
-            if (next) {
-              navigation.navigate('Chat', { workspaceId: route.params.workspaceId, conversationId: next.id });
-            }
-          }}
-        />
+        <View style={styles.headerActions}>
+          <HeaderIconButton
+            label="+"
+            onPress={() => {
+              const next = createConversation(route.params.workspaceId);
+              if (next) {
+                navigation.navigate('Chat', { workspaceId: route.params.workspaceId, conversationId: next.id });
+              }
+            }}
+          />
+        </View>
       ),
     });
   }, [createConversation, navigation, route.params.workspaceId, workspace?.name]);
@@ -4197,7 +4848,7 @@ function ConversationListScreen({
         onPress: () => {
           Alert.alert('删除对话', `确定删除「${title}」的本地记录？`, [
             { text: '取消', style: 'cancel' },
-            { text: '删除', style: 'destructive', onPress: () => removeConversation(conversation.id) },
+            { text: '归档', style: 'destructive', onPress: () => removeConversation(conversation.id) },
           ]);
         },
       },
@@ -4222,14 +4873,33 @@ function ConversationListScreen({
           <Card.Description numberOfLines={2}>{workspace.path}</Card.Description>
         </Card.Body>
       </Card>
+    <ScrollView contentContainerStyle={styles.listContent}>
+      <View style={styles.workspaceSummary}>
+        <Text style={styles.summaryTitle} numberOfLines={1}>
+          {workspace.name}
+        </Text>
+        <Text style={styles.summaryPath} numberOfLines={2}>
+          {workspace.path}
+        </Text>
+        <View style={styles.threadToolbar}>
+          <Text style={styles.threadToolbarText}>
+            {threadListStatus === 'loading'
+              ? '正在同步 Codex 原生 threads'
+              : threadListError
+                ? threadListError
+                : `${workspaceConversations.length} 个原生 thread`}
+          </Text>
+        </View>
+      </View>
 
       {workspaceConversations.length === 0 ? (
         <EmptyState text="还没有对话。点右上角 + 创建一个纯粹的新对话。" />
       ) : (
         workspaceConversations.map((conversation) => {
-          const preview = conversation.title || conversationPreviewText(latestVisibleByConversation.get(conversation.id));
+          const preview = conversation.title || conversation.preview || conversationPreviewText(latestVisibleByConversation.get(conversation.id));
           const running = Boolean(activeTurns[conversation.id]);
           const highlighted = isConversationHighlighted(conversation, activeConversationId, activeTurns);
+          const statusLabel = running ? '运行中' : conversation.nativeStatus || nowLabel(conversation.updatedAt);
           return (
             <Button
               key={conversation.id}
@@ -4258,6 +4928,14 @@ function ConversationListScreen({
                 <HeroText className="mt-1 text-xs text-muted" numberOfLines={1}>
                   {running ? '正在处理当前对话' : nowLabel(conversation.updatedAt)}
                 </HeroText>
+                  </Text>
+                  <Text style={[styles.itemTag, running && styles.itemTagActive]}>
+                    {statusLabel}
+                  </Text>
+                </View>
+                <Text style={styles.itemBody} numberOfLines={1}>
+                  {conversation.threadId ? `thread ${conversation.threadId}` : '正在创建原生 thread'}
+                </Text>
               </View>
             </Button>
           );
@@ -4304,6 +4982,7 @@ function ChatScreen({
   sendApprovalResponse,
   selectConversation,
   runWorkspaceCommand,
+  runThreadMenuAction,
   removeWorkspace,
 }: NativeStackScreenProps<RootStackParamList, 'Chat'> & {
   settings: ConnectionSettings;
@@ -4326,6 +5005,7 @@ function ChatScreen({
   sendApprovalResponse: (accepted: boolean, request: PendingRequest) => boolean;
   selectConversation: (workspaceId: string, conversationId: string) => void;
   runWorkspaceCommand: (workspace: WorkspaceRecord, conversation: ConversationRecord, command: 'start' | 'status' | 'attach' | 'stop' | 'interrupt') => void;
+  runThreadMenuAction: (conversationId: string, action: 'resume' | 'fork' | 'archive' | 'rollback' | 'compact') => void;
   removeWorkspace: (workspaceId: string) => void;
 }) {
   const [menuVisible, setMenuVisible] = useState(false);
@@ -5033,6 +5713,12 @@ function ChatScreen({
         <Pressable style={styles.menuBackdrop} onPress={() => setMenuVisible(false)}>
           <Card className="w-[260px] gap-1 rounded-lg">
             <Card.Title numberOfLines={1}>{workspace.name}</Card.Title>
+          <View style={styles.menuSheet}>
+            <Text style={styles.menuTitle}>{workspace.name}</Text>
+            <MenuItem title="Resume Thread" onPress={() => runThreadMenuAction(conversation.id, 'resume')} close={() => setMenuVisible(false)} />
+            <MenuItem title="Fork Thread" onPress={() => runThreadMenuAction(conversation.id, 'fork')} close={() => setMenuVisible(false)} />
+            <MenuItem title="Compact Thread" onPress={() => runThreadMenuAction(conversation.id, 'compact')} close={() => setMenuVisible(false)} />
+            <MenuItem title="Rollback 1 Turn" onPress={() => runThreadMenuAction(conversation.id, 'rollback')} close={() => setMenuVisible(false)} />
             <MenuItem title="启动" onPress={() => runWorkspaceCommand(workspace, conversation, 'start')} close={() => setMenuVisible(false)} />
             <MenuItem title="状态" onPress={() => runWorkspaceCommand(workspace, conversation, 'status')} close={() => setMenuVisible(false)} />
             <MenuItem title="附加" onPress={() => runWorkspaceCommand(workspace, conversation, 'attach')} close={() => setMenuVisible(false)} />
@@ -5041,6 +5727,12 @@ function ChatScreen({
             <MenuItem
               title="设置"
               onPress={() => navigation.navigate('Settings')}
+              close={() => setMenuVisible(false)}
+            />
+            <MenuItem
+              title="归档 Thread"
+              danger
+              onPress={() => runThreadMenuAction(conversation.id, 'archive')}
               close={() => setMenuVisible(false)}
             />
             <MenuItem
@@ -5099,6 +5791,7 @@ function SettingsScreen({
   activeWorkspace,
   pendingRequestCount,
   turnId,
+  runtimeStatus,
   connectionState,
   connectionHealth,
   lastError,
@@ -5117,6 +5810,7 @@ function SettingsScreen({
   activeWorkspace: WorkspaceRecord | null;
   pendingRequestCount: number;
   turnId: string;
+  runtimeStatus: RuntimeStatusState;
   connectionState: ConnectionState;
   connectionHealth: ConnectionHealth;
   lastError: string;
@@ -5288,10 +5982,25 @@ function SettingsScreen({
             <View className="mt-3 flex-row justify-between gap-3">
               <HeroText className="text-xs text-muted">WebSocket: {connectionState}</HeroText>
               <HeroText className="text-xs text-muted">
+            <View style={styles.connectionMetaRow}>
+              <Text style={styles.connectionMeta}>WebSocket: {runtimeStatus.socket}</Text>
+              <Text style={styles.connectionMeta}>Transport: {runtimeStatus.transport.status}</Text>
+            </View>
+            <View style={styles.connectionMetaRow}>
+              <Text style={styles.connectionMeta}>Daemon: {runtimeStatus.daemon}</Text>
+              <Text style={styles.connectionMeta}>Codex: {runtimeStatus.codexAdapter}</Text>
+            </View>
+            <View style={styles.connectionMetaRow}>
+              <Text style={styles.connectionMeta}>Turn: {runtimeStatus.turn}</Text>
+              <Text style={styles.connectionMeta}>
                 {connectionHealth.lastCheckedAt ? `检测: ${nowLabel(connectionHealth.lastCheckedAt)}` : '检测: --'}
               </HeroText>
             </View>
           </Surface>
+            {runtimeStatus.transport.error ? (
+              <Text style={styles.connectionErrorText} numberOfLines={2}>{runtimeStatus.transport.error}</Text>
+            ) : null}
+          </View>
           <Field
             label="Server URL"
             value={settings.serverUrl}
@@ -5498,6 +6207,9 @@ function MessageBubble({
           <View style={styles.hiddenBubbleTitleSpacer} />
         )}
         <HeroText className={`text-[10px] ${outgoing ? 'text-accent-foreground' : 'text-muted'}`}>{nowLabel(entry.at)}</HeroText>
+        <Text style={[styles.bubbleTime, outgoing && styles.bubbleTimeOutgoing]} numberOfLines={1}>
+          {nowLabel(entry.at)}
+        </Text>
       </View>
       {entry.subtitle && !collapsed ? (
         <HeroText selectable className={`mt-1 text-sm leading-5 ${outgoing ? 'text-accent-foreground' : 'text-foreground'}`}>{entry.subtitle}</HeroText>
@@ -5522,7 +6234,7 @@ function MessageBubble({
         onPress={collapsible ? () => onToggleProgress?.(entry, collapsed) : undefined}
         onLongPress={copyText}
         delayLongPress={360}
-        style={collapsible ? styles.progressPressable : undefined}
+        style={[styles.bubblePressable, collapsible && styles.progressPressable]}
       >
         {content}
       </Pressable>
@@ -6211,6 +6923,19 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     marginTop: 4,
   },
+  threadToolbar: {
+    marginTop: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  threadToolbarText: {
+    flex: 1,
+    color: '#52606d',
+    fontSize: 12,
+    fontWeight: '700',
+  },
   centerScreen: {
     flex: 1,
     alignItems: 'center',
@@ -6389,6 +7114,11 @@ const styles = StyleSheet.create({
     color: '#66717c',
     fontSize: 11,
     fontWeight: '800',
+  },
+  connectionErrorText: {
+    color: '#8a2f2f',
+    fontSize: 11,
+    fontWeight: '700',
   },
   field: {
     gap: 6,
@@ -6647,12 +7377,18 @@ const styles = StyleSheet.create({
   },
   bubbleRow: {
     flexDirection: 'row',
+    width: '100%',
   },
   bubbleRowOutgoing: {
     justifyContent: 'flex-end',
   },
-  bubble: {
+  bubblePressable: {
     maxWidth: '88%',
+    minWidth: 96,
+    flexShrink: 1,
+  },
+  bubble: {
+    width: '100%',
     backgroundColor: '#ffffff',
     borderWidth: 1,
     borderColor: '#d8e0e7',
@@ -6702,6 +7438,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+    flexWrap: 'nowrap',
   },
   bubbleTitle: {
     flex: 1,
@@ -6726,6 +7463,7 @@ const styles = StyleSheet.create({
     color: '#87909a',
     fontSize: 11,
     fontWeight: '700',
+    flexShrink: 0,
   },
   bubbleTimeOutgoing: {
     color: '#c5ccd3',
