@@ -10,7 +10,7 @@ const transportCrypto = require(path.join(compiledDir, 'transportCrypto.js'));
 let executedTests = 0;
 
 process.on('exit', () => {
-  assert.equal(executedTests, 18);
+  assert.equal(executedTests, 19);
 });
 
 function baseSettings(overrides = {}) {
@@ -323,6 +323,20 @@ test('parses native Codex thread/read responses into chat history entries', () =
     ['incoming', 'Codex', 'APP should display this answer'],
   ]);
   assert.equal(parsed.history[0].at, 1700000005000);
+});
+
+test('recognizes non-materialized native thread history errors', () => {
+  executedTests += 1;
+  assert.equal(
+    todex.isThreadNotMaterializedHistoryError(
+      'thread thr_empty is not materialized yet; includeTurns is unavailable before first user message',
+    ),
+    true,
+  );
+  assert.equal(
+    todex.isThreadNotMaterializedHistoryError('thread not found'),
+    false,
+  );
 });
 
 test('classifies approval requests and builds matching response payloads', () => {

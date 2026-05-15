@@ -64,6 +64,7 @@ import {
   eventPayloadData,
   extractThreadIdFromEvent,
   inferApprovalResponseType,
+  isThreadNotMaterializedHistoryError,
   normalizeReasoningEffort,
   normalizeThreadId,
   normalizeServerUrl,
@@ -1645,6 +1646,7 @@ export default function App() {
   const manualDisconnectRef = useRef(false);
   const healthProbeSeqRef = useRef(0);
   const loadedNativeThreadHistoryRef = useRef(new Map<string, number>());
+  const unmaterializedNativeThreadIdsRef = useRef(new Set<string>());
 
   const [hydrated, setHydrated] = useState(false);
   const [autoConnectEnabled, setAutoConnectEnabled] = useState(false);
@@ -2379,11 +2381,17 @@ export default function App() {
           setConversationThinking(targetConversationId, false);
         }
       }
+      const protocolError = extractProtocolError(event.type, data);
+      const pendingLocalStartForError = event.type === 'codex.control.error'
+        ? findPendingLocalStart(event, data)
+        : null;
+      const suppressProgressError =
+        Boolean(pendingLocalStartForError) ||
+        (protocolError ? isThreadNotMaterializedHistoryError(protocolError) : false);
       const progressEntry = classifyProgressEvent(event, target.workspaceId, target.conversationId);
-      if (progressEntry) {
+      if (progressEntry && !suppressProgressError) {
         upsertChatTimeline(progressEntry, false);
       }
-      const protocolError = extractProtocolError(event.type, data);
       if (event.type === 'codex.control.request.accepted' && data.operation === 'codex.local.turn') {
         setConversationThinking(targetConversationId, true);
       }
@@ -2477,6 +2485,9 @@ export default function App() {
             }
           }
           if (nativeThreadRead) {
+            if (nativeThreadRead.history.length > 0) {
+              unmaterializedNativeThreadIdsRef.current.delete(nativeThreadRead.thread.id);
+            }
             const restored = nativeThreadRead.history
               .map((entry) =>
                 timelineEntryFromNativeHistoryEntry(
@@ -2504,7 +2515,11 @@ export default function App() {
           }
           finishPendingThreadAction(pendingThreadAction);
         } else if (protocolError || event.type === 'codex.control.error') {
-          finishPendingThreadAction(pendingThreadAction, localTurnErrorMessage(protocolError || `${pendingThreadAction.action} 请求失败`));
+          if (pendingThreadAction.restoreHistory && protocolError && isThreadNotMaterializedHistoryError(protocolError)) {
+            finishPendingThreadAction(pendingThreadAction);
+          } else {
+            finishPendingThreadAction(pendingThreadAction, localTurnErrorMessage(protocolError || `${pendingThreadAction.action} 请求失败`));
+          }
         }
       }
       const turnId = turnIdFromEventData(data);
@@ -2567,7 +2582,7 @@ export default function App() {
           settlePendingLocalStart(pending);
         }
       } else if (event.type === 'codex.control.error') {
-        const pending = findPendingLocalStart(event, data);
+        const pending = pendingLocalStartForError ?? findPendingLocalStart(event, data);
         if (pending) {
           settlePendingLocalStart(pending, protocolError || '本地会话启动失败');
         }
@@ -2637,7 +2652,7 @@ export default function App() {
         }
         setConversationThinking(conversation?.id ?? targetConversationId, false);
       }
-      if (protocolError && !isLocalAdapterAlreadyRunning(protocolError)) {
+      if (protocolError && !isLocalAdapterAlreadyRunning(protocolError) && !isThreadNotMaterializedHistoryError(protocolError)) {
         setLastError(localTurnErrorMessage(protocolError));
       }
     },
@@ -3384,6 +3399,9 @@ export default function App() {
     if (!force && loadedAt >= context.conversation.updatedAt) {
       return true;
     }
+    if (!force && unmaterializedNativeThreadIdsRef.current.has(threadId)) {
+      return true;
+    }
     void sendNativeThreadAction(
       conversationId,
       'read',
@@ -3417,7 +3435,8 @@ export default function App() {
     void (async () => {
       try {
         await startLocalAdapter(workspace, nextConversation);
-        await ensureThreadId(workspace, nextConversation, true);
+        const threadId = await ensureThreadId(workspace, nextConversation, true);
+        unmaterializedNativeThreadIdsRef.current.add(threadId);
         void requestNativeThreadList(workspace.id).catch(() => undefined);
       } catch (error) {
         const message = error instanceof Error ? localTurnErrorMessage(error.message) : '创建原生 thread 失败';
@@ -3588,6 +3607,7 @@ export default function App() {
         workspaceId: workspace.id,
         conversationId: conversation.id,
       })) {
+        unmaterializedNativeThreadIdsRef.current.delete(threadId);
         setConversations((current) =>
           current.map((conversation) =>
             conversation.id === context.conversation.id

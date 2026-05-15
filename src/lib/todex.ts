@@ -419,6 +419,10 @@ export function normalizeThreadId(value: string | null | undefined): string {
   return value?.trim() ?? '';
 }
 
+export function isThreadNotMaterializedHistoryError(text: string): boolean {
+  return /not materialized yet/i.test(text) && /includeTurns is unavailable before first user message/i.test(text);
+}
+
 export function extractThreadIdFromEvent(event: ServerEvent): string {
   const data = eventPayloadData(event);
   const candidates = [
