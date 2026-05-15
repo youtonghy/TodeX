@@ -24,6 +24,7 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   type StyleProp,
@@ -38,7 +39,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
 import { StatusBar } from 'expo-status-bar';
-import { NavigationContainer } from '@react-navigation/native';
+import { NavigationContainer, createNavigationContainerRef } from '@react-navigation/native';
 import { createNativeStackNavigator, type NativeStackScreenProps } from '@react-navigation/native-stack';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -111,6 +112,8 @@ type RootStackParamList = {
   Conversations: { workspaceId: string };
   Chat: { workspaceId: string; conversationId: string };
   SlashCommands: { workspaceId: string; conversationId: string };
+  Experimental: { workspaceId: string; conversationId: string };
+  GitDiff: { workspaceId: string; conversationId: string };
   Settings: undefined;
 };
 
@@ -143,6 +146,35 @@ type PendingThreadList = {
   sessionId: string;
   requestId: string;
   timeoutId: ReturnType<typeof setTimeout>;
+};
+
+type PendingGitDiff = {
+  workspaceId: string;
+  conversationId: string;
+  requestId: string;
+  timeoutId: ReturnType<typeof setTimeout>;
+};
+
+type ExperimentalFeatureId =
+  | 'gitDiffViewer'
+  | 'verboseRuntimeEvents'
+  | 'composerFileMentions';
+
+type ExperimentalFeatureSettings = Record<ExperimentalFeatureId, boolean>;
+
+type ExperimentalFeatureDefinition = {
+  id: ExperimentalFeatureId;
+  title: string;
+  description: string;
+  scope: string;
+};
+
+type GitDiffState = {
+  status: 'idle' | 'loading' | 'ready' | 'error';
+  diff: string;
+  sha: string;
+  error: string;
+  updatedAt: number;
 };
 
 type PendingThreadAction = {
@@ -209,6 +241,7 @@ type QueuedChatSubmission = {
   id: string;
   text: string;
   attachments: ComposerAttachmentDraft[];
+  skills: SelectedSkillAttachment[];
 };
 
 type PendingLocalStart = {
@@ -232,6 +265,13 @@ type PendingThreadStart = {
 };
 
 type PendingModelList = {
+  requestId: string;
+  timeoutId: ReturnType<typeof setTimeout>;
+};
+
+type PendingSkillList = {
+  workspaceId: string;
+  conversationId: string;
   requestId: string;
   timeoutId: ReturnType<typeof setTimeout>;
 };
@@ -271,6 +311,25 @@ type ThreadCommandPromptState = {
   initialValue: string;
   warning?: string;
   multiline?: boolean;
+};
+
+type SkillListStatus = 'idle' | 'loading' | 'ready' | 'error';
+
+type SkillListItem = {
+  id: string;
+  name: string;
+  displayName: string;
+  description: string;
+  shortDescription: string;
+  scope: string;
+  path: string;
+  enabled: boolean;
+};
+
+type SelectedSkillAttachment = {
+  name: string;
+  path: string;
+  displayName: string;
 };
 
 type ThreadMenuAction =
@@ -544,11 +603,22 @@ function attachmentTextBlock(attachment: ComposerAttachmentDraft): string {
   return `${header}\nData URL:\n${attachment.dataUrl}`;
 }
 
-function codexInputFromComposer(text: string, attachments: ComposerAttachmentDraft[]): Record<string, unknown>[] {
+function codexInputFromComposer(
+  text: string,
+  attachments: ComposerAttachmentDraft[],
+  skills: SelectedSkillAttachment[] = [],
+): Record<string, unknown>[] {
   const trimmed = text.trim();
   const items: Record<string, unknown>[] = [
-    { type: 'text', text: trimmed || attachmentPrompt(attachments) },
+    { type: 'text', text: trimmed || attachmentPrompt(attachments) || (skills.length ? '请使用已选择的 Skill。' : '') },
   ];
+  skills.forEach((skill) => {
+    items.push({
+      type: 'skill',
+      name: skill.name,
+      path: skill.path,
+    });
+  });
   attachments.forEach((attachment) => {
     if (attachment.kind === 'image') {
       items.push({
@@ -569,6 +639,70 @@ function attachmentSummary(attachments: ComposerAttachmentDraft[]): string {
   return attachments
     .map((item) => `${item.kind === 'image' ? '图片' : '文件'} ${item.name} (${formatBytes(item.sizeBytes)})`)
     .join('\n');
+}
+
+function selectedSkillSummary(skills: SelectedSkillAttachment[]): string {
+  return skills.map((item) => `${item.displayName || item.name} (${item.name})`).join('\n');
+}
+
+function skillIdFromPath(name: string, path: string): string {
+  return `${name}:${path}`;
+}
+
+function parseSkillListItems(value: unknown): SkillListItem[] {
+  const root = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const entries = Array.isArray(root.data)
+    ? root.data
+    : Array.isArray(root.skills)
+      ? [{ skills: root.skills }]
+      : Array.isArray(value)
+        ? [{ skills: value }]
+        : [];
+  const byId = new Map<string, SkillListItem>();
+
+  entries.forEach((entry) => {
+    const entryRecord = entry && typeof entry === 'object' && !Array.isArray(entry)
+      ? entry as Record<string, unknown>
+      : {};
+    const skills = Array.isArray(entryRecord.skills) ? entryRecord.skills : [];
+    skills.forEach((skill) => {
+      if (!skill || typeof skill !== 'object' || Array.isArray(skill)) {
+        return;
+      }
+      const record = skill as Record<string, unknown>;
+      const name = stringFromUnknown(record.name).trim();
+      const path = stringFromUnknown(record.path).trim();
+      if (!name || !path) {
+        return;
+      }
+      const interfaceRecord = record.interface && typeof record.interface === 'object' && !Array.isArray(record.interface)
+        ? record.interface as Record<string, unknown>
+        : {};
+      const displayName = stringFromUnknown(interfaceRecord.displayName ?? interfaceRecord.display_name).trim() || name;
+      const shortDescription = stringFromUnknown(interfaceRecord.shortDescription ?? interfaceRecord.short_description).trim()
+        || stringFromUnknown(record.shortDescription ?? record.short_description).trim();
+      const description = shortDescription || stringFromUnknown(record.description).trim();
+      byId.set(skillIdFromPath(name, path), {
+        id: skillIdFromPath(name, path),
+        name,
+        displayName,
+        description,
+        shortDescription,
+        scope: stringFromUnknown(record.scope).trim() || 'unknown',
+        path,
+        enabled: record.enabled !== false,
+      });
+    });
+  });
+
+  return [...byId.values()].sort((left, right) => {
+    if (left.enabled !== right.enabled) {
+      return left.enabled ? -1 : 1;
+    }
+    return left.displayName.localeCompare(right.displayName);
+  });
 }
 
 function extractProtocolError(eventType: string, data: Record<string, unknown>): string {
@@ -774,6 +908,13 @@ function mergeModelCatalog(remoteModels: CodexModelCatalogItem[], currentModels:
   return [...byModel.values()].filter((item) => !item.hidden);
 }
 
+function normalizeExperimentalFeatures(value: Partial<ExperimentalFeatureSettings> | null | undefined): ExperimentalFeatureSettings {
+  return {
+    ...EXPERIMENTAL_FEATURE_DEFAULTS,
+    ...(value && typeof value === 'object' ? value : {}),
+  };
+}
+
 function itemTypeOf(item: Record<string, unknown>): string {
   const rawType = item.type ?? item.itemType ?? item.item_type;
   return typeof rawType === 'string' ? rawType : '';
@@ -821,6 +962,7 @@ function textFromItem(item: Record<string, unknown>): string {
 type PersistedSettings = Omit<ConnectionSettings, 'authToken'>;
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
+const navigationRef = createNavigationContainerRef<RootStackParamList>();
 enableScreens(true);
 
 const StyledIonicons = withUniwind(Ionicons);
@@ -832,6 +974,7 @@ const TIMELINE_STORAGE_KEY = 'todex.mobile.timeline.v1';
 const ACTIVE_SELECTION_STORAGE_KEY = 'todex.mobile.activeSelection.v1';
 const MENTION_HISTORY_STORAGE_KEY = 'todex.mobile.mentionHistory.v1';
 const SESSION_CURSORS_STORAGE_KEY = 'todex.mobile.sessionCursors.v1';
+const EXPERIMENTAL_FEATURES_STORAGE_KEY = 'todex.mobile.experimentalFeatures.v1';
 const TOKEN_STORAGE_KEY = 'todex.mobile.token.v1';
 const JSON_SAVE_DEBOUNCE_MS = 350;
 const SESSION_CURSOR_SAVE_DEBOUNCE_MS = 800;
@@ -896,6 +1039,33 @@ const SLASH_COMMANDS: SlashCommand[] = [
   { command: '/test-approval', title: 'Test Approval', description: 'test approval request', category: 'debug' },
   { command: '/debug-m-drop', title: 'Debug Memory Drop', description: 'debug memory drop', category: 'debug' },
   { command: '/debug-m-update', title: 'Debug Memory Update', description: 'debug memory update', category: 'debug' },
+];
+
+const EXPERIMENTAL_FEATURE_DEFAULTS: ExperimentalFeatureSettings = {
+  gitDiffViewer: false,
+  verboseRuntimeEvents: false,
+  composerFileMentions: false,
+};
+
+const EXPERIMENTAL_FEATURES: ExperimentalFeatureDefinition[] = [
+  {
+    id: 'gitDiffViewer',
+    title: 'Git diff 独立视图',
+    description: '允许通过 /diff 打开单独的变更查看界面。',
+    scope: 'App UI',
+  },
+  {
+    id: 'verboseRuntimeEvents',
+    title: '详细运行事件',
+    description: '保留更多后端事件细节，便于排查连接和线程状态。',
+    scope: 'Diagnostics',
+  },
+  {
+    id: 'composerFileMentions',
+    title: '@ 文件提及增强',
+    description: '启用输入框内的文件提及辅助和最近文件记录。',
+    scope: 'Composer',
+  },
 ];
 
 const SLASH_COMMAND_CATEGORY_ORDER: SlashCommandCategory[] = ['core', 'thread', 'context', 'runtime', 'settings', 'debug'];
@@ -1836,6 +2006,8 @@ export default function App() {
   const pendingThreadStartsRef = useRef(new Map<string, PendingThreadStart>());
   const pendingThreadListsRef = useRef(new Map<string, PendingThreadList>());
   const pendingThreadActionsRef = useRef(new Map<string, PendingThreadAction>());
+  const pendingGitDiffsRef = useRef(new Map<string, PendingGitDiff>());
+  const pendingSkillListsRef = useRef(new Map<string, PendingSkillList>());
   const pendingModelListRef = useRef<PendingModelList | null>(null);
   const pendingJsonSavesRef = useRef(new Map<string, PendingJsonSave>());
   const pendingServerEventsRef = useRef<ServerEvent[]>([]);
@@ -1867,11 +2039,18 @@ export default function App() {
   const [events, setEvents] = useState<ServerEvent[]>([]);
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
   const [mentionHistory, setMentionHistory] = useState<WorkspaceMentionHistory[]>([]);
+  const [experimentalFeatures, setExperimentalFeatures] = useState<ExperimentalFeatureSettings>(EXPERIMENTAL_FEATURE_DEFAULTS);
   const [selectedRequestId, setSelectedRequestId] = useState('');
   const [chatDrafts, setChatDrafts] = useState<Record<string, string>>({});
   const [queuedChatDrafts, setQueuedChatDrafts] = useState<Record<string, QueuedChatSubmission[]>>({});
   const [composerAttachments, setComposerAttachments] = useState<Record<string, ComposerAttachmentDraft[]>>({});
   const [composerSelections, setComposerSelections] = useState<Record<string, ComposerSelection>>({});
+  const [selectedSkills, setSelectedSkills] = useState<Record<string, SelectedSkillAttachment[]>>({});
+  const [skillListVisible, setSkillListVisible] = useState(false);
+  const [skillListConversationId, setSkillListConversationId] = useState('');
+  const [skillListStatus, setSkillListStatus] = useState<SkillListStatus>('idle');
+  const [skillListError, setSkillListError] = useState('');
+  const [skillListItems, setSkillListItems] = useState<SkillListItem[]>([]);
   const [modelCommandPrompt, setModelCommandPrompt] = useState<ModelCommandPromptState | null>(null);
   const [modelPickerPrompt, setModelPickerPrompt] = useState<ModelPickerPromptState | null>(null);
   const [threadInfoModal, setThreadInfoModal] = useState<ThreadInfoModalState | null>(null);
@@ -1880,6 +2059,7 @@ export default function App() {
   const [thinkingConversations, setThinkingConversations] = useState<Record<string, boolean>>({});
   const [threadListStatusByWorkspace, setThreadListStatusByWorkspace] = useState<Record<string, 'idle' | 'loading' | 'ready' | 'error'>>({});
   const [threadListErrorByWorkspace, setThreadListErrorByWorkspace] = useState<Record<string, string>>({});
+  const [gitDiffByConversation, setGitDiffByConversation] = useState<Record<string, GitDiffState>>({});
   const queuedChatDraftsRef = useRef<Record<string, QueuedChatSubmission[]>>({});
   const queuedChatDispatchingRef = useRef(new Set<string>());
   const sendQueuedChatDraftRef = useRef<(submission: QueuedChatSubmission, conversationId: string) => Promise<boolean>>(async () => false);
@@ -1915,6 +2095,24 @@ export default function App() {
       return;
     }
     setComposerAttachments((current) => {
+      const previous = current[conversationId] ?? [];
+      const next = typeof value === 'function' ? value(previous) : value;
+      if (next === previous) {
+        return current;
+      }
+      if (next.length === 0) {
+        const { [conversationId]: _removed, ...rest } = current;
+        return rest;
+      }
+      return { ...current, [conversationId]: next };
+    });
+  }, []);
+
+  const setConversationSelectedSkills = useCallback((conversationId: string, value: SetStateAction<SelectedSkillAttachment[]>) => {
+    if (!conversationId) {
+      return;
+    }
+    setSelectedSkills((current) => {
       const previous = current[conversationId] ?? [];
       const next = typeof value === 'function' ? value(previous) : value;
       if (next === previous) {
@@ -2072,6 +2270,7 @@ export default function App() {
         storedActiveSelection,
         storedMentionHistory,
         storedSessionCursors,
+        storedExperimentalFeatures,
         storedToken,
       ] = await Promise.all([
         loadJson<PersistedSettings | null>(SETTINGS_STORAGE_KEY, null),
@@ -2081,6 +2280,7 @@ export default function App() {
         loadJson<{ workspaceId?: string; conversationId?: string } | null>(ACTIVE_SELECTION_STORAGE_KEY, null),
         loadJson<WorkspaceMentionHistory[]>(MENTION_HISTORY_STORAGE_KEY, []),
         loadJson<Record<string, number>>(SESSION_CURSORS_STORAGE_KEY, {}),
+        loadJson<Partial<ExperimentalFeatureSettings> | null>(EXPERIMENTAL_FEATURES_STORAGE_KEY, null),
         loadSecret(TOKEN_STORAGE_KEY),
       ]);
 
@@ -2148,6 +2348,7 @@ export default function App() {
       setConversations(normalizedConversations);
       setTimeline(storedTimeline.slice(0, MAX_TIMELINE_ITEMS));
       setMentionHistory(storedMentionHistory);
+      setExperimentalFeatures(normalizeExperimentalFeatures(storedExperimentalFeatures));
       setActiveWorkspaceId(firstWorkspaceId);
       setActiveConversationId(firstConversationId);
       setAutoConnectEnabled(Boolean(storedSettings?.serverUrl?.trim()));
@@ -2211,6 +2412,13 @@ export default function App() {
     }
     void saveJson(MENTION_HISTORY_STORAGE_KEY, mentionHistory);
   }, [hydrated, mentionHistory]);
+
+  useEffect(() => {
+    if (!hydrated) {
+      return;
+    }
+    void saveJson(EXPERIMENTAL_FEATURES_STORAGE_KEY, experimentalFeatures);
+  }, [experimentalFeatures, hydrated]);
 
   useEffect(() => {
     if (!hydrated) {
@@ -2476,6 +2684,43 @@ export default function App() {
     }
   }, []);
 
+  const finishPendingGitDiff = useCallback((pending: PendingGitDiff, errorMessage = '') => {
+    clearTimeout(pending.timeoutId);
+    pendingGitDiffsRef.current.delete(pending.requestId);
+    if (!errorMessage) {
+      setLastError('');
+      return;
+    }
+    setGitDiffByConversation((current) => ({
+      ...current,
+      [pending.conversationId]: {
+        ...(current[pending.conversationId] ?? {
+          status: 'idle',
+          diff: '',
+          sha: '',
+          error: '',
+          updatedAt: 0,
+        }),
+        status: 'error',
+        error: errorMessage,
+        updatedAt: Date.now(),
+      },
+    }));
+    setLastError(errorMessage);
+  }, []);
+
+  const finishPendingSkillList = useCallback((pending: PendingSkillList, errorMessage = '') => {
+    clearTimeout(pending.timeoutId);
+    pendingSkillListsRef.current.delete(pending.requestId);
+    if (!errorMessage) {
+      setLastError('');
+      return;
+    }
+    setSkillListStatus('error');
+    setSkillListError(errorMessage);
+    setLastError(errorMessage);
+  }, []);
+
   const finishPendingThreadAction = useCallback((pending: PendingThreadAction, errorMessage = '') => {
     clearTimeout(pending.timeoutId);
     pendingThreadActionsRef.current.delete(pending.requestId);
@@ -2625,6 +2870,49 @@ export default function App() {
         }
       }
       const maybeThreadRequestId = typeof maybeModelListRequestId === 'string' ? maybeModelListRequestId : '';
+      const pendingGitDiff = maybeThreadRequestId ? pendingGitDiffsRef.current.get(maybeThreadRequestId) ?? null : null;
+      if (pendingGitDiff) {
+        if (event.type === 'codex.control.response') {
+          const responseValue = data.result ?? data;
+          const responseRecord = responseValue && typeof responseValue === 'object' && !Array.isArray(responseValue)
+            ? responseValue as Record<string, unknown>
+            : {};
+          const diff = typeof responseRecord.diff === 'string' ? responseRecord.diff : '';
+          const sha = typeof responseRecord.sha === 'string' ? responseRecord.sha : shortJson(responseRecord.sha ?? '');
+          setGitDiffByConversation((current) => ({
+            ...current,
+            [pendingGitDiff.conversationId]: {
+              status: 'ready',
+              diff,
+              sha,
+              error: '',
+              updatedAt: Date.now(),
+            },
+          }));
+          appendTimeline(makeSystemEntry('Git diff loaded', diff ? `${diff.length} characters` : 'No diff', pendingGitDiff.workspaceId, pendingGitDiff.conversationId));
+          finishPendingGitDiff(pendingGitDiff);
+        } else if (protocolError || event.type === 'codex.control.error') {
+          finishPendingGitDiff(pendingGitDiff, localTurnErrorMessage(protocolError || 'gitDiffToRemote 请求失败'));
+        }
+      }
+      const pendingSkillList = maybeThreadRequestId ? pendingSkillListsRef.current.get(maybeThreadRequestId) ?? null : null;
+      if (pendingSkillList) {
+        if (event.type === 'codex.control.response') {
+          const items = parseSkillListItems(data.result ?? data);
+          setSkillListItems(items);
+          setSkillListStatus('ready');
+          setSkillListError('');
+          appendTimeline(makeSystemEntry(
+            'Skills loaded',
+            items.length ? `${items.length} skills available` : 'No skills returned for this workspace',
+            pendingSkillList.workspaceId,
+            pendingSkillList.conversationId,
+          ));
+          finishPendingSkillList(pendingSkillList);
+        } else if (protocolError || event.type === 'codex.control.error') {
+          finishPendingSkillList(pendingSkillList, localTurnErrorMessage(protocolError || 'skills/list 请求失败'));
+        }
+      }
       const pendingThreadList = maybeThreadRequestId
         ? [...pendingThreadListsRef.current.values()].find((item) => item.requestId === maybeThreadRequestId)
         : null;
@@ -2767,7 +3055,7 @@ export default function App() {
         const nextQueuedDraft = queuedDrafts[0] ?? null;
         if (
           nextQueuedDraft &&
-          (nextQueuedDraft.text.trim() || nextQueuedDraft.attachments.length > 0) &&
+          (nextQueuedDraft.text.trim() || nextQueuedDraft.attachments.length > 0 || nextQueuedDraft.skills.length > 0) &&
           !queuedChatDispatchingRef.current.has(targetConversationId)
         ) {
           queuedChatDispatchingRef.current.add(targetConversationId);
@@ -2883,7 +3171,7 @@ export default function App() {
         setLastError(localTurnErrorMessage(protocolError));
       }
     },
-    [appendTimeline, findPendingLocalStart, finishPendingThreadAction, finishPendingThreadList, persistSessionCursors, resetWorkspaceSession, resolveTimelineTarget, settlePendingLocalStart, settlePendingThreadStart, setConversationThinking, setConversationTurnId, updateConversation, upsertChatTimeline, upsertNativeThreads],
+    [appendTimeline, findPendingLocalStart, finishPendingGitDiff, finishPendingSkillList, finishPendingThreadAction, finishPendingThreadList, persistSessionCursors, resetWorkspaceSession, resolveTimelineTarget, settlePendingLocalStart, settlePendingThreadStart, setConversationThinking, setConversationTurnId, updateConversation, upsertChatTimeline, upsertNativeThreads],
   );
 
   const scheduleServerEventDrain = useCallback(() => {
@@ -3251,6 +3539,8 @@ export default function App() {
       setChatDrafts(pruneConversationState);
       setQueuedChatDrafts(pruneConversationState);
       setComposerSelections(pruneConversationState);
+      setComposerAttachments(pruneConversationState);
+      setSelectedSkills(pruneConversationState);
       setTurnIds(pruneConversationState);
       setThinkingConversations(pruneConversationState);
       if (activeWorkspaceId === workspaceId) {
@@ -3661,6 +3951,145 @@ export default function App() {
     return true;
   }, [finishPendingThreadAction, getConversationContext, sendLocalMethodRequest, startLocalAdapter]);
 
+  const requestGitDiff = useCallback(async (conversationId = activeConversationRef.current) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      return false;
+    }
+    const { workspace, conversation } = context;
+    setGitDiffByConversation((current) => ({
+      ...current,
+      [conversation.id]: {
+        ...(current[conversation.id] ?? {
+          status: 'idle',
+          diff: '',
+          sha: '',
+          error: '',
+          updatedAt: 0,
+        }),
+        status: 'loading',
+        error: '',
+      },
+    }));
+    try {
+      await startLocalAdapter(workspace, conversation);
+    } catch (error) {
+      const message = error instanceof Error ? localTurnErrorMessage(error.message) : '本地会话未启动';
+      setGitDiffByConversation((current) => ({
+        ...current,
+        [conversation.id]: {
+          ...(current[conversation.id] ?? {
+            status: 'idle',
+            diff: '',
+            sha: '',
+            error: '',
+            updatedAt: 0,
+          }),
+          status: 'error',
+          error: message,
+          updatedAt: Date.now(),
+        },
+      }));
+      setLastError(message);
+      return false;
+    }
+    const requestId = createRequestId('git-diff');
+    const timeoutId = setTimeout(() => {
+      const pending = pendingGitDiffsRef.current.get(requestId);
+      if (pending) {
+        finishPendingGitDiff(pending, 'gitDiffToRemote 请求超时');
+      }
+    }, 15000);
+    pendingGitDiffsRef.current.set(requestId, {
+      workspaceId: workspace.id,
+      conversationId: conversation.id,
+      requestId,
+      timeoutId,
+    });
+    const sent = sendLocalMethodRequest(workspace, conversation, 'gitDiffToRemote', { cwd: workspace.path }, requestId);
+    if (!sent) {
+      const pending = pendingGitDiffsRef.current.get(requestId);
+      if (pending) {
+        finishPendingGitDiff(pending, '请先在设置里连接后端。');
+      }
+      return false;
+    }
+    return true;
+  }, [finishPendingGitDiff, getConversationContext, sendLocalMethodRequest, startLocalAdapter]);
+
+  const openGitDiff = useCallback((conversationId = activeConversationRef.current) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      return;
+    }
+    navigationRef.current?.navigate('GitDiff', {
+      workspaceId: context.workspace.id,
+      conversationId: context.conversation.id,
+    });
+    void requestGitDiff(context.conversation.id);
+  }, [getConversationContext, requestGitDiff]);
+
+  const requestSkillList = useCallback(async (conversationId = activeConversationRef.current, forceReload = false) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      return false;
+    }
+    const { workspace, conversation } = context;
+    setSkillListConversationId(conversation.id);
+    setSkillListVisible(true);
+    setSkillListStatus('loading');
+    setSkillListError('');
+    try {
+      await startLocalAdapter(workspace, conversation);
+    } catch (error) {
+      const message = error instanceof Error ? localTurnErrorMessage(error.message) : '本地会话未启动';
+      setSkillListStatus('error');
+      setSkillListError(message);
+      setLastError(message);
+      return false;
+    }
+    const requestId = createRequestId('skills');
+    const timeoutId = setTimeout(() => {
+      const pending = pendingSkillListsRef.current.get(requestId);
+      if (pending) {
+        finishPendingSkillList(pending, 'skills/list 请求超时');
+      }
+    }, 15000);
+    pendingSkillListsRef.current.set(requestId, {
+      workspaceId: workspace.id,
+      conversationId: conversation.id,
+      requestId,
+      timeoutId,
+    });
+    const sent = sendLocalMethodRequest(workspace, conversation, 'skills/list', {
+      cwds: [workspace.path],
+      forceReload,
+    }, requestId);
+    if (!sent) {
+      const pending = pendingSkillListsRef.current.get(requestId);
+      if (pending) {
+        finishPendingSkillList(pending, '请先在设置里连接后端。');
+      }
+      return false;
+    }
+    return true;
+  }, [finishPendingSkillList, getConversationContext, sendLocalMethodRequest, startLocalAdapter]);
+
+  const openExperimentalFeatures = useCallback((conversationId = activeConversationRef.current) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      return;
+    }
+    navigationRef.current?.navigate('Experimental', {
+      workspaceId: context.workspace.id,
+      conversationId: context.conversation.id,
+    });
+  }, [getConversationContext]);
+
   const loadNativeThreadHistory = useCallback((conversationId: string, force = false) => {
     const context = getConversationContext(conversationId);
     if (!context) {
@@ -3800,6 +4229,10 @@ export default function App() {
       const { [conversationId]: _removed, ...rest } = current;
       return rest;
     });
+    setSelectedSkills((current) => {
+      const { [conversationId]: _removed, ...rest } = current;
+      return rest;
+    });
     setTurnIds((current) => {
       const { [conversationId]: _removed, ...rest } = current;
       return rest;
@@ -3822,6 +4255,7 @@ export default function App() {
       mode: ConversationRecord['mode'] = 'implement',
       conversationId = activeConversationRef.current,
       attachments: ComposerAttachmentDraft[] = [],
+      skills: SelectedSkillAttachment[] = [],
     ) => {
       const context = getConversationContext(conversationId);
       if (!context) {
@@ -3857,7 +4291,7 @@ export default function App() {
         codexSessionId: sessionId,
         tenantId: workspace.tenantId,
         threadId,
-        input: codexInputFromComposer(text, attachments),
+        input: codexInputFromComposer(text, attachments, skills),
         approvalPolicy: workspace.approvalPolicy || settings.approvalPolicy || undefined,
         sandboxPolicy: sandboxPolicyForMode(workspace.sandboxMode || settings.sandboxMode),
         serviceTier: workspace.serviceTier || undefined,
@@ -3884,7 +4318,7 @@ export default function App() {
                   sessionId: commandWorkspace.sessionId,
                   threadId,
                   mode,
-                  title: conversation.title === '默认对话' ? text.slice(0, 18) || attachmentPrompt(attachments).slice(0, 18) || conversation.title : conversation.title,
+                  title: conversation.title === '默认对话' ? text.slice(0, 18) || attachmentPrompt(attachments).slice(0, 18) || selectedSkillSummary(skills).slice(0, 18) || conversation.title : conversation.title,
                   updatedAt: Date.now(),
                 }
               : conversation,
@@ -3901,8 +4335,27 @@ export default function App() {
 
   useEffect(() => {
     sendQueuedChatDraftRef.current = (submission, conversationId) =>
-      sendLocalTurn(submission.text, 'implement', conversationId, submission.attachments);
+      sendLocalTurn(submission.text, 'implement', conversationId, submission.attachments, submission.skills);
   }, [sendLocalTurn]);
+
+  const toggleSelectedSkill = useCallback((conversationId: string, skill: SkillListItem) => {
+    if (!skill.enabled) {
+      Alert.alert('Skill 已禁用', '该 Skill 当前未启用，不能添加到下一条消息。');
+      return;
+    }
+    const nextSkill: SelectedSkillAttachment = {
+      name: skill.name,
+      path: skill.path,
+      displayName: skill.displayName,
+    };
+    setConversationSelectedSkills(conversationId, (current) => {
+      const exists = current.some((item) => item.name === skill.name && item.path === skill.path);
+      if (exists) {
+        return current.filter((item) => item.name !== skill.name || item.path !== skill.path);
+      }
+      return [...current, nextSkill];
+    });
+  }, [setConversationSelectedSkills]);
 
   const sendApprovalResponse = useCallback(
     (accepted: boolean, request: PendingRequest) => {
@@ -4221,7 +4674,7 @@ export default function App() {
       }
 
       if (lower === 'skills') {
-        sendLocalMethod('skills/list', { cwds: [workspace.path], forceReload: /reload|refresh|true|1/i.test(rest[0] ?? '') }, 'Skills requested', '已请求 Codex app-server 扫描当前工作区 Skills。');
+        void requestSkillList(conversation.id, /reload|refresh|true|1/i.test(rest[0] ?? ''));
         return;
       }
 
@@ -4480,7 +4933,12 @@ export default function App() {
       }
 
       if (lower === 'diff') {
-        sendLocalTurn('show and summarize the current git diff, including untracked files when relevant', 'implement', conversation.id);
+        openGitDiff(conversation.id);
+        return;
+      }
+
+      if (lower === 'experimental') {
+        openExperimentalFeatures(conversation.id);
         return;
       }
 
@@ -4519,7 +4977,6 @@ export default function App() {
       if (
         lower === 'setup-default-sandbox' ||
         lower === 'sandbox-add-read-dir' ||
-        lower === 'experimental' ||
         lower === 'personality' ||
         lower === 'realtime' ||
         lower === 'settings' ||
@@ -4574,14 +5031,18 @@ export default function App() {
       ensureThreadId,
       getConversationContext,
       openModelPicker,
+      openExperimentalFeatures,
       openPermissionsMenu,
       openThreadCommandPrompt,
       pendingRequests,
+      requestSkillList,
       selectConversation,
       selectedRequest,
       sendApprovalResponse,
       sendLocalTurn,
       sendNativeThreadAction,
+      requestGitDiff,
+      openGitDiff,
       sendTrackedLocalMethod,
       startLocalAdapter,
       sendWorkspaceCommand,
@@ -4618,7 +5079,8 @@ export default function App() {
   const submitChat = useCallback((conversationId: string) => {
     const text = (chatDrafts[conversationId] ?? '').trim();
     const attachments = composerAttachments[conversationId] ?? [];
-    if (!text && attachments.length === 0) {
+    const skills = selectedSkills[conversationId] ?? [];
+    if (!text && attachments.length === 0 && skills.length === 0) {
       return;
     }
     const context = getConversationContext(conversationId);
@@ -4639,9 +5101,13 @@ export default function App() {
     if (attachments.length > 0) {
       appendTimeline(makeSystemEntry('已附加附件', attachmentSummary(attachments), workspace.id, conversationId));
     }
+    if (skills.length > 0) {
+      appendTimeline(makeSystemEntry('已选择 Skill', selectedSkillSummary(skills), workspace.id, conversationId));
+    }
     setConversationChatDraft(conversationId, '');
     setConversationComposerSelection(conversationId, DEFAULT_COMPOSER_SELECTION);
     setConversationAttachments(conversationId, []);
+    setConversationSelectedSkills(conversationId, []);
     if (isThinking) {
       setQueuedChatDrafts((current) => ({
         ...current,
@@ -4651,18 +5117,19 @@ export default function App() {
             id: createRequestId('queued'),
             text,
             attachments,
+            skills,
           },
         ],
       }));
       appendTimeline(makeSystemEntry('消息已加入候选', '当前任务完成后会自动继续发送。', workspace.id, conversationId));
       return;
     }
-    if (attachments.length > 0) {
-      void sendLocalTurn(text, 'implement', conversationId, attachments);
+    if (attachments.length > 0 || skills.length > 0) {
+      void sendLocalTurn(text, 'implement', conversationId, attachments, skills);
       return;
     }
     sendSlashCommand(text, conversationId);
-  }, [appendTimeline, chatDrafts, composerAttachments, getConversationContext, rememberMentionReferences, sendLocalTurn, sendSlashCommand, setConversationAttachments, setConversationChatDraft, setConversationComposerSelection, thinkingConversations]);
+  }, [appendTimeline, chatDrafts, composerAttachments, getConversationContext, rememberMentionReferences, selectedSkills, sendLocalTurn, sendSlashCommand, setConversationAttachments, setConversationChatDraft, setConversationComposerSelection, setConversationSelectedSkills, thinkingConversations]);
 
   const runWorkspaceCommand = useCallback((workspace: WorkspaceRecord, conversation: ConversationRecord, command: 'start' | 'status' | 'attach' | 'stop' | 'interrupt') => {
     if (command === 'start') {
@@ -4905,7 +5372,7 @@ export default function App() {
     <GestureHandlerRootView style={styles.appRoot}>
       <HeroUINativeProvider>
         <SafeAreaProvider>
-          <NavigationContainer>
+          <NavigationContainer ref={navigationRef}>
             <StatusBar style="dark" />
             <Stack.Navigator
               initialRouteName="Workspaces"
@@ -4966,6 +5433,7 @@ export default function App() {
                   selectedRequest={selectedRequest}
                   chatDraft={chatDrafts[props.route.params.conversationId] ?? ''}
                   composerAttachments={composerAttachments[props.route.params.conversationId] ?? []}
+                  selectedSkills={selectedSkills[props.route.params.conversationId] ?? []}
                   composerSelection={composerSelections[props.route.params.conversationId] ?? DEFAULT_COMPOSER_SELECTION}
                   isThinking={thinkingConversations[props.route.params.conversationId] === true}
                   turnId={turnIds[props.route.params.conversationId] ?? ''}
@@ -4973,6 +5441,7 @@ export default function App() {
                   connectionState={connectionState}
                   setChatDraft={(value) => setConversationChatDraft(props.route.params.conversationId, value)}
                   setComposerAttachments={(value) => setConversationAttachments(props.route.params.conversationId, value)}
+                  setSelectedSkills={(value) => setConversationSelectedSkills(props.route.params.conversationId, value)}
                   setComposerSelection={(value) => setConversationComposerSelection(props.route.params.conversationId, value)}
                   submitChat={submitChat}
                   stopThinking={stopThinking}
@@ -4983,6 +5452,7 @@ export default function App() {
                   runWorkspaceCommand={runWorkspaceCommand}
                   runThreadMenuAction={runThreadMenuAction}
                   sendSlashCommand={sendSlashCommand}
+                  openGitDiff={openGitDiff}
                   removeWorkspace={removeWorkspace}
                 />
               )}
@@ -4998,6 +5468,37 @@ export default function App() {
                     conversation={conversation}
                     runThreadMenuAction={runThreadMenuAction}
                     sendSlashCommand={sendSlashCommand}
+                    openGitDiff={openGitDiff}
+                  />
+                );
+              }}
+            </Stack.Screen>
+            <Stack.Screen name="GitDiff" options={{ title: 'Git Diff' }}>
+              {(props) => {
+                const conversation = conversations.find((item) => item.id === props.route.params.conversationId) ?? null;
+                const workspace = workspaces.find((item) => item.id === props.route.params.workspaceId) ?? null;
+                return (
+                  <GitDiffScreen
+                    {...props}
+                    workspace={workspace}
+                    conversation={conversation}
+                    diffState={gitDiffByConversation[props.route.params.conversationId] ?? null}
+                    requestGitDiff={requestGitDiff}
+                  />
+                );
+              }}
+            </Stack.Screen>
+            <Stack.Screen name="Experimental" options={{ title: 'Experimental' }}>
+              {(props) => {
+                const conversation = conversations.find((item) => item.id === props.route.params.conversationId) ?? null;
+                const workspace = workspaces.find((item) => item.id === props.route.params.workspaceId) ?? null;
+                return (
+                  <ExperimentalScreen
+                    {...props}
+                    workspace={workspace}
+                    conversation={conversation}
+                    features={experimentalFeatures}
+                    setFeatures={setExperimentalFeatures}
                   />
                 );
               }}
@@ -5078,6 +5579,18 @@ export default function App() {
           raw={threadInfoModal?.raw}
           onClose={() => setThreadInfoModal(null)}
         />
+          <SkillPickerModal
+            visible={skillListVisible}
+            workspace={getConversationContext(skillListConversationId)?.workspace ?? activeWorkspace}
+            conversationId={skillListConversationId}
+            status={skillListStatus}
+            error={skillListError}
+            skills={skillListItems}
+            selectedSkills={selectedSkills[skillListConversationId] ?? []}
+            onRefresh={() => void requestSkillList(skillListConversationId || activeConversationRef.current, true)}
+            onToggleSkill={(skill) => toggleSelectedSkill(skillListConversationId || activeConversationRef.current, skill)}
+            onClose={() => setSkillListVisible(false)}
+          />
           <ModelPickerModal
           visible={Boolean(modelPickerPrompt)}
           title={modelPickerPrompt?.target === 'settings' ? '默认模型' : '当前对话模型'}
@@ -5519,6 +6032,7 @@ function ChatScreen({
   selectedRequest,
   chatDraft,
   composerAttachments,
+  selectedSkills,
   composerSelection,
   isThinking,
   turnId,
@@ -5526,6 +6040,7 @@ function ChatScreen({
   connectionState,
   setChatDraft,
   setComposerAttachments,
+  setSelectedSkills,
   setComposerSelection,
   submitChat,
   stopThinking,
@@ -5536,6 +6051,7 @@ function ChatScreen({
   runWorkspaceCommand,
   runThreadMenuAction,
   sendSlashCommand,
+  openGitDiff,
   removeWorkspace,
 }: NativeStackScreenProps<RootStackParamList, 'Chat'> & {
   settings: ConnectionSettings;
@@ -5546,6 +6062,7 @@ function ChatScreen({
   selectedRequest: PendingRequest | null;
   chatDraft: string;
   composerAttachments: ComposerAttachmentDraft[];
+  selectedSkills: SelectedSkillAttachment[];
   composerSelection: TextInputSelectionChangeEventData['selection'];
   isThinking: boolean;
   turnId: string;
@@ -5553,6 +6070,7 @@ function ChatScreen({
   connectionState: ConnectionState;
   setChatDraft: Dispatch<SetStateAction<string>>;
   setComposerAttachments: Dispatch<SetStateAction<ComposerAttachmentDraft[]>>;
+  setSelectedSkills: Dispatch<SetStateAction<SelectedSkillAttachment[]>>;
   setComposerSelection: Dispatch<SetStateAction<TextInputSelectionChangeEventData['selection']>>;
   submitChat: (conversationId: string) => void;
   stopThinking: (conversationId: string) => void;
@@ -5563,6 +6081,7 @@ function ChatScreen({
   runWorkspaceCommand: (workspace: WorkspaceRecord, conversation: ConversationRecord, command: 'start' | 'status' | 'attach' | 'stop' | 'interrupt') => void;
   runThreadMenuAction: (conversationId: string, action: ThreadMenuAction) => void;
   sendSlashCommand: (input: string, conversationId?: string) => void;
+  openGitDiff: (conversationId: string) => void;
   removeWorkspace: (workspaceId: string) => void;
 }) {
   const [menuVisible, setMenuVisible] = useState(false);
@@ -5786,6 +6305,11 @@ function ChatScreen({
     setComposerAttachments((current) => current.filter((item) => item.id !== attachmentIdValue));
     requestAnimationFrame(() => composerInputRef.current?.focus());
   }, [setComposerAttachments]);
+
+  const removeSelectedSkill = useCallback((skill: SelectedSkillAttachment) => {
+    setSelectedSkills((current) => current.filter((item) => item.name !== skill.name || item.path !== skill.path));
+    requestAnimationFrame(() => composerInputRef.current?.focus());
+  }, [setSelectedSkills]);
 
   const addClipboardAttachment = useCallback(async () => {
     try {
@@ -6173,6 +6697,12 @@ function ChatScreen({
                   variant="ghost"
                   className="min-h-12 justify-start rounded-none px-3"
                   onPress={() => {
+                    if (item.command === '/skills') {
+                      sendSlashCommand('/skills', route.params.conversationId);
+                      setChatDraft('');
+                      setComposerSelection(DEFAULT_COMPOSER_SELECTION);
+                      return;
+                    }
                     const nextText = `${item.command} `;
                     setChatDraft(nextText);
                     setComposerSelection({ start: nextText.length, end: nextText.length });
@@ -6232,6 +6762,31 @@ function ChatScreen({
                   variant="ghost"
                   accessibilityLabel={`移除附件 ${attachment.name}`}
                   onPress={() => removeComposerAttachment(attachment.id)}
+                  className="rounded-md"
+                >
+                  <StyledIonicons name="close" size={14} className="text-muted" />
+                </Button>
+              </View>
+            ))}
+          </ScrollView>
+        ) : null}
+        {selectedSkills.length > 0 ? (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.attachmentRail}>
+            {selectedSkills.map((skill) => (
+              <View key={skillIdFromPath(skill.name, skill.path)} style={styles.skillComposerChip}>
+                <View style={styles.skillComposerIcon}>
+                  <StyledIonicons name="flash" size={16} className="text-accent-soft-foreground" />
+                </View>
+                <View style={styles.attachmentChipMain}>
+                  <Text style={styles.attachmentChipName} numberOfLines={1}>{skill.displayName || skill.name}</Text>
+                  <Text style={styles.attachmentChipMeta} numberOfLines={1}>{skill.name}</Text>
+                </View>
+                <Button
+                  isIconOnly
+                  size="sm"
+                  variant="ghost"
+                  accessibilityLabel={`移除 Skill ${skill.displayName || skill.name}`}
+                  onPress={() => removeSelectedSkill(skill)}
                   className="rounded-md"
                 >
                   <StyledIonicons name="close" size={14} className="text-muted" />
@@ -6316,6 +6871,7 @@ function ChatScreen({
               <MenuItem title="Inject Items" onPress={() => runThreadMenuAction(conversation.id, 'inject')} close={() => setMenuVisible(false)} />
               <MenuItem title="Clean Terminals" onPress={() => runThreadMenuAction(conversation.id, 'clean')} close={() => setMenuVisible(false)} />
               <MenuItem title="Unarchive Thread" onPress={() => runThreadMenuAction(conversation.id, 'unarchive')} close={() => setMenuVisible(false)} />
+              <MenuItem title="Git Diff" onPress={() => openGitDiff(conversation.id)} close={() => setMenuVisible(false)} />
               <MenuItem
                 title="Slash Commands"
                 onPress={() => navigation.navigate('SlashCommands', { workspaceId: workspace.id, conversationId: conversation.id })}
@@ -6390,15 +6946,18 @@ function ChatScreen({
 
 function SlashCommandsScreen({
   navigation,
+  route,
   workspace,
   conversation,
   runThreadMenuAction,
   sendSlashCommand,
+  openGitDiff,
 }: NativeStackScreenProps<RootStackParamList, 'SlashCommands'> & {
   workspace: WorkspaceRecord | null;
   conversation: ConversationRecord | null;
   runThreadMenuAction: (conversationId: string, action: ThreadMenuAction) => void;
   sendSlashCommand: (input: string, conversationId?: string) => void;
+  openGitDiff: (conversationId: string) => void;
 }) {
   const runSlash = useCallback((command: string) => {
     if (!conversation) {
@@ -6415,6 +6974,21 @@ function SlashCommandsScreen({
     }
     runThreadMenuAction(conversation.id, action);
   }, [conversation, runThreadMenuAction]);
+
+  const openDiff = useCallback(() => {
+    if (!conversation) {
+      Alert.alert('未选择对话', '请先回到一个 Codex 对话。');
+      return;
+    }
+    openGitDiff(conversation.id);
+  }, [conversation, openGitDiff]);
+
+  const openExperimental = useCallback(() => {
+    navigation.navigate('Experimental', {
+      workspaceId: workspace?.id ?? route.params.workspaceId,
+      conversationId: conversation?.id ?? route.params.conversationId,
+    });
+  }, [conversation?.id, navigation, route.params.conversationId, route.params.workspaceId, workspace?.id]);
 
   const slashGroups = SLASH_COMMAND_CATEGORY_ORDER
     .map((category) => ({
@@ -6448,6 +7022,7 @@ function SlashCommandsScreen({
             <ActionButton title="Rollback" onPress={() => runThreadAction('rollback')} tone="ghost" />
             <ActionButton title="Compact" onPress={() => runSlash('/compact')} tone="ghost" />
             <ActionButton title="Clean" onPress={() => runSlash('/ps clean')} tone="ghost" />
+            <ActionButton title="Diff" onPress={openDiff} tone="ghost" />
           </View>
         </View>
 
@@ -6476,6 +7051,14 @@ function SlashCommandsScreen({
                       runSlash('/status');
                       return;
                     }
+                    if (item.command === '/diff') {
+                      openDiff();
+                      return;
+                    }
+                    if (item.command === '/experimental') {
+                      openExperimental();
+                      return;
+                    }
                     if (item.command === '/settings') {
                       navigation.navigate('Settings');
                       return;
@@ -6493,6 +7076,151 @@ function SlashCommandsScreen({
             </View>
           </View>
         ))}
+      </ScrollView>
+    </Surface>
+  );
+}
+
+function GitDiffScreen({
+  workspace,
+  conversation,
+  diffState,
+  requestGitDiff,
+}: NativeStackScreenProps<RootStackParamList, 'GitDiff'> & {
+  workspace: WorkspaceRecord | null;
+  conversation: ConversationRecord | null;
+  diffState: GitDiffState | null;
+  requestGitDiff: (conversationId?: string) => Promise<boolean>;
+}) {
+  const status = diffState?.status ?? 'idle';
+  const diff = diffState?.diff ?? '';
+  const canRefresh = Boolean(conversation);
+  const refresh = useCallback(() => {
+    if (!conversation) {
+      Alert.alert('未选择对话', '请先回到一个 Codex 对话。');
+      return;
+    }
+    void requestGitDiff(conversation.id);
+  }, [conversation, requestGitDiff]);
+  const copyDiff = useCallback(async () => {
+    await Clipboard.setStringAsync(diff);
+    Alert.alert('已复制', 'Git diff 已复制到剪贴板。');
+  }, [diff]);
+
+  useEffect(() => {
+    if (conversation && (!diffState || diffState.status === 'idle')) {
+      void requestGitDiff(conversation.id);
+    }
+  }, [conversation?.id, diffState?.status, requestGitDiff]);
+
+  return (
+    <Surface className="flex-1 bg-background">
+      <View style={styles.diffToolbar}>
+        <View style={styles.diffToolbarText}>
+          <Text style={styles.diffTitle} numberOfLines={1}>{workspace?.name || 'Git Diff'}</Text>
+          <Text style={styles.diffSubtitle} numberOfLines={1}>
+            {diffState?.sha ? `sha ${diffState.sha}` : workspace?.path || '当前工作区'}
+          </Text>
+        </View>
+        <Button size="sm" variant="secondary" isDisabled={!canRefresh || status === 'loading'} onPress={refresh} className="rounded-lg">
+          <Button.Label>刷新</Button.Label>
+        </Button>
+        <Button size="sm" variant="secondary" isDisabled={!diff} onPress={copyDiff} className="rounded-lg">
+          <Button.Label>复制</Button.Label>
+        </Button>
+      </View>
+      <ScrollView style={styles.diffScroll} contentContainerStyle={styles.diffContent}>
+        {status === 'loading' ? (
+          <View style={styles.diffEmptyState}>
+            <ActivityIndicator />
+            <Text style={styles.diffEmptyTitle}>正在读取 git diff</Text>
+          </View>
+        ) : status === 'error' ? (
+          <View style={styles.diffEmptyState}>
+            <Text style={styles.diffEmptyTitle}>读取失败</Text>
+            <Text style={styles.diffEmptyText}>{diffState?.error || 'gitDiffToRemote 请求失败'}</Text>
+          </View>
+        ) : diff ? (
+          <Text selectable style={styles.diffText}>{diff}</Text>
+        ) : (
+          <View style={styles.diffEmptyState}>
+            <Text style={styles.diffEmptyTitle}>没有可显示的差异</Text>
+            <Text style={styles.diffEmptyText}>当前工作区相对远端没有返回 git diff。</Text>
+          </View>
+        )}
+      </ScrollView>
+    </Surface>
+  );
+}
+
+function ExperimentalScreen({
+  workspace,
+  conversation,
+  features,
+  setFeatures,
+}: NativeStackScreenProps<RootStackParamList, 'Experimental'> & {
+  workspace: WorkspaceRecord | null;
+  conversation: ConversationRecord | null;
+  features: ExperimentalFeatureSettings;
+  setFeatures: React.Dispatch<React.SetStateAction<ExperimentalFeatureSettings>>;
+}) {
+  const enabledCount = EXPERIMENTAL_FEATURES.filter((feature) => features[feature.id]).length;
+  const toggleFeature = useCallback((featureId: ExperimentalFeatureId, enabled: boolean) => {
+    setFeatures((current) => ({
+      ...current,
+      [featureId]: enabled,
+    }));
+  }, [setFeatures]);
+
+  const resetFeatures = useCallback(() => {
+    setFeatures(EXPERIMENTAL_FEATURE_DEFAULTS);
+  }, [setFeatures]);
+
+  return (
+    <Surface className="flex-1 bg-background">
+      <ScrollView contentContainerStyle={styles.pageContent}>
+        <View style={styles.commandPageHeader}>
+          <Text style={styles.commandPageTitle}>Experimental</Text>
+          <Text style={styles.commandPageSubtitle} numberOfLines={2}>
+            {workspace?.name || '当前工作区'} · {conversation?.title || '当前对话'} · {enabledCount}/{EXPERIMENTAL_FEATURES.length} enabled
+          </Text>
+        </View>
+
+        <View style={styles.experimentalSummary}>
+          <View style={styles.experimentalSummaryText}>
+            <Text style={styles.experimentalSummaryTitle}>测试性功能</Text>
+            <Text style={styles.experimentalSummaryBody}>
+              开关会保存在本机；关闭后不会删除任何已有对话或工作区数据。
+            </Text>
+          </View>
+          <ActionButton title="重置" onPress={resetFeatures} tone="ghost" />
+        </View>
+
+        <View style={styles.commandList}>
+          {EXPERIMENTAL_FEATURES.map((feature) => {
+            const enabled = features[feature.id];
+            return (
+              <View key={feature.id} style={styles.experimentalFeatureItem}>
+                <View style={styles.experimentalFeatureText}>
+                  <View style={styles.experimentalFeatureHeader}>
+                    <Text style={styles.experimentalFeatureTitle} numberOfLines={1}>{feature.title}</Text>
+                    <Text style={styles.experimentalFeatureScope} numberOfLines={1}>{feature.scope}</Text>
+                  </View>
+                  <Text style={styles.experimentalFeatureDescription}>{feature.description}</Text>
+                  <Text style={enabled ? styles.experimentalFeatureEnabled : styles.experimentalFeatureDisabled}>
+                    {enabled ? '已开启' : '已关闭'}
+                  </Text>
+                </View>
+                <Switch
+                  value={enabled}
+                  onValueChange={(value) => toggleFeature(feature.id, value)}
+                  trackColor={{ false: '#d8e0e7', true: '#bfe8cf' }}
+                  thumbColor={enabled ? '#19a463' : '#ffffff'}
+                />
+              </View>
+            );
+          })}
+        </View>
       </ScrollView>
     </Surface>
   );
@@ -7306,6 +8034,108 @@ function ThreadInfoModal({
   );
 }
 
+function SkillPickerModal({
+  visible,
+  workspace,
+  conversationId,
+  status,
+  error,
+  skills,
+  selectedSkills,
+  onRefresh,
+  onToggleSkill,
+  onClose,
+}: {
+  visible: boolean;
+  workspace: WorkspaceRecord | null;
+  conversationId: string;
+  status: SkillListStatus;
+  error: string;
+  skills: SkillListItem[];
+  selectedSkills: SelectedSkillAttachment[];
+  onRefresh: () => void;
+  onToggleSkill: (skill: SkillListItem) => void;
+  onClose: () => void;
+}) {
+  const selectedIds = useMemo(
+    () => new Set(selectedSkills.map((item) => skillIdFromPath(item.name, item.path))),
+    [selectedSkills],
+  );
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.skillPickerSheet}>
+          <View style={styles.modalHeader}>
+            <View style={styles.modelControlTitleBlock}>
+              <Text style={styles.modalTitle}>Skills</Text>
+              <Text style={styles.modelPickerSubtitle} numberOfLines={1}>
+                {workspace?.name || '当前工作区'} · {selectedSkills.length} selected
+              </Text>
+            </View>
+            <Pressable onPress={onClose}>
+              <Text style={styles.modalClose}>关闭</Text>
+            </Pressable>
+          </View>
+          <View style={styles.modelPickerToolbar}>
+            <Button size="sm" variant="secondary" isDisabled={status === 'loading'} onPress={onRefresh} className="rounded-lg">
+              <Button.Label>刷新</Button.Label>
+            </Button>
+            <Button size="sm" variant="solid" isDisabled={!conversationId} onPress={onClose} className="rounded-lg">
+              <Button.Label>完成</Button.Label>
+            </Button>
+          </View>
+          {status === 'loading' ? (
+            <View style={styles.skillPickerStatus}>
+              <ActivityIndicator />
+              <Text style={styles.diffEmptyText}>正在扫描 Skills</Text>
+            </View>
+          ) : null}
+          {status === 'error' ? <Text style={styles.warningText}>{error || 'skills/list 请求失败'}</Text> : null}
+          {status !== 'loading' && skills.length === 0 ? (
+            <View style={styles.skillPickerStatus}>
+              <Text style={styles.diffEmptyTitle}>没有可选 Skill</Text>
+              <Text style={styles.diffEmptyText}>当前工作区没有返回启用的 Skills。</Text>
+            </View>
+          ) : null}
+          <ScrollView style={styles.modelPickerList} contentContainerStyle={styles.modelPickerListContent}>
+            {skills.map((skill) => {
+              const selected = selectedIds.has(skill.id);
+              return (
+                <Pressable
+                  key={skill.id}
+                  disabled={!skill.enabled}
+                  style={[
+                    styles.skillOption,
+                    selected ? styles.skillOptionActive : null,
+                    !skill.enabled ? styles.skillOptionDisabled : null,
+                  ]}
+                  onPress={() => onToggleSkill(skill)}
+                >
+                  <View style={[styles.skillOptionIcon, selected ? styles.skillOptionIconActive : null]}>
+                    <StyledIonicons name={selected ? 'checkmark' : 'flash'} size={16} className={selected ? 'text-accent-foreground' : 'text-foreground'} />
+                  </View>
+                  <View style={styles.modelOptionBody}>
+                    <View style={styles.modelOptionHeader}>
+                      <Text style={[styles.modelOptionTitle, selected ? styles.modelOptionTitleActive : null]} numberOfLines={1}>
+                        {skill.displayName || skill.name}
+                      </Text>
+                      <Text style={styles.modelDefaultBadge}>{skill.scope}</Text>
+                    </View>
+                    <Text style={styles.modelOptionDescription} numberOfLines={2}>
+                      {skill.description || skill.name}
+                    </Text>
+                    <Text style={styles.skillOptionPath} numberOfLines={1}>{skill.path}</Text>
+                  </View>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 function ReasoningEffortSelector({
   label,
   options,
@@ -7751,6 +8581,15 @@ const styles = StyleSheet.create({
     paddingBottom: 28,
     gap: 14,
   },
+  skillPickerSheet: {
+    maxHeight: '92%',
+    backgroundColor: '#ffffff',
+    borderTopLeftRadius: 8,
+    borderTopRightRadius: 8,
+    padding: 18,
+    paddingBottom: 28,
+    gap: 14,
+  },
   threadInfoSheet: {
     maxHeight: '88%',
     backgroundColor: '#ffffff',
@@ -7923,6 +8762,145 @@ const styles = StyleSheet.create({
     lineHeight: 16,
     fontWeight: '600',
   },
+  diffToolbar: {
+    minHeight: 62,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#d8e0e7',
+    backgroundColor: '#ffffff',
+  },
+  diffToolbarText: {
+    flex: 1,
+    minWidth: 0,
+    gap: 3,
+  },
+  diffTitle: {
+    color: '#17202a',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  diffSubtitle: {
+    color: '#66717c',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  diffScroll: {
+    flex: 1,
+  },
+  diffContent: {
+    padding: 14,
+    paddingBottom: 28,
+  },
+  diffText: {
+    color: '#17202a',
+    fontSize: 12,
+    lineHeight: 17,
+    fontFamily: Platform.select({
+      ios: 'Menlo',
+      android: 'monospace',
+      default: 'monospace',
+    }),
+  },
+  diffEmptyState: {
+    minHeight: 180,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    padding: 20,
+  },
+  diffEmptyTitle: {
+    color: '#17202a',
+    fontSize: 15,
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+  diffEmptyText: {
+    color: '#66717c',
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  experimentalSummary: {
+    minHeight: 92,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d8e0e7',
+    padding: 14,
+  },
+  experimentalSummaryText: {
+    flex: 1,
+    minWidth: 0,
+    gap: 5,
+  },
+  experimentalSummaryTitle: {
+    color: '#17202a',
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  experimentalSummaryBody: {
+    color: '#66717c',
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: '600',
+  },
+  experimentalFeatureItem: {
+    minHeight: 108,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e7ecef',
+  },
+  experimentalFeatureText: {
+    flex: 1,
+    minWidth: 0,
+    gap: 5,
+  },
+  experimentalFeatureHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  experimentalFeatureTitle: {
+    flex: 1,
+    minWidth: 0,
+    color: '#17202a',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  experimentalFeatureScope: {
+    maxWidth: 108,
+    color: '#66717c',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  experimentalFeatureDescription: {
+    color: '#66717c',
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: '600',
+  },
+  experimentalFeatureEnabled: {
+    color: '#168451',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  experimentalFeatureDisabled: {
+    color: '#87909a',
+    fontSize: 11,
+    fontWeight: '800',
+  },
   formBlock: {
     backgroundColor: '#ffffff',
     borderRadius: 8,
@@ -8094,6 +9072,44 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     gap: 5,
   },
+  skillOption: {
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d8e0e7',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+  },
+  skillOptionActive: {
+    borderColor: '#19a463',
+    backgroundColor: '#f0fbf5',
+  },
+  skillOptionDisabled: {
+    opacity: 0.48,
+  },
+  skillOptionIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d8e0e7',
+    backgroundColor: '#f7f9fa',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 1,
+  },
+  skillOptionIconActive: {
+    borderColor: '#19a463',
+    backgroundColor: '#19a463',
+  },
+  modelOptionBody: {
+    flex: 1,
+    minWidth: 0,
+    gap: 5,
+  },
   modelOptionActive: {
     borderColor: '#19a463',
     backgroundColor: '#f0fbf5',
@@ -8124,6 +9140,18 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 17,
     fontWeight: '600',
+  },
+  skillOptionPath: {
+    color: '#7a8391',
+    fontSize: 11,
+    lineHeight: 15,
+    fontWeight: '700',
+  },
+  skillPickerStatus: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    paddingVertical: 18,
   },
   reasoningBlock: {
     gap: 10,
@@ -8402,6 +9430,25 @@ const styles = StyleSheet.create({
     borderColor: '#d7dce0',
     backgroundColor: '#f7f9fa',
     padding: 8,
+  },
+  skillComposerChip: {
+    width: 210,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#bfe8cf',
+    backgroundColor: '#f0fbf5',
+    padding: 8,
+  },
+  skillComposerIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 6,
+    backgroundColor: '#dff5e8',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   attachmentPreview: {
     width: 38,
