@@ -4356,6 +4356,7 @@ export default function App() {
                   timeline={timeline}
                   activeConversationId={activeConversationId}
                   activeTurns={turnIds}
+                  connectionState={connectionState}
                   threadListStatus={threadListStatusByWorkspace[props.route.params.workspaceId] ?? 'idle'}
                   threadListError={threadListErrorByWorkspace[props.route.params.workspaceId] ?? ''}
                   createConversation={createConversation}
@@ -4686,6 +4687,7 @@ function ConversationListScreen({
   timeline,
   activeConversationId,
   activeTurns,
+  connectionState,
   threadListStatus,
   threadListError,
   createConversation,
@@ -4701,6 +4703,7 @@ function ConversationListScreen({
   timeline: TimelineEntry[];
   activeConversationId: string;
   activeTurns: Record<string, string>;
+  connectionState: ConnectionState;
   threadListStatus: 'idle' | 'loading' | 'ready' | 'error';
   threadListError: string;
   createConversation: (workspaceId: string) => ConversationRecord | null;
@@ -4729,12 +4732,29 @@ function ConversationListScreen({
     selectWorkspace(route.params.workspaceId);
   }, [route.params.workspaceId, selectWorkspace]);
 
+  useEffect(() => {
+    if (!workspace || connectionState !== 'open') {
+      return;
+    }
+    let cancelled = false;
+    const sync = () => {
+      if (!cancelled) {
+        void refreshNativeThreads(workspace.id);
+      }
+    };
+    sync();
+    const timer = setInterval(sync, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [connectionState, refreshNativeThreads, workspace?.id, workspace?.path]);
+
   useLayoutEffect(() => {
     navigation.setOptions({
       title: workspace?.name ?? '对话',
       headerRight: () => (
         <View style={styles.headerActions}>
-          <HeaderIconButton label="刷新" onPress={() => void refreshNativeThreads(route.params.workspaceId)} />
           <HeaderIconButton
             label="+"
             onPress={() => {
@@ -4747,7 +4767,7 @@ function ConversationListScreen({
         </View>
       ),
     });
-  }, [createConversation, navigation, refreshNativeThreads, route.params.workspaceId, workspace?.name]);
+  }, [createConversation, navigation, route.params.workspaceId, workspace?.name]);
 
   const conversationTitle = (conversation: ConversationRecord) => {
     return conversation.title || conversationPreviewText(latestVisibleByConversation.get(conversation.id));
@@ -4805,7 +4825,6 @@ function ConversationListScreen({
                 ? threadListError
                 : `${workspaceConversations.length} 个原生 thread`}
           </Text>
-          <ActionButton title="同步" onPress={() => void refreshNativeThreads(route.params.workspaceId)} tone="ghost" disabled={threadListStatus === 'loading'} />
         </View>
       </View>
 
