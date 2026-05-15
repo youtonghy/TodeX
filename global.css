@@ -1,0 +1,67 @@
+@import "tailwindcss";
+@import "uniwind";
+@import "heroui-native/styles";
+
+@source "./node_modules/heroui-native/lib";
+
+@layer theme {
+  @variant light {
+    --radius: 0.55rem;
+    --background: oklch(0.976 0.007 214);
+    --foreground: oklch(0.22 0.024 240);
+    --surface: oklch(0.998 0.002 220);
+    --surface-foreground: var(--foreground);
+    --surface-secondary: oklch(0.955 0.011 214);
+    --surface-secondary-foreground: oklch(0.29 0.026 240);
+    --surface-tertiary: oklch(0.928 0.014 214);
+    --surface-tertiary-foreground: oklch(0.31 0.028 240);
+    --overlay: oklch(1 0 0);
+    --overlay-foreground: var(--foreground);
+    --muted: oklch(0.53 0.026 240);
+    --default: oklch(0.932 0.011 214);
+    --default-foreground: oklch(0.27 0.03 240);
+    --accent: oklch(0.57 0.15 166);
+    --accent-foreground: oklch(0.985 0.006 150);
+    --success: oklch(0.65 0.145 154);
+    --success-foreground: oklch(0.985 0.006 150);
+    --warning: oklch(0.76 0.13 76);
+    --warning-foreground: oklch(0.23 0.025 70);
+    --danger: oklch(0.61 0.19 28);
+    --danger-foreground: oklch(0.985 0.006 30);
+    --separator: oklch(0.89 0.012 214);
+    --field-background: oklch(0.962 0.009 214);
+    --field-foreground: var(--foreground);
+    --field-placeholder: var(--muted);
+    --field-border: oklch(0.885 0.014 214);
+  }
+
+  @variant dark {
+    --radius: 0.55rem;
+    --background: oklch(0.18 0.027 240);
+    --foreground: oklch(0.93 0.009 220);
+    --surface: oklch(0.235 0.028 240);
+    --surface-foreground: var(--foreground);
+    --surface-secondary: oklch(0.275 0.029 240);
+    --surface-secondary-foreground: var(--foreground);
+    --surface-tertiary: oklch(0.315 0.029 240);
+    --surface-tertiary-foreground: var(--foreground);
+    --overlay: oklch(0.24 0.028 240);
+    --overlay-foreground: var(--foreground);
+    --muted: oklch(0.67 0.018 230);
+    --default: oklch(0.31 0.03 240);
+    --default-foreground: oklch(0.9 0.011 220);
+    --accent: oklch(0.67 0.13 166);
+    --accent-foreground: oklch(0.16 0.026 166);
+    --success: oklch(0.67 0.13 154);
+    --success-foreground: oklch(0.14 0.026 154);
+    --warning: oklch(0.75 0.12 78);
+    --warning-foreground: oklch(0.16 0.028 78);
+    --danger: oklch(0.66 0.18 28);
+    --danger-foreground: oklch(0.99 0.004 28);
+    --separator: oklch(0.35 0.027 240);
+    --field-background: oklch(0.29 0.03 240);
+    --field-foreground: var(--foreground);
+    --field-placeholder: var(--muted);
+    --field-border: oklch(0.39 0.03 240);
+  }
+}

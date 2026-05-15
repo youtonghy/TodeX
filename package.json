@@ -15,6 +15,8 @@
     "check:protocol": "tsc src/lib/todex.ts --outDir /tmp/todex-protocol-check --module commonjs --target es2020 --esModuleInterop --skipLibCheck && node scripts/check-protocol.cjs"
   },
   "dependencies": {
+    "@expo/vector-icons": "^15.1.1",
+    "@gorhom/bottom-sheet": "^5.2.8",
     "@noble/ciphers": "^2.2.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",
@@ -30,17 +32,26 @@
     "expo-image-picker": "~17.0.11",
     "expo-secure-store": "~15.0.8",
     "expo-status-bar": "~3.0.9",
+    "heroui-native": "^1.0.3",
     "react": "19.1.0",
     "react-dom": "^19.1.0",
     "react-native": "0.81.5",
     "react-native-gesture-handler": "~2.28.0",
     "react-native-get-random-values": "^2.0.0",
+    "react-native-reanimated": "4.1.1",
     "react-native-safe-area-context": "~5.6.0",
     "react-native-screens": "~4.16.0",
-    "react-native-web": "^0.21.2"
+    "react-native-svg": "^15.12.1",
+    "react-native-web": "^0.21.2",
+    "react-native-worklets": "0.5.1",
+    "tailwind-merge": "^3.4.0",
+    "tailwind-variants": "^3.2.2",
+    "tailwindcss": "^4.3.0",
+    "uniwind": "^1.6.5"
   },
   "devDependencies": {
     "@types/react": "~19.1.0",
+    "babel-preset-expo": "~54.0.10",
     "typescript": "~5.9.3"
   },
   "private": true
