@@ -2477,13 +2477,15 @@ export default function App() {
             }
           }
           if (nativeThreadRead) {
-            const restored = nativeThreadRead.history.map((entry) =>
-              timelineEntryFromNativeHistoryEntry(
-                entry,
-                pendingThreadAction.workspaceId,
-                pendingThreadAction.conversationId,
-              ),
-            );
+            const restored = nativeThreadRead.history
+              .map((entry) =>
+                timelineEntryFromNativeHistoryEntry(
+                  entry,
+                  pendingThreadAction.workspaceId,
+                  pendingThreadAction.conversationId,
+                ),
+              )
+              .reverse();
             setTimeline((current) => {
               const remaining = current.filter((entry) => entry.conversationId !== pendingThreadAction.conversationId);
               return [...restored, ...remaining].slice(0, MAX_TIMELINE_ITEMS);
@@ -6094,7 +6096,9 @@ function MessageBubble({
         ) : (
           <View style={styles.hiddenBubbleTitleSpacer} />
         )}
-        <Text style={[styles.bubbleTime, outgoing && styles.bubbleTimeOutgoing]}>{nowLabel(entry.at)}</Text>
+        <Text style={[styles.bubbleTime, outgoing && styles.bubbleTimeOutgoing]} numberOfLines={1}>
+          {nowLabel(entry.at)}
+        </Text>
       </View>
       {entry.subtitle && !collapsed ? (
         <Text selectable style={[styles.bubbleText, outgoing && styles.bubbleTextOutgoing]}>{entry.subtitle}</Text>
@@ -6119,7 +6123,7 @@ function MessageBubble({
         onPress={collapsible ? () => onToggleProgress?.(entry, collapsed) : undefined}
         onLongPress={copyText}
         delayLongPress={360}
-        style={collapsible ? styles.progressPressable : undefined}
+        style={[styles.bubblePressable, collapsible && styles.progressPressable]}
       >
         {content}
       </Pressable>
@@ -7248,12 +7252,18 @@ const styles = StyleSheet.create({
   },
   bubbleRow: {
     flexDirection: 'row',
+    width: '100%',
   },
   bubbleRowOutgoing: {
     justifyContent: 'flex-end',
   },
-  bubble: {
+  bubblePressable: {
     maxWidth: '88%',
+    minWidth: 96,
+    flexShrink: 1,
+  },
+  bubble: {
+    width: '100%',
     backgroundColor: '#ffffff',
     borderWidth: 1,
     borderColor: '#d8e0e7',
@@ -7303,6 +7313,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+    flexWrap: 'nowrap',
   },
   bubbleTitle: {
     flex: 1,
@@ -7327,6 +7338,7 @@ const styles = StyleSheet.create({
     color: '#87909a',
     fontSize: 11,
     fontWeight: '700',
+    flexShrink: 0,
   },
   bubbleTimeOutgoing: {
     color: '#c5ccd3',
