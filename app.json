@@ -35,6 +35,7 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
+      "./plugins/withAndroidCleartextTraffic",
       "expo-secure-store"
     ],
     "extra": {
