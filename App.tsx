@@ -389,7 +389,7 @@ function isConversationHighlighted(conversation: ConversationRecord, activeConve
 }
 
 function sessionIdForConversation(workspace: WorkspaceRecord, conversation: ConversationRecord): string {
-  return workspace.sessionId || conversation.sessionId || createSessionId(workspace.name);
+  return conversation.sessionId || workspace.sessionId || createSessionId(workspace.name);
 }
 
 function commandWorkspaceForConversation(workspace: WorkspaceRecord, conversation: ConversationRecord): WorkspaceRecord {
@@ -2001,7 +2001,7 @@ function createDefaultConversation(workspace: WorkspaceRecord): ConversationReco
     preview: '',
     nativeStatus: '',
     archived: false,
-    sessionId: workspace.sessionId || createSessionId(workspace.name),
+    sessionId: createSessionId(`${workspace.name}_conversation`),
     threadId: '',
     localAdapterState: 'idle',
     mode: 'implement',
@@ -2574,7 +2574,7 @@ export default function App() {
           preview: patch.preview || '',
           nativeStatus: patch.nativeStatus || '',
           archived: patch.archived === true,
-          sessionId,
+          sessionId: createSessionId(`${patch.title || threadId}_thread`),
           threadId,
           localAdapterState: 'idle',
           mode: 'implement',
@@ -2634,7 +2634,7 @@ export default function App() {
       ? conversations.find((conversation) => normalizeThreadId(conversation.threadId) === threadId)
       : null;
     const bySession = sessionId ? conversations.find((conversation) => conversation.sessionId === sessionId) : null;
-    if (sessionId && !bySession && !byThread) {
+    if (sessionId && !bySession) {
       return {
         workspaceId: '',
         conversationId: '',
@@ -2643,7 +2643,7 @@ export default function App() {
         threadId,
       };
     }
-    const conversation = byThread ?? bySession ?? conversations.find((item) => item.id === activeConversationRef.current) ?? null;
+    const conversation = bySession ?? byThread ?? conversations.find((item) => item.id === activeConversationRef.current) ?? null;
 
     return {
       workspaceId: conversation?.workspaceId ?? activeWorkspaceRef.current,
@@ -2833,7 +2833,8 @@ export default function App() {
       }
       setEvents((current) => [event, ...current].slice(0, MAX_EVENTS));
       const target = resolveTimelineTarget(event, data);
-      const targetConversationId = target.conversationId || target.conversation?.id || activeConversationRef.current;
+      const targetConversationId = target.conversationId || target.conversation?.id || (target.sessionId ? '' : activeConversationRef.current);
+      const hasTimelineTarget = Boolean(targetConversationId);
       const goalPatch = goalPatchFromEventData(data);
       if (
         target.conversation &&
@@ -2855,7 +2856,7 @@ export default function App() {
           updateConversation(existing.id, threadPatch);
         }
       }
-      const chatEntry = classifyChatEvent(event, target.workspaceId, target.conversationId);
+      const chatEntry = hasTimelineTarget ? classifyChatEvent(event, target.workspaceId, targetConversationId) : null;
       if (chatEntry) {
         upsertChatTimeline(chatEntry, event.type === 'codex.item.agentMessage.delta');
         if (event.type === 'codex.item.completed') {
@@ -2869,11 +2870,11 @@ export default function App() {
       const suppressProgressError =
         Boolean(pendingLocalStartForError) ||
         (protocolError ? isThreadNotMaterializedHistoryError(protocolError) : false);
-      const progressEntry = classifyProgressEvent(event, target.workspaceId, target.conversationId);
+      const progressEntry = hasTimelineTarget ? classifyProgressEvent(event, target.workspaceId, targetConversationId) : null;
       if (progressEntry && !suppressProgressError) {
         upsertChatTimeline(progressEntry, false);
       }
-      if (event.type === 'codex.control.request.accepted' && data.operation === 'codex.local.turn') {
+      if (hasTimelineTarget && event.type === 'codex.control.request.accepted' && data.operation === 'codex.local.turn') {
         setConversationThinking(targetConversationId, true);
       }
       const maybeModelListRequestId = data.requestId ?? data.request_id;
@@ -2973,6 +2974,7 @@ export default function App() {
           if (nativeThread) {
             if (pendingThreadAction.action === 'fork') {
               const source = conversationsRef.current.find((item) => item.id === pendingThreadAction.sourceConversationId);
+              const targetConversation = conversationsRef.current.find((item) => item.id === pendingThreadAction.conversationId);
               setConversations((current) =>
                 [
                   {
@@ -2991,7 +2993,7 @@ export default function App() {
                     }),
                     id: pendingThreadAction.conversationId,
                     workspaceId: pendingThreadAction.workspaceId,
-                    sessionId: source?.sessionId || sessionIdFromEvent(event, data),
+                    sessionId: targetConversation?.sessionId || createSessionId(`${conversationTitleFromNativeThread(nativeThread)}_fork`),
                     localAdapterState: 'idle' as LocalAdapterState,
                     mode: source?.mode ?? 'implement',
                     goalStatus: '',
@@ -3074,15 +3076,15 @@ export default function App() {
       const turnStatus = turnStatusFromEventData(data);
       const turnIsStarting = event.type === 'codex.turn.started' || /^inprogress$/i.test(turnStatus.replace(/[^a-z]/gi, ''));
       const turnIsTerminal = isTurnTerminalEvent(event) || /^(completed|interrupted|failed)$/i.test(turnStatus);
-      if (turnIsTerminal) {
+      if (hasTimelineTarget && turnIsTerminal) {
         setConversationTurnId(targetConversationId, '');
-      } else if (turnId) {
+      } else if (hasTimelineTarget && turnId) {
         setConversationTurnId(targetConversationId, turnId);
       }
-      if (turnIsStarting) {
+      if (hasTimelineTarget && turnIsStarting) {
         setConversationThinking(targetConversationId, true);
       }
-      if (turnIsTerminal) {
+      if (hasTimelineTarget && turnIsTerminal) {
         setConversationThinking(targetConversationId, false);
         const queuedDrafts = queuedChatDraftsRef.current[targetConversationId] ?? [];
         const nextQueuedDraft = queuedDrafts[0] ?? null;
@@ -3198,7 +3200,10 @@ export default function App() {
             settlePendingThreadStart(pendingThread, '', localTurnErrorMessage(protocolError));
           }
         }
-        setConversationThinking(conversation?.id ?? targetConversationId, false);
+        const resetConversationId = conversation?.id ?? targetConversationId;
+        if (resetConversationId) {
+          setConversationThinking(resetConversationId, false);
+        }
       }
       if (protocolError && !isLocalAdapterAlreadyRunning(protocolError) && !isThreadNotMaterializedHistoryError(protocolError)) {
         setLastError(localTurnErrorMessage(protocolError));
@@ -3519,17 +3524,13 @@ export default function App() {
         updatedAt: Date.now(),
       };
       const nextConversation = createDefaultConversation(nextWorkspace);
-      const normalizedConversation = {
-        ...nextConversation,
-        sessionId,
-      };
 
       setWorkspaces((current) => [nextWorkspace, ...current]);
-      setConversations((current) => [normalizedConversation, ...current]);
+      setConversations((current) => [nextConversation, ...current]);
       setActiveWorkspaceId(id);
-      setActiveConversationId(normalizedConversation.id);
+      setActiveConversationId(nextConversation.id);
       pushSystem('已添加目录', nextWorkspace.path);
-      return { workspace: nextWorkspace, conversation: normalizedConversation };
+      return { workspace: nextWorkspace, conversation: nextConversation };
     },
     [
       pushSystem,
@@ -4214,7 +4215,6 @@ export default function App() {
     const nextConversation = {
       ...forkConversationRecord(conversation),
       workspaceId: workspace.id,
-      sessionId: sessionIdForConversation(workspace, conversation),
       title: `${conversation.title || 'Thread'} fork`,
     };
     setConversations((current) => [nextConversation, ...current]);
