@@ -14,12 +14,10 @@ import {
   Alert,
   AppState,
   Image,
-  Keyboard,
   ActivityIndicator,
   FlatList,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
-  type KeyboardEvent,
   type ListRenderItemInfo,
   Modal,
   Platform,
@@ -44,6 +42,12 @@ import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer, createNavigationContainerRef } from '@react-navigation/native';
 import { createNativeStackNavigator, type NativeStackScreenProps } from '@react-navigation/native-stack';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import {
+  KeyboardAvoidingView,
+  KeyboardProvider,
+  KeyboardStickyView,
+  useKeyboardState,
+} from 'react-native-keyboard-controller';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { enableScreens } from 'react-native-screens';
 import {
@@ -780,48 +784,6 @@ function extractProtocolError(eventType: string, data: Record<string, unknown>):
   }
 
   return '';
-}
-
-function keyboardHeightFromEvent(event: KeyboardEvent): number {
-  const height = event.endCoordinates?.height ?? 0;
-  return Number.isFinite(height) ? Math.max(0, height) : 0;
-}
-
-function useKeyboardInset(): number {
-  const [keyboardInset, setKeyboardInset] = useState(0);
-
-  useEffect(() => {
-    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
-    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
-    const changeEvent = Platform.OS === 'ios' ? 'keyboardWillChangeFrame' : 'keyboardDidShow';
-
-    const subscriptions = [
-      Keyboard.addListener(showEvent, (event) => {
-        setKeyboardInset(keyboardHeightFromEvent(event));
-      }),
-      Keyboard.addListener(hideEvent, () => {
-        setKeyboardInset(0);
-      }),
-    ];
-
-    if (changeEvent !== showEvent) {
-      subscriptions.push(Keyboard.addListener(changeEvent, (event) => {
-        setKeyboardInset(keyboardHeightFromEvent(event));
-      }));
-    }
-
-    const visibleKeyboard = Keyboard.metrics?.();
-    if (visibleKeyboard) {
-      const height = visibleKeyboard.height ?? 0;
-      setKeyboardInset(Number.isFinite(height) ? Math.max(0, height) : 0);
-    }
-
-    return () => {
-      subscriptions.forEach((subscription) => subscription.remove());
-    };
-  }, []);
-
-  return keyboardInset;
 }
 
 type TimelineEntry = {
@@ -6085,14 +6047,16 @@ export default function App() {
     return (
       <GestureHandlerRootView style={styles.appRoot}>
         <HeroUINativeProvider>
-          <Surface className="flex-1 items-center justify-center bg-background px-8">
-            <StatusBar style="dark" />
-            <View className="h-14 w-14 items-center justify-center rounded-lg bg-accent">
-              <HeroText className="text-2xl font-semibold text-accent-foreground">T</HeroText>
-            </View>
-            <HeroText className="mt-4 text-3xl font-semibold text-foreground">TodeX</HeroText>
-            <HeroText className="mt-2 text-center text-sm text-muted">正在加载设置和工作区...</HeroText>
-          </Surface>
+          <KeyboardProvider>
+            <Surface className="flex-1 items-center justify-center bg-background px-8">
+              <StatusBar style="dark" />
+              <View className="h-14 w-14 items-center justify-center rounded-lg bg-accent">
+                <HeroText className="text-2xl font-semibold text-accent-foreground">T</HeroText>
+              </View>
+              <HeroText className="mt-4 text-3xl font-semibold text-foreground">TodeX</HeroText>
+              <HeroText className="mt-2 text-center text-sm text-muted">正在加载设置和工作区...</HeroText>
+            </Surface>
+          </KeyboardProvider>
         </HeroUINativeProvider>
       </GestureHandlerRootView>
     );
@@ -6102,7 +6066,8 @@ export default function App() {
     <GestureHandlerRootView style={styles.appRoot}>
       <HeroUINativeProvider>
         <SafeAreaProvider>
-          <NavigationContainer ref={navigationRef}>
+          <KeyboardProvider>
+            <NavigationContainer ref={navigationRef}>
             <StatusBar style="dark" />
             <Stack.Navigator
               initialRouteName="Workspaces"
@@ -6308,8 +6273,8 @@ export default function App() {
               )}
             </Stack.Screen>
             </Stack.Navigator>
-          </NavigationContainer>
-          <PromptModal
+            </NavigationContainer>
+            <PromptModal
           visible={Boolean(modelCommandPrompt)}
           title="切换模型"
           initialValue={modelCommandPrompt?.initialValue ?? ''}
@@ -6425,7 +6390,8 @@ export default function App() {
               }
             }
           }}
-          />
+            />
+          </KeyboardProvider>
         </SafeAreaProvider>
       </HeroUINativeProvider>
     </GestureHandlerRootView>
@@ -6562,7 +6528,7 @@ function WorkspaceListScreen({
       </ScrollView>
 
       <Modal visible={modalVisible} animationType="slide" transparent onRequestClose={() => setModalVisible(false)}>
-        <View style={styles.modalBackdrop}>
+        <KeyboardAvoidingView behavior="padding" style={styles.modalBackdrop}>
           <Card className="rounded-b-none">
             <View style={styles.modalHeader}>
               <Card.Title>新建工作区</Card.Title>
@@ -6582,7 +6548,7 @@ function WorkspaceListScreen({
               <ActionButton title="填入默认路径" onPress={() => setWorkspacePathDraft(settings.defaultWorkspacePath)} tone="ghost" />
             </Row>
           </Card>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       <PromptModal
@@ -6873,8 +6839,9 @@ function ChatScreen({
   const autoExpandedProgressIdsRef = useRef<Set<string>>(new Set());
   const autoExpandedRequestIdsRef = useRef<Map<string, string[]>>(new Map());
   const insets = useSafeAreaInsets();
-  const keyboardInset = useKeyboardInset();
-  const composerPaddingBottom = 12 + (keyboardInset > 0 ? 0 : insets.bottom);
+  const keyboardVisible = useKeyboardState((state) => state.isVisible);
+  const composerKeyboardOffset = useMemo(() => ({ opened: insets.bottom }), [insets.bottom]);
+  const composerPaddingBottom = 12 + insets.bottom;
   const workspace = workspaces.find((item) => item.id === route.params.workspaceId) ?? null;
   const conversation = conversations.find((item) => item.id === route.params.conversationId) ?? null;
   const conversationMessages = useMemo(
@@ -7396,10 +7363,10 @@ function ChatScreen({
   }, [route.params.conversationId, scrollToLatest]);
 
   useEffect(() => {
-    if (shouldFollowLatestRef.current) {
+    if (keyboardVisible && shouldFollowLatestRef.current) {
       scrollToLatest(false);
     }
-  }, [keyboardInset, scrollToLatest]);
+  }, [keyboardVisible, scrollToLatest]);
 
   useLayoutEffect(() => {
     navigation.setOptions({
@@ -7431,7 +7398,7 @@ function ChatScreen({
   }
 
   return (
-    <Surface className="flex-1 bg-background" style={{ paddingBottom: keyboardInset }}>
+    <Surface className="flex-1 bg-background">
       {lastError ? (
         <Surface variant="secondary" className="mx-3 mt-2 rounded-lg px-3 py-2">
           <HeroText className="text-sm text-danger">{lastError}</HeroText>
@@ -7472,7 +7439,8 @@ function ChatScreen({
         ) : null}
       </View>
 
-      <View style={[styles.composer, { paddingBottom: composerPaddingBottom }]}>
+      <KeyboardStickyView offset={composerKeyboardOffset}>
+        <View style={[styles.composer, { paddingBottom: composerPaddingBottom }]}>
         {slashSuggestions.length > 0 ? (
           <Surface variant="secondary" className="mb-2 overflow-hidden rounded-lg">
             <ScrollView
@@ -7638,7 +7606,8 @@ function ChatScreen({
             </Button>
           </View>
         </View>
-      </View>
+        </View>
+      </KeyboardStickyView>
 
       <Modal visible={menuVisible} animationType="fade" transparent onRequestClose={() => setMenuVisible(false)}>
         <Pressable style={styles.menuBackdrop} onPress={() => setMenuVisible(false)}>
@@ -9387,7 +9356,7 @@ function PromptModal({
 
   return (
     <Modal visible={visible} animationType="fade" transparent onRequestClose={onCancel}>
-      <View style={styles.modalBackdrop}>
+      <KeyboardAvoidingView behavior="padding" style={styles.modalBackdrop}>
         <View style={styles.promptSheet}>
           <Text style={styles.modalTitle}>{title}</Text>
           <TextInput
@@ -9408,7 +9377,7 @@ function PromptModal({
             <ActionButton title="取消" onPress={onCancel} tone="ghost" />
           </Row>
         </View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
