@@ -74,6 +74,61 @@ test('parses Codex model list responses with reasoning efforts', () => {
   assert.deepEqual(parsed[0].supportedReasoningEfforts.map((item) => item.reasoningEffort), ['low', 'high']);
 });
 
+test('merges workspace sync records by newest backend or local cache copy', () => {
+  const local = [{
+    id: 'workspace-1',
+    name: 'Old App',
+    path: '/workspace/app',
+    sessionId: 'cdxs_app',
+    tenantId: 'local',
+    threadId: 'thread-local',
+    model: 'gpt-5.4',
+    reasoningEffort: 'medium',
+    approvalPolicy: 'on-request',
+    sandboxMode: 'workspace-write',
+    serviceTier: null,
+    localAdapterState: 'running',
+    createdAt: 10,
+    updatedAt: 20,
+  }];
+  const remote = [{
+    ...local[0],
+    name: 'Synced App',
+    threadId: '',
+    localAdapterState: 'idle',
+    updatedAt: 30,
+  }];
+
+  const merged = todex.mergeWorkspaceRecords(local, remote);
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].name, 'Synced App');
+  assert.equal(merged[0].localAdapterState, 'running');
+});
+
+test('prepares workspace sync payload as backend-safe cache records', () => {
+  const payload = todex.prepareWorkspaceSyncPayload([{
+    id: 'workspace-1',
+    name: 'App',
+    path: '/workspace/app',
+    sessionId: 'cdxs_app',
+    tenantId: 'local',
+    threadId: 'thread-local',
+    model: 'gpt-5.5',
+    reasoningEffort: 'extra-high',
+    approvalPolicy: 'on-request',
+    sandboxMode: 'workspace-write',
+    serviceTier: null,
+    localAdapterState: 'running',
+    createdAt: 10,
+    updatedAt: 20,
+  }]);
+
+  assert.equal(payload[0].threadId, '');
+  assert.equal(payload[0].localAdapterState, 'idle');
+  assert.equal(payload[0].reasoningEffort, 'xhigh');
+});
+
 test('parses legacy snake_case model catalog shapes', () => {
   const parsed = todex.parseCodexModelListResponse({
     result: {

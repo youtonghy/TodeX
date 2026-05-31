@@ -82,10 +82,13 @@ import {
   normalizeReasoningEffort,
   normalizeThreadId,
   normalizeServerUrl,
+  mergeWorkspaceRecords,
   parseCodexModelListResponse,
   parseCodexNativeThread,
   parseCodexNativeThreadListResponse,
   parseCodexNativeThreadReadResponse,
+  parseWorkspaceSyncResponse,
+  prepareWorkspaceSyncPayload,
   sandboxPolicyForMode,
   shortJson,
   type CodexThreadHistoryEntry,
@@ -1006,6 +1009,7 @@ const EXPERIMENTAL_FEATURES_STORAGE_KEY = 'todex.mobile.experimentalFeatures.v1'
 const TOKEN_STORAGE_KEY = 'todex.mobile.token.v1';
 const JSON_SAVE_DEBOUNCE_MS = 350;
 const SESSION_CURSOR_SAVE_DEBOUNCE_MS = 800;
+const WORKSPACE_SYNC_DEBOUNCE_MS = 900;
 const SOCKET_EVENT_BATCH_SIZE = 24;
 const MAX_TIMELINE_ITEMS = 260;
 const MAX_EVENTS = 220;
@@ -1275,6 +1279,17 @@ function fromPersistedSettings(raw: Partial<PersistedSettings> | null | undefine
     defaultReasoningEffort: normalizeReasoningEffort(safeRaw.defaultReasoningEffort) ?? defaultSettings.defaultReasoningEffort,
     authToken,
   };
+}
+
+function authHeaders(settings: ConnectionSettings, extra: Record<string, string> = {}): Record<string, string> {
+  return {
+    ...extra,
+    ...(settings.authToken ? { Authorization: `Bearer ${settings.authToken}` } : {}),
+  };
+}
+
+function workspaceSyncPayloadEquals(left: WorkspaceRecord[], right: WorkspaceRecord[]): boolean {
+  return JSON.stringify(prepareWorkspaceSyncPayload(left)) === JSON.stringify(prepareWorkspaceSyncPayload(right));
 }
 
 function sanitizeSlug(value: string): string {
@@ -2073,6 +2088,21 @@ function createDefaultConversation(workspace: WorkspaceRecord): ConversationReco
   };
 }
 
+function conversationsForWorkspaceSnapshot(
+  workspaces: WorkspaceRecord[],
+  conversations: ConversationRecord[],
+): ConversationRecord[] {
+  const workspaceIds = new Set(workspaces.map((workspace) => workspace.id));
+  const next = conversations.filter((conversation) => workspaceIds.has(conversation.workspaceId));
+  const existingWorkspaceIds = new Set(next.map((conversation) => conversation.workspaceId));
+  for (const workspace of workspaces) {
+    if (!existingWorkspaceIds.has(workspace.id)) {
+      next.push(createDefaultConversation(workspace));
+    }
+  }
+  return next.sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
 function forkConversationRecord(conversation: ConversationRecord, title?: string): ConversationRecord {
   return {
     ...conversation,
@@ -2111,6 +2141,9 @@ export default function App() {
   const sessionCursorsRef = useRef(new Map<string, number>());
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const manualDisconnectRef = useRef(false);
+  const workspaceBackendReadyRef = useRef(false);
+  const workspaceBackendSkipNextSaveRef = useRef(false);
+  const workspaceBackendSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const healthProbeSeqRef = useRef(0);
   const loadedNativeThreadHistoryRef = useRef(new Map<string, number>());
   const unmaterializedNativeThreadIdsRef = useRef(new Set<string>());
@@ -2316,6 +2349,11 @@ export default function App() {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
+    if (workspaceBackendSyncTimerRef.current) {
+      clearTimeout(workspaceBackendSyncTimerRef.current);
+      workspaceBackendSyncTimerRef.current = null;
+    }
+    workspaceBackendReadyRef.current = false;
     if (socketRef.current) {
       transportClientRef.current?.flushAcks?.();
       try {
@@ -2480,12 +2518,101 @@ export default function App() {
     void saveSecret(TOKEN_STORAGE_KEY, settings.authToken);
   }, [hydrated, settings]);
 
+  const syncWorkspacesToBackend = useCallback(
+    async (snapshot: WorkspaceRecord[] = workspacesRef.current) => {
+      try {
+        const response = await fetch(buildHttpUrl(settings.serverUrl, '/v1/workspaces'), {
+          method: 'PUT',
+          headers: authHeaders(settings, { 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ workspaces: prepareWorkspaceSyncPayload(snapshot) }),
+        });
+        if (!response.ok) {
+          throw new Error(`workspace sync returned ${response.status}`);
+        }
+        return true;
+      } catch (error) {
+        setLastError(error instanceof Error ? error.message : '工作区同步失败');
+        return false;
+      }
+    },
+    [settings],
+  );
+
+  const scheduleWorkspaceBackendSave = useCallback(
+    (snapshot: WorkspaceRecord[]) => {
+      if (workspaceBackendSyncTimerRef.current) {
+        clearTimeout(workspaceBackendSyncTimerRef.current);
+      }
+      const payload = prepareWorkspaceSyncPayload(snapshot);
+      workspaceBackendSyncTimerRef.current = setTimeout(() => {
+        workspaceBackendSyncTimerRef.current = null;
+        void syncWorkspacesToBackend(payload);
+      }, WORKSPACE_SYNC_DEBOUNCE_MS);
+    },
+    [syncWorkspacesToBackend],
+  );
+
+  const syncWorkspacesFromBackend = useCallback(async () => {
+    workspaceBackendReadyRef.current = false;
+    try {
+      const response = await fetch(buildHttpUrl(settings.serverUrl, '/v1/workspaces'), {
+        headers: authHeaders(settings),
+      });
+      if (!response.ok) {
+        throw new Error(`workspace sync returned ${response.status}`);
+      }
+      const remoteWorkspaces = parseWorkspaceSyncResponse(await response.json());
+      const localWorkspaces = workspacesRef.current;
+      const nextWorkspaces = remoteWorkspaces.length > 0
+        ? mergeWorkspaceRecords(localWorkspaces, remoteWorkspaces).map((workspace) => ({
+            ...workspace,
+            threadId: '',
+            localAdapterState:
+              localWorkspaces.find((item) => item.id === workspace.id)?.localAdapterState ??
+              workspace.localAdapterState ??
+              'idle',
+          }))
+        : localWorkspaces;
+
+      if (nextWorkspaces.length > 0) {
+        const nextConversations = conversationsForWorkspaceSnapshot(nextWorkspaces, conversationsRef.current);
+        workspaceBackendSkipNextSaveRef.current = true;
+        setWorkspaces(nextWorkspaces);
+        setConversations(nextConversations);
+        if (!nextWorkspaces.some((workspace) => workspace.id === activeWorkspaceRef.current)) {
+          const nextWorkspaceId = nextWorkspaces[0]?.id ?? '';
+          setActiveWorkspaceId(nextWorkspaceId);
+          setActiveConversationId(nextConversations.find((conversation) => conversation.workspaceId === nextWorkspaceId)?.id ?? '');
+        } else if (!nextConversations.some((conversation) => conversation.id === activeConversationRef.current)) {
+          setActiveConversationId(nextConversations.find((conversation) => conversation.workspaceId === activeWorkspaceRef.current)?.id ?? '');
+        }
+      }
+
+      workspaceBackendReadyRef.current = true;
+      if (!workspaceSyncPayloadEquals(remoteWorkspaces, nextWorkspaces)) {
+        void syncWorkspacesToBackend(nextWorkspaces);
+      }
+      return true;
+    } catch (error) {
+      workspaceBackendReadyRef.current = true;
+      setLastError(error instanceof Error ? error.message : '工作区同步失败');
+      return false;
+    }
+  }, [settings, syncWorkspacesToBackend]);
+
   useEffect(() => {
     if (!hydrated) {
       return;
     }
     void saveJson(WORKSPACES_STORAGE_KEY, workspaces);
-  }, [hydrated, workspaces]);
+    if (workspaceBackendSkipNextSaveRef.current) {
+      workspaceBackendSkipNextSaveRef.current = false;
+      return;
+    }
+    if (connectionState === 'open' && workspaceBackendReadyRef.current) {
+      scheduleWorkspaceBackendSave(workspaces);
+    }
+  }, [connectionState, hydrated, scheduleWorkspaceBackendSave, workspaces]);
 
   useEffect(() => {
     if (!hydrated) {
@@ -3588,6 +3715,7 @@ export default function App() {
         setConnectionState('open');
         void checkConnectionHealth();
         void refreshServerVersion();
+        void syncWorkspacesFromBackend();
       };
 
       socket.onmessage = (event) => {
@@ -3618,7 +3746,7 @@ export default function App() {
       socketCryptoRef.current = null;
       setLastError(error instanceof Error ? error.message : 'failed to connect');
     }
-  }, [checkConnectionHealth, closeSocket, enqueueServerEvent, getSessionCursorSnapshot, pushSystem, refreshServerVersion, settings]);
+  }, [checkConnectionHealth, closeSocket, enqueueServerEvent, getSessionCursorSnapshot, pushSystem, refreshServerVersion, settings, syncWorkspacesFromBackend]);
 
   useEffect(() => {
     if (!hydrated || !autoConnectEnabled || manualDisconnectRef.current) {

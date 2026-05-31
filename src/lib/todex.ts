@@ -251,6 +251,22 @@ function booleanField(record: Record<string, unknown>, keys: string[], fallback 
   return fallback;
 }
 
+function numberField(record: Record<string, unknown>, keys: string[], fallback = 0): number {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === 'string' && value.trim()) {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+  }
+  return fallback;
+}
+
 function parseReasoningEffortOptions(value: unknown, defaultEffort: string | null): CodexReasoningEffortOption[] {
   if (!Array.isArray(value)) {
     return defaultEffort
@@ -406,6 +422,134 @@ export function displayNameFromPath(path: string): string {
   }
   const parts = trimmed.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] || 'Workspace';
+}
+
+export function normalizeWorkspaceRecord(value: unknown): WorkspaceRecord | null {
+  if (!isObject(value)) {
+    return null;
+  }
+
+  const id = stringField(value, ['id']).trim();
+  const path = stringField(value, ['path', 'cwd']).trim();
+  if (!id || !path) {
+    return null;
+  }
+
+  const now = Date.now();
+  const name = stringField(value, ['name']).trim() || displayNameFromPath(path);
+  const createdAt = numberField(value, ['createdAt', 'created_at']) || now;
+  const updatedAt = numberField(value, ['updatedAt', 'updated_at']) || createdAt;
+  const localAdapterState = normalizeLocalAdapterState(stringField(value, ['localAdapterState', 'local_adapter_state']));
+
+  return {
+    id,
+    name,
+    path,
+    sessionId: stringField(value, ['sessionId', 'session_id']) || `cdxs_${id}`,
+    tenantId: stringField(value, ['tenantId', 'tenant_id']) || 'local',
+    threadId: stringField(value, ['threadId', 'thread_id']),
+    model: stringField(value, ['model']) || 'gpt-5.5',
+    reasoningEffort: normalizeReasoningEffort(stringField(value, ['reasoningEffort', 'reasoning_effort'])) ?? null,
+    approvalPolicy: stringField(value, ['approvalPolicy', 'approval_policy']) || 'on-request',
+    sandboxMode: stringField(value, ['sandboxMode', 'sandbox_mode']) || 'workspace-write',
+    serviceTier: stringField(value, ['serviceTier', 'service_tier']) || null,
+    localAdapterState,
+    createdAt,
+    updatedAt,
+  };
+}
+
+export function parseWorkspaceSyncResponse(value: unknown): WorkspaceRecord[] {
+  const rawWorkspaces = Array.isArray(value)
+    ? value
+    : isObject(value) && Array.isArray(value.workspaces)
+      ? value.workspaces
+      : [];
+  return rawWorkspaces
+    .map(normalizeWorkspaceRecord)
+    .filter((workspace): workspace is WorkspaceRecord => Boolean(workspace));
+}
+
+export function prepareWorkspaceSyncPayload(workspaces: WorkspaceRecord[]): WorkspaceRecord[] {
+  return workspaces
+    .map(normalizeWorkspaceRecord)
+    .filter((workspace): workspace is WorkspaceRecord => Boolean(workspace))
+    .map((workspace) => ({
+      ...workspace,
+      threadId: '',
+      localAdapterState: 'idle' as LocalAdapterState,
+      reasoningEffort: normalizeReasoningEffort(workspace.reasoningEffort) ?? null,
+    }))
+    .sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+export function mergeWorkspaceRecords(local: WorkspaceRecord[], remote: WorkspaceRecord[]): WorkspaceRecord[] {
+  const merged: WorkspaceRecord[] = [];
+
+  const upsert = (candidate: WorkspaceRecord, preferCandidateOnTie: boolean) => {
+    const normalized = normalizeWorkspaceRecord(candidate);
+    if (!normalized) {
+      return;
+    }
+    const existingIndex = merged.findIndex((workspace) => sameWorkspaceRecord(workspace, normalized));
+    if (existingIndex === -1) {
+      merged.push(normalized);
+      return;
+    }
+
+    const existing = merged[existingIndex];
+    const candidateUpdatedAt = Number.isFinite(normalized.updatedAt) ? normalized.updatedAt : 0;
+    const existingUpdatedAt = Number.isFinite(existing.updatedAt) ? existing.updatedAt : 0;
+    if (candidateUpdatedAt > existingUpdatedAt || (preferCandidateOnTie && candidateUpdatedAt === existingUpdatedAt)) {
+      merged[existingIndex] = {
+        ...normalized,
+        localAdapterState: preserveRuntimeAdapterState(existing.localAdapterState, normalized.localAdapterState),
+      };
+    }
+  };
+
+  local.forEach((workspace) => upsert(workspace, false));
+  remote.forEach((workspace) => upsert(workspace, true));
+  return merged
+    .map((workspace) => ({
+      ...workspace,
+      reasoningEffort: normalizeReasoningEffort(workspace.reasoningEffort) ?? null,
+    }))
+    .sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+function sameWorkspaceRecord(left: WorkspaceRecord, right: WorkspaceRecord): boolean {
+  if (left.id && right.id && left.id === right.id) {
+    return true;
+  }
+  return normalizeWorkspacePath(left.path) === normalizeWorkspacePath(right.path);
+}
+
+function normalizeWorkspacePath(path: string): string {
+  return path.trim().replace(/[\\/]+$/, '');
+}
+
+function normalizeLocalAdapterState(value: string): LocalAdapterState | undefined {
+  switch (value) {
+    case 'idle':
+    case 'starting':
+    case 'running':
+    case 'stopped':
+    case 'error':
+      return value;
+    default:
+      return undefined;
+  }
+}
+
+function preserveRuntimeAdapterState(
+  previous: LocalAdapterState | undefined,
+  next: LocalAdapterState | undefined,
+): LocalAdapterState | undefined {
+  if (previous === 'starting' || previous === 'running') {
+    return previous;
+  }
+  return next;
 }
 
 export function eventPayloadData(event: ServerEvent): Record<string, unknown> {
