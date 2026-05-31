@@ -135,6 +135,19 @@ type ServerVersion = {
   workspace_root: string;
 };
 
+type WorkspaceDirectoryEntry = {
+  name: string;
+  path: string;
+  kind: 'directory';
+};
+
+type WorkspaceDirectorySnapshot = {
+  root: string;
+  current: string;
+  parent: string | null;
+  entries: WorkspaceDirectoryEntry[];
+};
+
 type ConversationRecord = {
   id: string;
   workspaceId: string;
@@ -1698,6 +1711,61 @@ function stringFromUnknown(value: unknown): string {
     return String(value);
   }
   return '';
+}
+
+function parseWorkspaceDirectorySnapshot(value: unknown): WorkspaceDirectorySnapshot {
+  const root = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const entries = Array.isArray(root.entries)
+    ? root.entries
+        .map((entry): WorkspaceDirectoryEntry | null => {
+          if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+            return null;
+          }
+          const record = entry as Record<string, unknown>;
+          const name = stringFromUnknown(record.name).trim();
+          const path = stringFromUnknown(record.path).trim();
+          const kind = stringFromUnknown(record.kind);
+          if (!name || !path || kind !== 'directory') {
+            return null;
+          }
+          return { name, path, kind: 'directory' };
+        })
+        .filter((entry): entry is WorkspaceDirectoryEntry => Boolean(entry))
+    : [];
+  const parent = stringFromUnknown(root.parent).trim();
+  return {
+    root: stringFromUnknown(root.root).trim(),
+    current: stringFromUnknown(root.current).trim(),
+    parent: parent || null,
+    entries,
+  };
+}
+
+async function fetchWorkspaceDirectorySnapshot(
+  settings: ConnectionSettings,
+  path?: string,
+): Promise<WorkspaceDirectorySnapshot> {
+  const url = new URL(buildHttpUrl(settings.serverUrl, '/v1/workspace/directories'));
+  if (path) {
+    url.searchParams.set('path', path);
+  }
+  const response = await fetch(url.toString(), {
+    headers: authHeaders(settings),
+  });
+  const body = await response.json().catch(() => null);
+  if (!response.ok) {
+    const message = body && typeof body === 'object' && !Array.isArray(body)
+      ? stringFromUnknown((body as Record<string, unknown>).message)
+      : '';
+    throw new Error(message || `目录读取失败: ${response.status}`);
+  }
+  const snapshot = parseWorkspaceDirectorySnapshot(body);
+  if (!snapshot.current) {
+    throw new Error('后端没有返回当前目录');
+  }
+  return snapshot;
 }
 
 function progressTextFromData(data: Record<string, unknown>, item: Record<string, unknown> | null): string {
@@ -6086,6 +6154,7 @@ export default function App() {
                   workspaces={workspaces}
                   conversations={conversations}
                   settings={settings}
+                  serverVersion={serverVersion}
                   connectionState={connectionState}
                   createWorkspace={createWorkspace}
                   selectWorkspace={selectWorkspace}
@@ -6403,6 +6472,7 @@ function WorkspaceListScreen({
   workspaces,
   conversations,
   settings,
+  serverVersion,
   connectionState,
   createWorkspace,
   selectWorkspace,
@@ -6413,6 +6483,7 @@ function WorkspaceListScreen({
   workspaces: WorkspaceRecord[];
   conversations: ConversationRecord[];
   settings: ConnectionSettings;
+  serverVersion: ServerVersion | null;
   connectionState: string;
   createWorkspace: (name: string, path: string) => { workspace: WorkspaceRecord; conversation: ConversationRecord } | null;
   selectWorkspace: (workspaceId: string) => void;
@@ -6423,6 +6494,8 @@ function WorkspaceListScreen({
   const [modalVisible, setModalVisible] = useState(false);
   const [workspaceNameDraft, setWorkspaceNameDraft] = useState('');
   const [workspacePathDraft, setWorkspacePathDraft] = useState('');
+  const [pathPickerVisible, setPathPickerVisible] = useState(false);
+  const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [renamingWorkspace, setRenamingWorkspace] = useState<WorkspaceRecord | null>(null);
 
   useLayoutEffect(() => {
@@ -6437,14 +6510,32 @@ function WorkspaceListScreen({
   }, [navigation]);
 
   const submit = () => {
-    const created = createWorkspace(workspaceNameDraft, workspacePathDraft);
-    if (!created) {
+    if (creatingWorkspace) {
       return;
     }
-    setWorkspaceNameDraft('');
-    setWorkspacePathDraft('');
-    setModalVisible(false);
-    navigation.navigate('Conversations', { workspaceId: created.workspace.id });
+    const pathDraft = workspacePathDraft.trim();
+    if (!pathDraft) {
+      Alert.alert('缺少目录', '请输入要管理的目录路径。');
+      return;
+    }
+    setCreatingWorkspace(true);
+    void fetchWorkspaceDirectorySnapshot(settings, pathDraft)
+      .then((snapshot) => {
+        const created = createWorkspace(workspaceNameDraft, snapshot.current);
+        if (!created) {
+          return;
+        }
+        setWorkspaceNameDraft('');
+        setWorkspacePathDraft('');
+        setModalVisible(false);
+        navigation.navigate('Conversations', { workspaceId: created.workspace.id });
+      })
+      .catch((error) => {
+        Alert.alert('目录不可用', error instanceof Error ? error.message : '后端拒绝使用该目录。');
+      })
+      .finally(() => {
+        setCreatingWorkspace(false);
+      });
   };
 
   const openWorkspaceActions = (workspace: WorkspaceRecord) => {
@@ -6537,19 +6628,31 @@ function WorkspaceListScreen({
               </Button>
             </View>
             <Field label="工作区名称" value={workspaceNameDraft} onChangeText={setWorkspaceNameDraft} placeholder="可选" />
-            <Field
+            <PathField
               label="目录路径"
               value={workspacePathDraft}
               onChangeText={setWorkspacePathDraft}
               placeholder={settings.defaultWorkspacePath}
+              onBrowse={() => setPathPickerVisible(true)}
             />
             <Row>
-              <ActionButton title="创建" onPress={submit} />
+              <ActionButton title={creatingWorkspace ? '验证中' : '创建'} onPress={submit} disabled={creatingWorkspace} />
               <ActionButton title="填入默认路径" onPress={() => setWorkspacePathDraft(settings.defaultWorkspacePath)} tone="ghost" />
             </Row>
           </Card>
         </KeyboardAvoidingView>
       </Modal>
+      <WorkspacePathPickerModal
+        visible={pathPickerVisible}
+        title="选择工作区目录"
+        settings={settings}
+        rootHint={serverVersion?.workspace_root ?? ''}
+        onSelect={(path) => {
+          setWorkspacePathDraft(path);
+          setPathPickerVisible(false);
+        }}
+        onCancel={() => setPathPickerVisible(false)}
+      />
 
       <PromptModal
         visible={Boolean(renamingWorkspace)}
@@ -8663,6 +8766,7 @@ function SettingsScreen({
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [pairingScannerVisible, setPairingScannerVisible] = useState(false);
   const [pairingScannerStatus, setPairingScannerStatus] = useState('对准后端配对二维码。');
+  const [pathPickerVisible, setPathPickerVisible] = useState(false);
   const pairingChunkCollectorRef = useRef<PairingChunkCollector | null>(null);
   const pairingScanBusyRef = useRef(false);
   const pairingScannerLastRawRef = useRef<string | null>(null);
@@ -8931,11 +9035,12 @@ function SettingsScreen({
           <Card.Title>默认参数</Card.Title>
         </Card.Header>
         <Card.Body className="gap-4">
-          <Field
+          <PathField
             label="默认目录路径"
             value={settings.defaultWorkspacePath}
             onChangeText={(value) => setSettings((current) => ({ ...current, defaultWorkspacePath: value }))}
             placeholder="/home/dev/projects"
+            onBrowse={() => setPathPickerVisible(true)}
           />
           <Field
             label="默认模型"
@@ -8996,6 +9101,17 @@ function SettingsScreen({
           <Diagnostic label="当前 Turn" value={turnId || 'unknown'} />
         </Card.Body>
       </Card>
+      <WorkspacePathPickerModal
+        visible={pathPickerVisible}
+        title="默认工作区目录"
+        settings={settings}
+        rootHint={serverVersion?.workspace_root ?? ''}
+        onSelect={(path) => {
+          setSettings((current) => ({ ...current, defaultWorkspacePath: path }));
+          setPathPickerVisible(false);
+        }}
+        onCancel={() => setPathPickerVisible(false)}
+      />
       </ScrollView>
     </Surface>
   );
@@ -9322,6 +9438,175 @@ function Field({
         textAlignVertical={multiline ? 'top' : 'center'}
       />
     </TextField>
+  );
+}
+
+function PathField({
+  label,
+  value,
+  onChangeText,
+  onBlur,
+  placeholder,
+  editable = true,
+  onBrowse,
+}: {
+  label: string;
+  value: string;
+  onChangeText: (value: string) => void;
+  onBlur?: () => void;
+  placeholder?: string;
+  editable?: boolean;
+  onBrowse: () => void;
+}) {
+  return (
+    <TextField className="gap-2">
+      <Label>{label}</Label>
+      <View style={styles.pathInputRow}>
+        <Input
+          value={value}
+          onChangeText={onChangeText}
+          onBlur={onBlur}
+          placeholder={placeholder}
+          className="min-h-11 flex-1 rounded-lg"
+          isDisabled={!editable}
+          autoCapitalize="none"
+          autoCorrect={false}
+          textAlignVertical="center"
+        />
+        <Button
+          size="md"
+          variant="secondary"
+          isIconOnly
+          isDisabled={!editable}
+          onPress={onBrowse}
+          className="min-h-11 w-11 rounded-lg"
+        >
+          <StyledIonicons name="folder-open-outline" size={18} className="text-foreground" />
+        </Button>
+      </View>
+    </TextField>
+  );
+}
+
+function WorkspacePathPickerModal({
+  visible,
+  title,
+  settings,
+  rootHint,
+  onSelect,
+  onCancel,
+}: {
+  visible: boolean;
+  title: string;
+  settings: ConnectionSettings;
+  rootHint: string;
+  onSelect: (path: string) => void;
+  onCancel: () => void;
+}) {
+  const [snapshot, setSnapshot] = useState<WorkspaceDirectorySnapshot>({
+    root: rootHint,
+    current: rootHint,
+    parent: null,
+    entries: [],
+  });
+  const [status, setStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [error, setError] = useState('');
+  const requestSeqRef = useRef(0);
+
+  const loadPath = useCallback(
+    async (path?: string) => {
+      const requestSeq = requestSeqRef.current + 1;
+      requestSeqRef.current = requestSeq;
+      setStatus('loading');
+      setError('');
+      try {
+        const next = await fetchWorkspaceDirectorySnapshot(settings, path);
+        if (requestSeqRef.current !== requestSeq) {
+          return;
+        }
+        setSnapshot(next);
+        setStatus('ready');
+      } catch (loadError) {
+        if (requestSeqRef.current !== requestSeq) {
+          return;
+        }
+        setStatus('error');
+        setError(loadError instanceof Error ? loadError.message : '目录读取失败');
+      }
+    },
+    [settings],
+  );
+
+  useEffect(() => {
+    if (visible) {
+      setSnapshot({
+        root: rootHint,
+        current: rootHint,
+        parent: null,
+        entries: [],
+      });
+      void loadPath();
+    }
+  }, [loadPath, rootHint, visible]);
+
+  const isLoading = status === 'loading';
+  const canUseParent = Boolean(snapshot.parent) && !isLoading;
+
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onCancel}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.pathPickerSheet}>
+          <View style={styles.modalHeader}>
+            <View style={styles.modelControlTitleBlock}>
+              <Text style={styles.modalTitle}>{title}</Text>
+              <Text style={styles.pathPickerSubtitle} numberOfLines={1}>
+                {snapshot.root || rootHint || 'workspace root'}
+              </Text>
+            </View>
+            <Pressable onPress={onCancel}>
+              <Text style={styles.modalClose}>关闭</Text>
+            </Pressable>
+          </View>
+          <Surface variant="secondary" className="rounded-lg p-3">
+            <Text style={styles.pathPickerCurrent} numberOfLines={2}>
+              {snapshot.current || rootHint || '正在读取...'}
+            </Text>
+          </Surface>
+          <Row>
+            <ActionButton title="选择" onPress={() => snapshot.current && onSelect(snapshot.current)} disabled={!snapshot.current || isLoading} />
+            <ActionButton title="上级" onPress={() => snapshot.parent && void loadPath(snapshot.parent)} tone="ghost" disabled={!canUseParent} />
+            <ActionButton title="刷新" onPress={() => void loadPath(snapshot.current || undefined)} tone="ghost" disabled={isLoading} />
+          </Row>
+          {isLoading ? (
+            <View style={styles.pathPickerLoading}>
+              <ActivityIndicator size="small" color="#17202a" />
+              <Text style={styles.pathPickerStatus}>正在读取目录</Text>
+            </View>
+          ) : null}
+          {error ? <Text style={styles.warningText}>{error}</Text> : null}
+          <ScrollView style={styles.pathPickerList} contentContainerStyle={styles.pathPickerListContent}>
+            {snapshot.entries.length === 0 && status !== 'loading' ? (
+              <Text style={styles.pathPickerEmpty}>没有可选择的子目录</Text>
+            ) : (
+              snapshot.entries.map((entry) => (
+                <Pressable
+                  key={entry.path}
+                  style={styles.pathDirectoryItem}
+                  onPress={() => void loadPath(entry.path)}
+                >
+                  <StyledIonicons name="folder-outline" size={18} className="text-foreground" />
+                  <View style={styles.pathDirectoryText}>
+                    <Text style={styles.pathDirectoryName} numberOfLines={1}>{entry.name}</Text>
+                    <Text style={styles.pathDirectoryPath} numberOfLines={1}>{entry.path}</Text>
+                  </View>
+                  <StyledIonicons name="chevron-forward" size={16} className="text-muted" />
+                </Pressable>
+              ))
+            )}
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -9976,6 +10261,15 @@ const styles = StyleSheet.create({
     paddingBottom: 28,
     gap: 14,
   },
+  pathPickerSheet: {
+    maxHeight: '88%',
+    backgroundColor: '#ffffff',
+    borderTopLeftRadius: 8,
+    borderTopRightRadius: 8,
+    padding: 18,
+    paddingBottom: 28,
+    gap: 14,
+  },
   skillPickerSheet: {
     maxHeight: '92%',
     backgroundColor: '#ffffff',
@@ -10049,6 +10343,76 @@ const styles = StyleSheet.create({
     color: '#52606d',
     fontSize: 14,
     fontWeight: '800',
+  },
+  pathInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  pathPickerSubtitle: {
+    color: '#66717c',
+    fontSize: 12,
+    fontWeight: '700',
+    marginTop: 3,
+    maxWidth: 260,
+  },
+  pathPickerCurrent: {
+    color: '#17202a',
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 18,
+  },
+  pathPickerLoading: {
+    minHeight: 36,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  pathPickerStatus: {
+    color: '#52606d',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  pathPickerList: {
+    maxHeight: 380,
+  },
+  pathPickerListContent: {
+    gap: 8,
+    paddingBottom: 4,
+  },
+  pathPickerEmpty: {
+    color: '#66717c',
+    fontSize: 13,
+    fontWeight: '700',
+    paddingVertical: 12,
+    textAlign: 'center',
+  },
+  pathDirectoryItem: {
+    minHeight: 58,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d8e0e7',
+    backgroundColor: '#f7f9fa',
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+  },
+  pathDirectoryText: {
+    flex: 1,
+    minWidth: 0,
+  },
+  pathDirectoryName: {
+    color: '#17202a',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  pathDirectoryPath: {
+    color: '#66717c',
+    fontSize: 11,
+    fontWeight: '600',
+    marginTop: 3,
   },
   scannerScreen: {
     flex: 1,
