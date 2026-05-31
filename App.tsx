@@ -115,6 +115,7 @@ type RootStackParamList = {
   SlashCommandAction: { workspaceId: string; conversationId: string; command: string };
   Experimental: { workspaceId: string; conversationId: string };
   GitDiff: { workspaceId: string; conversationId: string };
+  Terminal: { workspaceId: string; conversationId: string };
   Settings: undefined;
 };
 
@@ -175,6 +176,32 @@ type GitDiffState = {
   diff: string;
   sha: string;
   error: string;
+  updatedAt: number;
+};
+
+type TerminalLifecycleState = 'idle' | 'starting' | 'running' | 'stopping' | 'exited' | 'error';
+
+type TerminalOutputEntry = {
+  id: string;
+  kind: 'stdout' | 'stderr' | 'input' | 'system' | 'error';
+  text: string;
+  at: number;
+};
+
+type TerminalClientState = {
+  terminalId: string;
+  workspaceId: string;
+  conversationId: string;
+  tenantId: string;
+  cwd: string;
+  shell: string;
+  rows: number;
+  cols: number;
+  status: TerminalLifecycleState;
+  output: TerminalOutputEntry[];
+  error: string;
+  pid?: number | null;
+  exitCode?: number | null;
   updatedAt: number;
 };
 
@@ -985,6 +1012,9 @@ const MAX_EVENTS = 220;
 const RECONNECT_DELAY_MS = 2500;
 const CHAT_ATTACH_REPLAY_LIMIT = 200;
 const CHAT_BOTTOM_FOLLOW_THRESHOLD = 72;
+const TERMINAL_MAX_OUTPUT_ENTRIES = 420;
+const DEFAULT_TERMINAL_ROWS = 24;
+const DEFAULT_TERMINAL_COLS = 80;
 
 const SLASH_COMMANDS: SlashCommand[] = [
   { command: '/model', title: 'Model', description: 'choose what model and reasoning effort to use', category: 'settings' },
@@ -1259,6 +1289,37 @@ function sanitizeSlug(value: string): string {
 function createSessionId(name: string): string {
   const slug = sanitizeSlug(name) || 'workspace';
   return `cdxs_${slug}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function terminalIdForConversation(conversationId: string): string {
+  return `term_${conversationId.replace(/[^a-zA-Z0-9_-]+/g, '_')}`;
+}
+
+function terminalStatusLabel(status: TerminalLifecycleState): string {
+  switch (status) {
+    case 'starting':
+      return '启动中';
+    case 'running':
+      return '运行中';
+    case 'stopping':
+      return '停止中';
+    case 'exited':
+      return '已退出';
+    case 'error':
+      return '异常';
+    case 'idle':
+    default:
+      return '未启动';
+  }
+}
+
+function terminalOutputLine(kind: TerminalOutputEntry['kind'], text: string): TerminalOutputEntry {
+  return {
+    id: createRequestId(`terminal-${kind}`),
+    kind,
+    text,
+    at: Date.now(),
+  };
 }
 
 function nowLabel(timestamp: number): string {
@@ -2093,6 +2154,7 @@ export default function App() {
   const [threadListStatusByWorkspace, setThreadListStatusByWorkspace] = useState<Record<string, 'idle' | 'loading' | 'ready' | 'error'>>({});
   const [threadListErrorByWorkspace, setThreadListErrorByWorkspace] = useState<Record<string, string>>({});
   const [gitDiffByConversation, setGitDiffByConversation] = useState<Record<string, GitDiffState>>({});
+  const [terminalById, setTerminalById] = useState<Record<string, TerminalClientState>>({});
   const queuedChatDraftsRef = useRef<Record<string, QueuedChatSubmission[]>>({});
   const queuedChatDispatchingRef = useRef(new Set<string>());
   const sendQueuedChatDraftRef = useRef<(submission: QueuedChatSubmission, conversationId: string) => Promise<boolean>>(async () => false);
@@ -2817,6 +2879,172 @@ export default function App() {
     [appendTimeline, updateConversation],
   );
 
+  const appendTerminalOutput = useCallback((terminalId: string, entry: TerminalOutputEntry) => {
+    setTerminalById((current) => {
+      const existing = current[terminalId];
+      if (!existing) {
+        return current;
+      }
+      return {
+        ...current,
+        [terminalId]: {
+          ...existing,
+          output: [...existing.output, entry].slice(-TERMINAL_MAX_OUTPUT_ENTRIES),
+          updatedAt: Date.now(),
+        },
+      };
+    });
+  }, []);
+
+  const handleTerminalEvent = useCallback((event: ServerEvent, data: Record<string, unknown>) => {
+    if (!event.type.startsWith('terminal.')) {
+      return false;
+    }
+    if (event.type === 'terminal.audit') {
+      return true;
+    }
+
+    const rawTerminalId = data.terminalId ?? data.terminal_id ?? event.pane_id;
+    const terminalId = typeof rawTerminalId === 'string' ? rawTerminalId : '';
+    if (!terminalId && event.type !== 'terminal.status') {
+      return true;
+    }
+
+    if (event.type === 'terminal.status') {
+      const terminals = Array.isArray(data.terminals) ? data.terminals : [];
+      setTerminalById((current) => {
+        let next = current;
+        terminals.forEach((item) => {
+          if (!item || typeof item !== 'object') {
+            return;
+          }
+          const record = item as Record<string, unknown>;
+          const statusTerminalId = typeof record.terminalId === 'string' ? record.terminalId : '';
+          const existing = statusTerminalId ? current[statusTerminalId] : null;
+          if (!statusTerminalId || !existing) {
+            return;
+          }
+          if (next === current) {
+            next = { ...current };
+          }
+          next[statusTerminalId] = {
+            ...existing,
+            status: 'running',
+            cwd: typeof record.cwd === 'string' ? record.cwd : existing.cwd,
+            shell: typeof record.shell === 'string' ? record.shell : existing.shell,
+            rows: typeof record.rows === 'number' ? record.rows : existing.rows,
+            cols: typeof record.cols === 'number' ? record.cols : existing.cols,
+            pid: typeof record.pid === 'number' ? record.pid : existing.pid,
+            error: '',
+            updatedAt: Date.now(),
+          };
+        });
+        return next;
+      });
+      return true;
+    }
+
+    const rawWorkspaceId = data.workspaceId ?? data.workspace_id ?? event.workspace_id;
+    const workspaceId = typeof rawWorkspaceId === 'string' ? rawWorkspaceId : '';
+    const rawTenantId = data.tenantId ?? data.tenant_id;
+    const tenantId = typeof rawTenantId === 'string' ? rawTenantId : '';
+    const rawCwd = data.cwd;
+    const cwd = typeof rawCwd === 'string' ? rawCwd : '';
+    const rawShell = data.shell;
+    const shell = typeof rawShell === 'string' ? rawShell : '';
+    const conversation = conversationsRef.current.find((item) => terminalIdForConversation(item.id) === terminalId);
+    const conversationId = conversation?.id ?? activeConversationRef.current;
+
+    setTerminalById((current) => {
+      const existing = current[terminalId];
+      const base: TerminalClientState = existing ?? {
+        terminalId,
+        workspaceId: workspaceId || conversation?.workspaceId || activeWorkspaceRef.current,
+        conversationId,
+        tenantId: tenantId || settings.tenantId,
+        cwd: cwd || (conversation
+          ? workspacesRef.current.find((workspace) => workspace.id === conversation.workspaceId)?.path ?? ''
+          : ''),
+        shell,
+        rows: DEFAULT_TERMINAL_ROWS,
+        cols: DEFAULT_TERMINAL_COLS,
+        status: 'idle',
+        output: [],
+        error: '',
+        pid: null,
+        exitCode: null,
+        updatedAt: Date.now(),
+      };
+      let status: TerminalLifecycleState = base.status;
+      let error = base.error;
+      let output = base.output;
+      let exitCode = base.exitCode;
+
+      if (event.type === 'terminal.started') {
+        status = 'running';
+        error = '';
+        output = [
+          ...output,
+          terminalOutputLine('system', `terminal started: ${cwd || base.cwd}`),
+        ].slice(-TERMINAL_MAX_OUTPUT_ENTRIES);
+      } else if (event.type === 'terminal.stopping') {
+        status = 'stopping';
+        output = [
+          ...output,
+          terminalOutputLine('system', 'terminal stopping'),
+        ].slice(-TERMINAL_MAX_OUTPUT_ENTRIES);
+      } else if (event.type === 'terminal.exited') {
+        status = 'exited';
+        exitCode = typeof data.exitCode === 'number' ? data.exitCode : null;
+        output = [
+          ...output,
+          terminalOutputLine('system', `terminal exited${exitCode === null ? '' : ` with code ${exitCode}`}`),
+        ].slice(-TERMINAL_MAX_OUTPUT_ENTRIES);
+      } else if (event.type === 'terminal.error') {
+        status = 'error';
+        error = typeof data.error === 'string' ? data.error : 'terminal error';
+        output = [
+          ...output,
+          terminalOutputLine('error', error),
+        ].slice(-TERMINAL_MAX_OUTPUT_ENTRIES);
+      } else if (event.type === 'terminal.resized') {
+        output = [
+          ...output,
+          terminalOutputLine('system', `size ${typeof data.cols === 'number' ? data.cols : base.cols}x${typeof data.rows === 'number' ? data.rows : base.rows}`),
+        ].slice(-TERMINAL_MAX_OUTPUT_ENTRIES);
+      }
+
+      return {
+        ...current,
+        [terminalId]: {
+          ...base,
+          workspaceId: workspaceId || base.workspaceId,
+          conversationId: base.conversationId || conversationId,
+          tenantId: tenantId || base.tenantId,
+          cwd: cwd || base.cwd,
+          shell: shell || base.shell,
+          rows: typeof data.rows === 'number' ? data.rows : base.rows,
+          cols: typeof data.cols === 'number' ? data.cols : base.cols,
+          pid: typeof data.pid === 'number' ? data.pid : base.pid,
+          exitCode,
+          status,
+          output,
+          error,
+          updatedAt: Date.now(),
+        },
+      };
+    });
+
+    if (event.type === 'terminal.output') {
+      const stream = data.stream === 'stderr' ? 'stderr' : 'stdout';
+      const text = typeof data.data === 'string' ? data.data : '';
+      if (text) {
+        appendTerminalOutput(terminalId, terminalOutputLine(stream, text));
+      }
+    }
+    return true;
+  }, [appendTerminalOutput, settings.tenantId]);
+
   const appendEvent = useCallback(
     (event: ServerEvent) => {
       const data = eventPayloadData(event);
@@ -2832,6 +3060,9 @@ export default function App() {
         persistSessionCursors();
       }
       setEvents((current) => [event, ...current].slice(0, MAX_EVENTS));
+      if (handleTerminalEvent(event, data)) {
+        return;
+      }
       const target = resolveTimelineTarget(event, data);
       const targetConversationId = target.conversationId || target.conversation?.id || (target.sessionId ? '' : activeConversationRef.current);
       const hasTimelineTarget = Boolean(targetConversationId);
@@ -3209,7 +3440,7 @@ export default function App() {
         setLastError(localTurnErrorMessage(protocolError));
       }
     },
-    [appendTimeline, findPendingLocalStart, finishPendingGitDiff, finishPendingSkillList, finishPendingThreadAction, finishPendingThreadList, persistSessionCursors, resetWorkspaceSession, resolveTimelineTarget, settlePendingLocalStart, settlePendingThreadStart, setConversationThinking, setConversationTurnId, updateConversation, upsertChatTimeline, upsertNativeThreads],
+    [appendTimeline, findPendingLocalStart, finishPendingGitDiff, finishPendingSkillList, finishPendingThreadAction, finishPendingThreadList, handleTerminalEvent, persistSessionCursors, resetWorkspaceSession, resolveTimelineTarget, settlePendingLocalStart, settlePendingThreadStart, setConversationThinking, setConversationTurnId, updateConversation, upsertChatTimeline, upsertNativeThreads],
   );
 
   const scheduleServerEventDrain = useCallback(() => {
@@ -3452,6 +3683,184 @@ export default function App() {
     [appendTimeline],
   );
 
+  const seedTerminalState = useCallback((workspace: WorkspaceRecord, conversation: ConversationRecord, patch: Partial<TerminalClientState> = {}) => {
+    const terminalId = terminalIdForConversation(conversation.id);
+    setTerminalById((current) => {
+      const existing = current[terminalId];
+      const base: TerminalClientState = {
+        terminalId,
+        workspaceId: workspace.id,
+        conversationId: conversation.id,
+        tenantId: workspace.tenantId || settings.tenantId,
+        cwd: workspace.path,
+        shell: '',
+        rows: DEFAULT_TERMINAL_ROWS,
+        cols: DEFAULT_TERMINAL_COLS,
+        status: 'idle',
+        output: [],
+        error: '',
+        pid: null,
+        exitCode: null,
+        updatedAt: Date.now(),
+      };
+      return {
+        ...current,
+        [terminalId]: { ...base, ...existing, ...patch },
+      };
+    });
+    return terminalId;
+  }, [settings.tenantId]);
+
+  const startTerminalSession = useCallback((
+    workspace: WorkspaceRecord,
+    conversation: ConversationRecord,
+    options: { cwd: string; shell: string; rows: number; cols: number },
+  ) => {
+    const cwd = options.cwd.trim() || workspace.path;
+    const shell = options.shell.trim();
+    const rows = Number.isFinite(options.rows) ? Math.round(options.rows) : DEFAULT_TERMINAL_ROWS;
+    const cols = Number.isFinite(options.cols) ? Math.round(options.cols) : DEFAULT_TERMINAL_COLS;
+    const terminalId = seedTerminalState(workspace, conversation, {
+      cwd,
+      shell,
+      rows,
+      cols,
+      status: 'starting',
+      error: '',
+      exitCode: null,
+      output: [
+        terminalOutputLine('system', `starting terminal in ${cwd}`),
+      ],
+    });
+    const sent = sendProtocolMessage('terminal.start', {
+      terminalId,
+      tenantId: workspace.tenantId || settings.tenantId,
+      workspaceId: workspace.id,
+      cwd,
+      shell: shell || undefined,
+      rows,
+      cols,
+    }, createRequestId('terminal-start'));
+    if (!sent) {
+      setTerminalById((current) => {
+        const existing = current[terminalId];
+        if (!existing) {
+          return current;
+        }
+        return {
+          ...current,
+          [terminalId]: {
+            ...existing,
+            status: 'error',
+            error: '请先在设置里连接后端。',
+            output: [
+              ...existing.output,
+              terminalOutputLine('error', '请先在设置里连接后端。'),
+            ].slice(-TERMINAL_MAX_OUTPUT_ENTRIES),
+            updatedAt: Date.now(),
+          },
+        };
+      });
+      return false;
+    }
+    return true;
+  }, [seedTerminalState, sendProtocolMessage, settings.tenantId]);
+
+  const sendTerminalInput = useCallback((terminalId: string, tenantId: string, data: string) => {
+    const terminal = terminalById[terminalId];
+    const sent = sendProtocolMessage('terminal.input', {
+      terminalId,
+      tenantId,
+      data,
+    }, createRequestId('terminal-input'));
+    if (sent) {
+      appendTerminalOutput(terminalId, terminalOutputLine('input', data));
+      return true;
+    }
+    if (terminal) {
+      appendTerminalOutput(terminalId, terminalOutputLine('error', '请先在设置里连接后端。'));
+    }
+    return false;
+  }, [appendTerminalOutput, sendProtocolMessage, terminalById]);
+
+  const stopTerminalSession = useCallback((terminalId: string, tenantId: string, force = false) => {
+    setTerminalById((current) => {
+      const existing = current[terminalId];
+      if (!existing) {
+        return current;
+      }
+      return {
+        ...current,
+        [terminalId]: {
+          ...existing,
+          status: 'stopping',
+          output: [
+            ...existing.output,
+            terminalOutputLine('system', force ? 'force stopping terminal' : 'stopping terminal'),
+          ].slice(-TERMINAL_MAX_OUTPUT_ENTRIES),
+          updatedAt: Date.now(),
+        },
+      };
+    });
+    return sendProtocolMessage('terminal.stop', {
+      terminalId,
+      tenantId,
+      force,
+    }, createRequestId('terminal-stop'));
+  }, [sendProtocolMessage]);
+
+  const resizeTerminalSession = useCallback((terminalId: string, tenantId: string, rows: number, cols: number) => {
+    const nextRows = Number.isFinite(rows) ? Math.round(rows) : DEFAULT_TERMINAL_ROWS;
+    const nextCols = Number.isFinite(cols) ? Math.round(cols) : DEFAULT_TERMINAL_COLS;
+    setTerminalById((current) => {
+      const existing = current[terminalId];
+      if (!existing) {
+        return current;
+      }
+      return {
+        ...current,
+        [terminalId]: {
+          ...existing,
+          rows: nextRows,
+          cols: nextCols,
+          updatedAt: Date.now(),
+        },
+      };
+    });
+    return sendProtocolMessage('terminal.resize', {
+      terminalId,
+      tenantId,
+      rows: nextRows,
+      cols: nextCols,
+    }, createRequestId('terminal-resize'));
+  }, [sendProtocolMessage]);
+
+  const requestTerminalStatus = useCallback((workspace: WorkspaceRecord, conversation: ConversationRecord) => {
+    const terminalId = seedTerminalState(workspace, conversation);
+    return sendProtocolMessage('terminal.status', {
+      tenantId: workspace.tenantId || settings.tenantId,
+      workspaceId: workspace.id,
+      terminalId,
+    }, createRequestId('terminal-status'));
+  }, [seedTerminalState, sendProtocolMessage, settings.tenantId]);
+
+  const clearTerminalOutput = useCallback((terminalId: string) => {
+    setTerminalById((current) => {
+      const existing = current[terminalId];
+      if (!existing) {
+        return current;
+      }
+      return {
+        ...current,
+        [terminalId]: {
+          ...existing,
+          output: [],
+          updatedAt: Date.now(),
+        },
+      };
+    });
+  }, []);
+
   const requestModelCatalog = useCallback(() => {
     const sessionId =
       activeWorkspaceRef.current
@@ -3577,6 +3986,15 @@ export default function App() {
       setSelectedSkills(pruneConversationState);
       setTurnIds(pruneConversationState);
       setThinkingConversations(pruneConversationState);
+      setTerminalById((current) => {
+        const next = { ...current };
+        Object.entries(next).forEach(([terminalId, terminal]) => {
+          if (terminal.workspaceId === workspaceId || removedConversationIds.includes(terminal.conversationId)) {
+            delete next[terminalId];
+          }
+        });
+        return next;
+      });
       if (activeWorkspaceId === workspaceId) {
         const next = workspaces.find((workspace) => workspace.id !== workspaceId);
         setActiveWorkspaceId(next?.id ?? '');
@@ -4065,6 +4483,22 @@ export default function App() {
     void requestGitDiff(context.conversation.id);
   }, [getConversationContext, requestGitDiff]);
 
+  const openTerminal = useCallback((conversationId = activeConversationRef.current) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      return;
+    }
+    seedTerminalState(context.workspace, context.conversation);
+    navigationRef.current?.navigate('Terminal', {
+      workspaceId: context.workspace.id,
+      conversationId: context.conversation.id,
+    });
+    if (connectionState === 'open') {
+      requestTerminalStatus(context.workspace, context.conversation);
+    }
+  }, [connectionState, getConversationContext, requestTerminalStatus, seedTerminalState]);
+
   const requestSkillList = useCallback(async (conversationId = activeConversationRef.current, forceReload = false) => {
     const context = getConversationContext(conversationId);
     if (!context) {
@@ -4272,6 +4706,11 @@ export default function App() {
     });
     setThinkingConversations((current) => {
       const { [conversationId]: _removed, ...rest } = current;
+      return rest;
+    });
+    setTerminalById((current) => {
+      const terminalId = terminalIdForConversation(conversationId);
+      const { [terminalId]: _removed, ...rest } = current;
       return rest;
     });
     if (activeConversationRef.current === conversationId) {
@@ -5499,6 +5938,7 @@ export default function App() {
                   runThreadMenuAction={runThreadMenuAction}
                   sendSlashCommand={sendSlashCommand}
                   openGitDiff={openGitDiff}
+                  openTerminal={openTerminal}
                   removeWorkspace={removeWorkspace}
                 />
               )}
@@ -5551,6 +5991,28 @@ export default function App() {
                     conversation={conversation}
                     diffState={gitDiffByConversation[props.route.params.conversationId] ?? null}
                     requestGitDiff={requestGitDiff}
+                  />
+                );
+              }}
+            </Stack.Screen>
+            <Stack.Screen name="Terminal" options={{ title: '终端' }}>
+              {(props) => {
+                const conversation = conversations.find((item) => item.id === props.route.params.conversationId) ?? null;
+                const workspace = workspaces.find((item) => item.id === props.route.params.workspaceId) ?? null;
+                const terminalId = terminalIdForConversation(props.route.params.conversationId);
+                return (
+                  <TerminalScreen
+                    {...props}
+                    workspace={workspace}
+                    conversation={conversation}
+                    terminal={terminalById[terminalId] ?? null}
+                    connectionState={connectionState}
+                    startTerminalSession={startTerminalSession}
+                    stopTerminalSession={stopTerminalSession}
+                    sendTerminalInput={sendTerminalInput}
+                    resizeTerminalSession={resizeTerminalSession}
+                    requestTerminalStatus={requestTerminalStatus}
+                    clearTerminalOutput={clearTerminalOutput}
                   />
                 );
               }}
@@ -6119,6 +6581,7 @@ function ChatScreen({
   runThreadMenuAction,
   sendSlashCommand,
   openGitDiff,
+  openTerminal,
   removeWorkspace,
 }: NativeStackScreenProps<RootStackParamList, 'Chat'> & {
   settings: ConnectionSettings;
@@ -6149,6 +6612,7 @@ function ChatScreen({
   runThreadMenuAction: (conversationId: string, action: ThreadMenuAction) => void;
   sendSlashCommand: (input: string, conversationId?: string) => void;
   openGitDiff: (conversationId: string) => void;
+  openTerminal: (conversationId: string) => void;
   removeWorkspace: (workspaceId: string) => void;
 }) {
   const [menuVisible, setMenuVisible] = useState(false);
@@ -6939,6 +7403,7 @@ function ChatScreen({
               <MenuItem title="Clean Terminals" onPress={() => runThreadMenuAction(conversation.id, 'clean')} close={() => setMenuVisible(false)} />
               <MenuItem title="Unarchive Thread" onPress={() => runThreadMenuAction(conversation.id, 'unarchive')} close={() => setMenuVisible(false)} />
               <MenuItem title="Git Diff" onPress={() => openGitDiff(conversation.id)} close={() => setMenuVisible(false)} />
+              <MenuItem title="终端" onPress={() => openTerminal(conversation.id)} close={() => setMenuVisible(false)} />
               <MenuItem
                 title="Slash Commands"
                 onPress={() => navigation.navigate('SlashCommands', { workspaceId: workspace.id, conversationId: conversation.id })}
@@ -7589,6 +8054,271 @@ function GitDiffScreen({
       </ScrollView>
     </Surface>
   );
+}
+
+function TerminalScreen({
+  workspace,
+  conversation,
+  terminal,
+  connectionState,
+  startTerminalSession,
+  stopTerminalSession,
+  sendTerminalInput,
+  resizeTerminalSession,
+  requestTerminalStatus,
+  clearTerminalOutput,
+}: NativeStackScreenProps<RootStackParamList, 'Terminal'> & {
+  workspace: WorkspaceRecord | null;
+  conversation: ConversationRecord | null;
+  terminal: TerminalClientState | null;
+  connectionState: ConnectionState;
+  startTerminalSession: (workspace: WorkspaceRecord, conversation: ConversationRecord, options: { cwd: string; shell: string; rows: number; cols: number }) => boolean;
+  stopTerminalSession: (terminalId: string, tenantId: string, force?: boolean) => boolean;
+  sendTerminalInput: (terminalId: string, tenantId: string, data: string) => boolean;
+  resizeTerminalSession: (terminalId: string, tenantId: string, rows: number, cols: number) => boolean;
+  requestTerminalStatus: (workspace: WorkspaceRecord, conversation: ConversationRecord) => boolean;
+  clearTerminalOutput: (terminalId: string) => void;
+}) {
+  const terminalId = conversation ? terminalIdForConversation(conversation.id) : terminal?.terminalId ?? '';
+  const effectiveTenantId = terminal?.tenantId || workspace?.tenantId || 'local';
+  const [cwd, setCwd] = useState(terminal?.cwd || workspace?.path || '');
+  const [shell, setShell] = useState(terminal?.shell || '');
+  const [rowsDraft, setRowsDraft] = useState(String(terminal?.rows ?? DEFAULT_TERMINAL_ROWS));
+  const [colsDraft, setColsDraft] = useState(String(terminal?.cols ?? DEFAULT_TERMINAL_COLS));
+  const [inputDraft, setInputDraft] = useState('');
+  const outputScrollRef = useRef<ScrollView | null>(null);
+  const insets = useSafeAreaInsets();
+  const isRunning = terminal?.status === 'running';
+  const isBusy = terminal?.status === 'starting' || terminal?.status === 'stopping';
+  const canControl = Boolean(workspace && conversation && terminalId && connectionState === 'open');
+  const rows = Math.max(8, Math.min(200, Number.parseInt(rowsDraft, 10) || DEFAULT_TERMINAL_ROWS));
+  const cols = Math.max(20, Math.min(400, Number.parseInt(colsDraft, 10) || DEFAULT_TERMINAL_COLS));
+
+  useEffect(() => {
+    if (workspace?.path && !cwd) {
+      setCwd(workspace.path);
+    }
+  }, [cwd, workspace?.path]);
+
+  useEffect(() => {
+    if (!terminal) {
+      return;
+    }
+    setCwd(terminal.cwd || workspace?.path || '');
+    setShell(terminal.shell || '');
+    setRowsDraft(String(terminal.rows || DEFAULT_TERMINAL_ROWS));
+    setColsDraft(String(terminal.cols || DEFAULT_TERMINAL_COLS));
+  }, [terminal?.terminalId, terminal?.cwd, terminal?.shell, terminal?.rows, terminal?.cols, workspace?.path]);
+
+  useEffect(() => {
+    if (workspace && conversation && connectionState === 'open') {
+      requestTerminalStatus(workspace, conversation);
+    }
+  }, [connectionState, conversation?.id, requestTerminalStatus, workspace?.id]);
+
+  useEffect(() => {
+    requestAnimationFrame(() => outputScrollRef.current?.scrollToEnd({ animated: true }));
+  }, [terminal?.output.length]);
+
+  const start = useCallback(() => {
+    if (!workspace || !conversation) {
+      Alert.alert('未选择工作区', '请从一个对话中打开终端。');
+      return;
+    }
+    if (connectionState !== 'open') {
+      Alert.alert('后端未连接', '请先在设置里连接后端。');
+      return;
+    }
+    startTerminalSession(workspace, conversation, {
+      cwd: cwd.trim() || workspace.path,
+      shell,
+      rows,
+      cols,
+    });
+  }, [cols, connectionState, conversation, cwd, rows, shell, startTerminalSession, workspace]);
+
+  const stop = useCallback((force = false) => {
+    if (!terminalId) {
+      return;
+    }
+    stopTerminalSession(terminalId, effectiveTenantId, force);
+  }, [effectiveTenantId, stopTerminalSession, terminalId]);
+
+  const refresh = useCallback(() => {
+    if (!workspace || !conversation) {
+      return;
+    }
+    requestTerminalStatus(workspace, conversation);
+  }, [conversation, requestTerminalStatus, workspace]);
+
+  const applySize = useCallback(() => {
+    if (!terminalId) {
+      return;
+    }
+    resizeTerminalSession(terminalId, effectiveTenantId, rows, cols);
+  }, [cols, effectiveTenantId, resizeTerminalSession, rows, terminalId]);
+
+  const submitInput = useCallback(() => {
+    const command = inputDraft;
+    if (!command.trim() || !terminalId) {
+      return;
+    }
+    if (!isRunning) {
+      Alert.alert('终端未运行', '请先启动终端。');
+      return;
+    }
+    const data = command.endsWith('\n') ? command : `${command}\n`;
+    if (sendTerminalInput(terminalId, effectiveTenantId, data)) {
+      setInputDraft('');
+    }
+  }, [effectiveTenantId, inputDraft, isRunning, sendTerminalInput, terminalId]);
+
+  const copyOutput = useCallback(async () => {
+    const output = terminal?.output.map((entry) => terminalEntryDisplayText(entry)).join('');
+    if (!output) {
+      return;
+    }
+    await Clipboard.setStringAsync(output);
+    Alert.alert('已复制', '终端输出已复制到剪贴板。');
+  }, [terminal?.output]);
+
+  if (!workspace || !conversation) {
+    return (
+      <Surface className="flex-1 items-center justify-center bg-background p-5">
+        <EmptyState text="终端目标不存在。请返回后重新选择对话。" />
+      </Surface>
+    );
+  }
+
+  return (
+    <Surface className="flex-1 bg-background">
+      <ScrollView contentContainerStyle={styles.terminalPageContent} keyboardShouldPersistTaps="handled">
+        <View style={styles.terminalHeaderBand}>
+          <View style={styles.terminalHeaderText}>
+            <Text style={styles.terminalTitle} numberOfLines={1}>{workspace.name}</Text>
+            <Text style={styles.terminalSubtitle} numberOfLines={2}>{cwd || workspace.path}</Text>
+          </View>
+          <View style={[
+            styles.terminalStatusBadge,
+            isRunning ? styles.terminalStatusRunning : terminal?.status === 'error' ? styles.terminalStatusError : styles.terminalStatusIdle,
+          ]}>
+            <Text style={styles.terminalStatusText}>{terminalStatusLabel(terminal?.status ?? 'idle')}</Text>
+          </View>
+        </View>
+
+        <View style={styles.terminalControlRow}>
+          <Button size="sm" variant="primary" isDisabled={!canControl || isRunning || isBusy} onPress={start} className="rounded-lg">
+            <StyledIonicons name="play" size={14} className="text-accent-foreground" />
+            <Button.Label>启动</Button.Label>
+          </Button>
+          <Button size="sm" variant="secondary" isDisabled={!canControl} onPress={refresh} className="rounded-lg">
+            <StyledIonicons name="refresh" size={14} className="text-foreground" />
+            <Button.Label>状态</Button.Label>
+          </Button>
+          <Button size="sm" variant="danger-soft" isDisabled={!isRunning && terminal?.status !== 'starting'} onPress={() => stop(false)} className="rounded-lg">
+            <StyledIonicons name="stop" size={14} className="text-danger-soft-foreground" />
+            <Button.Label>停止</Button.Label>
+          </Button>
+          <Button size="sm" variant="danger-soft" isDisabled={!isRunning && terminal?.status !== 'starting'} onPress={() => stop(true)} className="rounded-lg">
+            <StyledIonicons name="close-circle" size={14} className="text-danger-soft-foreground" />
+            <Button.Label>强停</Button.Label>
+          </Button>
+        </View>
+
+        <View style={styles.formBlock}>
+          <Field label="路径" value={cwd} onChangeText={setCwd} placeholder={workspace.path} editable={!isRunning && !isBusy} />
+          <Field label="Shell" value={shell} onChangeText={setShell} placeholder="默认使用后端 SHELL" editable={!isRunning && !isBusy} />
+          <View style={styles.terminalSizeRow}>
+            <View style={styles.terminalSizeField}>
+              <Field label="Rows" value={rowsDraft} onChangeText={setRowsDraft} placeholder="24" editable={!isBusy} />
+            </View>
+            <View style={styles.terminalSizeField}>
+              <Field label="Cols" value={colsDraft} onChangeText={setColsDraft} placeholder="80" editable={!isBusy} />
+            </View>
+            <Button size="md" variant="secondary" isDisabled={!isRunning} onPress={applySize} className="self-end rounded-lg">
+              <Button.Label>应用</Button.Label>
+            </Button>
+          </View>
+        </View>
+
+        <View style={styles.terminalMetaRow}>
+          <Diagnostic label="协议" value="todex-terminal.v1" />
+          <Diagnostic label="进程" value={terminal?.pid ? String(terminal.pid) : '未运行'} />
+        </View>
+
+        {terminal?.error ? (
+          <Text style={styles.inlineError}>{terminal.error}</Text>
+        ) : null}
+
+        <View style={styles.terminalFrame}>
+          <View style={styles.terminalFrameHeader}>
+            <Text style={styles.terminalFrameTitle}>Session</Text>
+            <View style={styles.terminalFrameActions}>
+              <Button size="sm" variant="ghost" isDisabled={!terminal?.output.length} onPress={copyOutput} className="rounded-md">
+                <Button.Label>复制</Button.Label>
+              </Button>
+              <Button size="sm" variant="ghost" isDisabled={!terminalId} onPress={() => clearTerminalOutput(terminalId)} className="rounded-md">
+                <Button.Label>清空</Button.Label>
+              </Button>
+            </View>
+          </View>
+          <ScrollView ref={outputScrollRef} style={styles.terminalOutputScroll} contentContainerStyle={styles.terminalOutputContent}>
+            {terminal?.output.length ? (
+              terminal.output.map((entry) => (
+                <Text
+                  key={entry.id}
+                  selectable
+                  style={[
+                    styles.terminalOutputText,
+                    entry.kind === 'stderr' || entry.kind === 'error' ? styles.terminalOutputError : null,
+                    entry.kind === 'input' ? styles.terminalOutputInput : null,
+                    entry.kind === 'system' ? styles.terminalOutputSystem : null,
+                  ]}
+                >
+                  {terminalEntryDisplayText(entry)}
+                </Text>
+              ))
+            ) : (
+              <Text style={[styles.terminalOutputText, styles.terminalOutputSystem]}>
+                {connectionState === 'open' ? 'terminal idle\n' : 'backend disconnected\n'}
+              </Text>
+            )}
+          </ScrollView>
+        </View>
+      </ScrollView>
+
+      <View style={[styles.terminalInputBar, { paddingBottom: 12 + insets.bottom }]}>
+        <TextInput
+          value={inputDraft}
+          onChangeText={setInputDraft}
+          placeholder={isRunning ? '输入命令' : '启动终端后输入命令'}
+          placeholderTextColor="#7a8391"
+          editable={isRunning}
+          style={[styles.terminalCommandInput, !isRunning ? styles.inputDisabled : null]}
+          autoCapitalize="none"
+          autoCorrect={false}
+          returnKeyType="send"
+          onSubmitEditing={submitInput}
+        />
+        <Button isIconOnly size="md" variant="primary" isDisabled={!isRunning || !inputDraft.trim()} onPress={submitInput} className="rounded-lg">
+          <StyledIonicons name="return-down-forward" size={18} className="text-accent-foreground" />
+        </Button>
+      </View>
+    </Surface>
+  );
+}
+
+function terminalEntryDisplayText(entry: TerminalOutputEntry): string {
+  if (entry.kind === 'input') {
+    return `$ ${entry.text.replace(/\n$/, '')}\n`;
+  }
+  if (entry.kind === 'system') {
+    return `# ${entry.text.replace(/\n$/, '')}\n`;
+  }
+  if (entry.kind === 'error') {
+    return `! ${entry.text.replace(/\n$/, '')}\n`;
+  }
+  return entry.text;
 }
 
 function ExperimentalScreen({
@@ -9310,6 +10040,162 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     fontWeight: '600',
     textAlign: 'center',
+  },
+  terminalPageContent: {
+    padding: 14,
+    paddingBottom: 24,
+    gap: 14,
+  },
+  terminalHeaderBand: {
+    minHeight: 76,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: '#ffffff',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d8e0e7',
+    padding: 14,
+  },
+  terminalHeaderText: {
+    flex: 1,
+    minWidth: 0,
+    gap: 4,
+  },
+  terminalTitle: {
+    color: '#17202a',
+    fontSize: 17,
+    fontWeight: '800',
+  },
+  terminalSubtitle: {
+    color: '#66717c',
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: '700',
+  },
+  terminalStatusBadge: {
+    minHeight: 30,
+    minWidth: 70,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 8,
+    borderWidth: 1,
+    paddingHorizontal: 9,
+  },
+  terminalStatusRunning: {
+    backgroundColor: '#dcf7ea',
+    borderColor: '#65b98d',
+  },
+  terminalStatusError: {
+    backgroundColor: '#fff1f1',
+    borderColor: '#d17979',
+  },
+  terminalStatusIdle: {
+    backgroundColor: '#eef0f2',
+    borderColor: '#ccd1d6',
+  },
+  terminalStatusText: {
+    color: '#17202a',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  terminalControlRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  terminalSizeRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 10,
+  },
+  terminalSizeField: {
+    flex: 1,
+    minWidth: 0,
+  },
+  terminalMetaRow: {
+    gap: 8,
+  },
+  terminalFrame: {
+    minHeight: 340,
+    overflow: 'hidden',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#111820',
+    backgroundColor: '#111820',
+  },
+  terminalFrameHeader: {
+    minHeight: 44,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#26323d',
+    paddingHorizontal: 12,
+  },
+  terminalFrameTitle: {
+    color: '#e7edf2',
+    fontSize: 12,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+  },
+  terminalFrameActions: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  terminalOutputScroll: {
+    height: 300,
+  },
+  terminalOutputContent: {
+    padding: 12,
+    paddingBottom: 18,
+  },
+  terminalOutputText: {
+    color: '#d7dde3',
+    fontSize: 12,
+    lineHeight: 17,
+    fontFamily: Platform.select({
+      ios: 'Menlo',
+      android: 'monospace',
+      default: 'monospace',
+    }),
+  },
+  terminalOutputInput: {
+    color: '#8bd4a8',
+  },
+  terminalOutputError: {
+    color: '#ff9a9a',
+  },
+  terminalOutputSystem: {
+    color: '#9aa7b3',
+  },
+  terminalInputBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#d8e0e7',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 14,
+    paddingTop: 12,
+  },
+  terminalCommandInput: {
+    flex: 1,
+    minHeight: 42,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d7dce0',
+    backgroundColor: '#ffffff',
+    color: '#17202a',
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    fontSize: 14,
+    fontFamily: Platform.select({
+      ios: 'Menlo',
+      android: 'monospace',
+      default: 'monospace',
+    }),
   },
   experimentalSummary: {
     minHeight: 92,
