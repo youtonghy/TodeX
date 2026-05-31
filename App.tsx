@@ -16,9 +16,11 @@ import {
   Image,
   Keyboard,
   ActivityIndicator,
+  FlatList,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   type KeyboardEvent,
+  type ListRenderItemInfo,
   Modal,
   Platform,
   Pressable,
@@ -310,6 +312,13 @@ type PendingSkillList = {
 type PendingJsonSave = {
   timeoutId: ReturnType<typeof setTimeout>;
   value: unknown;
+};
+
+type PendingSocketFrame = {
+  data: string;
+  generation: number;
+  crypto: TransportCryptoSession | null;
+  transport: TodeXTransportClient | null;
 };
 
 type ConversationContext = {
@@ -1011,6 +1020,9 @@ const JSON_SAVE_DEBOUNCE_MS = 350;
 const SESSION_CURSOR_SAVE_DEBOUNCE_MS = 800;
 const WORKSPACE_SYNC_DEBOUNCE_MS = 900;
 const SOCKET_EVENT_BATCH_SIZE = 24;
+const SOCKET_FRAME_DECODE_BATCH_SIZE = 8;
+const SOCKET_FRAME_DECODE_BUDGET_MS = 10;
+const MAX_TRANSPORT_HELLO_SESSION_CURSORS = 12;
 const MAX_TIMELINE_ITEMS = 260;
 const MAX_EVENTS = 220;
 const RECONNECT_DELAY_MS = 2500;
@@ -2136,7 +2148,10 @@ export default function App() {
   const pendingJsonSavesRef = useRef(new Map<string, PendingJsonSave>());
   const pendingServerEventsRef = useRef<ServerEvent[]>([]);
   const pendingServerEventFrameRef = useRef<number | null>(null);
+  const pendingSocketFramesRef = useRef<PendingSocketFrame[]>([]);
+  const pendingSocketFrameDrainRef = useRef<number | null>(null);
   const transportClientRef = useRef<TodeXTransportClient | null>(null);
+  const socketGenerationRef = useRef(0);
   const autoConnectAttemptedRef = useRef(false);
   const sessionCursorsRef = useRef(new Map<string, number>());
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -2336,10 +2351,51 @@ export default function App() {
   }, [scheduleJsonSave]);
 
   const getSessionCursorSnapshot = useCallback(() => {
-    return Object.fromEntries(sessionCursorsRef.current.entries());
+    const cursors = sessionCursorsRef.current;
+    if (cursors.size <= MAX_TRANSPORT_HELLO_SESSION_CURSORS) {
+      return Object.fromEntries(cursors.entries());
+    }
+
+    const selected = new Map<string, number>();
+    const activeConversationId = activeConversationRef.current;
+    const rankedConversations = conversationsRef.current
+      .filter((conversation) => conversation.sessionId && cursors.has(conversation.sessionId))
+      .sort((left, right) => {
+        const activeRank =
+          (right.id === activeConversationId ? 1 : 0) -
+          (left.id === activeConversationId ? 1 : 0);
+        if (activeRank !== 0) {
+          return activeRank;
+        }
+        return right.updatedAt - left.updatedAt;
+      });
+
+    for (const conversation of rankedConversations) {
+      if (selected.size >= MAX_TRANSPORT_HELLO_SESSION_CURSORS) {
+        break;
+      }
+      const cursor = cursors.get(conversation.sessionId);
+      if (cursor !== undefined) {
+        selected.set(conversation.sessionId, cursor);
+      }
+    }
+
+    if (selected.size < MAX_TRANSPORT_HELLO_SESSION_CURSORS) {
+      for (const [sessionId, cursor] of cursors.entries()) {
+        if (selected.size >= MAX_TRANSPORT_HELLO_SESSION_CURSORS) {
+          break;
+        }
+        if (!selected.has(sessionId)) {
+          selected.set(sessionId, cursor);
+        }
+      }
+    }
+
+    return Object.fromEntries(selected.entries());
   }, []);
 
   const closeSocket = useCallback((manual = true) => {
+    socketGenerationRef.current += 1;
     if (manual) {
       manualDisconnectRef.current = true;
       setAutoConnectEnabled(false);
@@ -2370,6 +2426,11 @@ export default function App() {
       cancelAnimationFrame(pendingServerEventFrameRef.current);
       pendingServerEventFrameRef.current = null;
     }
+    pendingSocketFramesRef.current = [];
+    if (pendingSocketFrameDrainRef.current !== null) {
+      cancelAnimationFrame(pendingSocketFrameDrainRef.current);
+      pendingSocketFrameDrainRef.current = null;
+    }
   }, []);
 
   useEffect(() => {
@@ -2379,6 +2440,11 @@ export default function App() {
       if (pendingServerEventFrameRef.current !== null) {
         cancelAnimationFrame(pendingServerEventFrameRef.current);
         pendingServerEventFrameRef.current = null;
+      }
+      pendingSocketFramesRef.current = [];
+      if (pendingSocketFrameDrainRef.current !== null) {
+        cancelAnimationFrame(pendingSocketFrameDrainRef.current);
+        pendingSocketFrameDrainRef.current = null;
       }
     };
   }, [flushJsonSave]);
@@ -3591,6 +3657,58 @@ export default function App() {
     scheduleServerEventDrain();
   }, [scheduleServerEventDrain]);
 
+  const decodeSocketFrame = useCallback((frame: PendingSocketFrame) => {
+    if (frame.generation !== socketGenerationRef.current) {
+      return;
+    }
+
+    try {
+      const text = frame.crypto?.decryptServerText(frame.data) ?? frame.data;
+      const events = frame.transport
+        ? frame.transport.decode(text)
+        : [JSON.parse(text) as ServerEvent];
+      events.forEach(enqueueServerEvent);
+    } catch (error) {
+      setLastError(error instanceof Error ? error.message : 'failed to parse websocket message');
+    }
+  }, [enqueueServerEvent]);
+
+  const scheduleSocketFrameDrain = useCallback(() => {
+    if (pendingSocketFrameDrainRef.current !== null) {
+      return;
+    }
+
+    pendingSocketFrameDrainRef.current = requestAnimationFrame(() => {
+      pendingSocketFrameDrainRef.current = null;
+      const startedAt = Date.now();
+      let processed = 0;
+
+      while (
+        pendingSocketFramesRef.current.length > 0 &&
+        processed < SOCKET_FRAME_DECODE_BATCH_SIZE
+      ) {
+        const frame = pendingSocketFramesRef.current.shift();
+        if (!frame) {
+          break;
+        }
+        decodeSocketFrame(frame);
+        processed += 1;
+        if (Date.now() - startedAt >= SOCKET_FRAME_DECODE_BUDGET_MS) {
+          break;
+        }
+      }
+
+      if (pendingSocketFramesRef.current.length > 0) {
+        scheduleSocketFrameDrain();
+      }
+    });
+  }, [decodeSocketFrame]);
+
+  const enqueueSocketFrame = useCallback((frame: PendingSocketFrame) => {
+    pendingSocketFramesRef.current.push(frame);
+    scheduleSocketFrameDrain();
+  }, [scheduleSocketFrameDrain]);
+
   const pushSystem = useCallback(
     (title: string, subtitle = '') => {
       appendTimeline(makeSystemEntry(title, subtitle, activeWorkspaceRef.current, activeConversationRef.current));
@@ -3702,6 +3820,7 @@ export default function App() {
       const socket = new (WebSocket as typeof WebSocket & {
         new (uri: string, protocols?: string | string[] | null, options?: { headers?: Record<string, string> }): WebSocket;
       })(wsUrl, undefined, options);
+      const generation = socketGenerationRef.current;
       socketRef.current = socket;
       socketCryptoRef.current = crypto;
 
@@ -3719,14 +3838,12 @@ export default function App() {
       };
 
       socket.onmessage = (event) => {
-        try {
-          const text = socketCryptoRef.current?.decryptServerText(String(event.data)) ?? String(event.data);
-          const transport = transportClientRef.current;
-          const events = transport ? transport.decode(text) : [JSON.parse(text) as ServerEvent];
-          events.forEach(enqueueServerEvent);
-        } catch (error) {
-          setLastError(error instanceof Error ? error.message : 'failed to parse websocket message');
-        }
+        enqueueSocketFrame({
+          data: String(event.data),
+          generation,
+          crypto: socketCryptoRef.current,
+          transport: transportClientRef.current,
+        });
       };
 
       socket.onerror = () => {
@@ -3746,7 +3863,7 @@ export default function App() {
       socketCryptoRef.current = null;
       setLastError(error instanceof Error ? error.message : 'failed to connect');
     }
-  }, [checkConnectionHealth, closeSocket, enqueueServerEvent, getSessionCursorSnapshot, pushSystem, refreshServerVersion, settings, syncWorkspacesFromBackend]);
+  }, [checkConnectionHealth, closeSocket, enqueueSocketFrame, getSessionCursorSnapshot, refreshServerVersion, settings, syncWorkspacesFromBackend]);
 
   useEffect(() => {
     if (!hydrated || !autoConnectEnabled || manualDisconnectRef.current) {
@@ -6748,7 +6865,7 @@ function ChatScreen({
   const [expandedProgressIds, setExpandedProgressIds] = useState<Set<string>>(() => new Set());
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [attachmentMenuVisible, setAttachmentMenuVisible] = useState(false);
-  const messageScrollRef = useRef<ScrollView | null>(null);
+  const messageScrollRef = useRef<FlatList<ConversationRenderItem> | null>(null);
   const shouldFollowLatestRef = useRef(true);
   const initialLatestScrollRef = useRef(true);
   const attachedSessionKeyRef = useRef('');
@@ -6869,6 +6986,10 @@ function ChatScreen({
     setShowJumpToLatest(false);
     scrollToLatest(true);
   }, [scrollToLatest]);
+
+  const keyConversationRenderItem = useCallback((item: ConversationRenderItem) => {
+    return item.type === 'executionGroup' ? item.id : item.entry.id;
+  }, []);
 
   useEffect(() => {
     if (!mentionTrigger || !workspace) {
@@ -7222,6 +7343,47 @@ function ChatScreen({
     [collapseAutoExpandedRequest, sendApprovalResponse],
   );
 
+  const renderConversationRenderItem = useCallback(({ item }: ListRenderItemInfo<ConversationRenderItem>) => {
+    if (item.type === 'executionGroup') {
+      const manuallyExpanded = expandedProgressIds.has(item.id);
+      const collapsed = !manuallyExpanded;
+      return (
+        <ExecutionGroupBubble
+          id={item.id}
+          entries={item.entries}
+          collapsed={collapsed}
+          compactItems
+          expandedProgressIds={expandedProgressIds}
+          pendingRequestById={pendingRequestById}
+          onToggleGroup={toggleProgressId}
+          onToggleProgress={toggleProgressEntry}
+          onApprovalResponse={handleApprovalResponse}
+        />
+      );
+    }
+
+    const entry = item.entry;
+    const collapsible = isCollapsibleProgressEntry(entry);
+    const manuallyExpanded = expandedProgressIds.has(entry.id);
+    const collapsed = collapsible ? !manuallyExpanded : false;
+    return (
+      <MessageBubble
+        entry={entry}
+        collapsed={collapsed}
+        collapsible={collapsible}
+        pendingRequest={entry.requestId ? pendingRequestById.get(entry.requestId) : undefined}
+        onToggleProgress={toggleProgressEntry}
+        onApprovalResponse={handleApprovalResponse}
+      />
+    );
+  }, [
+    expandedProgressIds,
+    handleApprovalResponse,
+    pendingRequestById,
+    toggleProgressEntry,
+    toggleProgressId,
+  ]);
+
   useEffect(() => {
     selectConversation(route.params.workspaceId, route.params.conversationId);
   }, [route.params.conversationId, route.params.workspaceId, selectConversation]);
@@ -7277,56 +7439,24 @@ function ChatScreen({
       ) : null}
 
       <View style={styles.messageArea}>
-        <ScrollView
+        <FlatList
           ref={messageScrollRef}
+          data={conversationRenderItems}
+          renderItem={renderConversationRenderItem}
+          keyExtractor={keyConversationRenderItem}
           style={styles.messageScroller}
           contentContainerStyle={styles.messageList}
           keyboardShouldPersistTaps="handled"
+          ListEmptyComponent={<EmptyState text="这是一段新的对话。" />}
+          initialNumToRender={18}
+          maxToRenderPerBatch={12}
+          updateCellsBatchingPeriod={40}
+          windowSize={9}
+          removeClippedSubviews={Platform.OS !== 'web'}
           onContentSizeChange={handleMessageContentSizeChange}
           onScroll={handleMessageScroll}
           scrollEventThrottle={80}
-        >
-          {conversationMessages.length === 0 ? (
-            <EmptyState text="这是一段新的对话。" />
-          ) : (
-            conversationRenderItems.map((item) => {
-              if (item.type === 'executionGroup') {
-                const manuallyExpanded = expandedProgressIds.has(item.id);
-                const collapsed = !manuallyExpanded;
-                return (
-                  <ExecutionGroupBubble
-                    key={item.id}
-                    id={item.id}
-                    entries={item.entries}
-                    collapsed={collapsed}
-                    compactItems
-                    expandedProgressIds={expandedProgressIds}
-                    pendingRequestById={pendingRequestById}
-                    onToggleGroup={toggleProgressId}
-                    onToggleProgress={toggleProgressEntry}
-                    onApprovalResponse={handleApprovalResponse}
-                  />
-                );
-              }
-
-              const entry = item.entry;
-              const collapsible = isCollapsibleProgressEntry(entry);
-              const manuallyExpanded = expandedProgressIds.has(entry.id);
-              const collapsed = collapsible ? !manuallyExpanded : false;
-              return (
-                <MessageBubble
-                  key={entry.id}
-                  entry={entry}
-                  collapsed={collapsed}
-                  collapsible={collapsible}
-                  pendingRequest={entry.requestId ? pendingRequestById.get(entry.requestId) : undefined}
-                  onToggleProgress={toggleProgressEntry}
-                  onApprovalResponse={handleApprovalResponse}
-                />
-              );
-            })
-          )}
-        </ScrollView>
+        />
 
         {showJumpToLatest ? (
           <Button
