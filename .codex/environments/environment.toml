@@ -3,10 +3,7 @@ version = 1
 name = "TodeX"
 
 [setup]
-script = "pnpm run start"
-
-[cleanup]
-script = "pnpm install"
+script = "bun install"
 
 [[actions]]
 name = "pull"
@@ -16,4 +13,15 @@ command = "git pull"
 [[actions]]
 name = "run"
 icon = "run"
-command = "pnpm run start"
+command = "bun start"
+
+[[actions]]
+name = "apk"
+icon = "tool"
+command = '''
+export JAVA_HOME=$(/usr/libexec/java_home -v 17)
+export ANDROID_HOME="$HOME/Library/Android/sdk"
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
+export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$ANDROID_HOME/cmdline-tools/latest/bin:$JAVA_HOME/bin:$PATH"
+npx eas-cli build --platform android --profile local-apk --local
+'''
