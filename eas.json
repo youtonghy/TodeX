@@ -10,6 +10,10 @@
         "buildType": "apk"
       }
     },
+    "local-ipa": {
+      "distribution": "internal",
+      "ios": {}
+    },
     "production": {
       "android": {
         "buildType": "app-bundle"

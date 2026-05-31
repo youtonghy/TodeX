@@ -1,0 +1,140 @@
+name: Build mobile packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform package to build
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - android
+          - ios
+      timezone:
+        description: Timezone used for YYMMDDHHMM build versions
+        required: true
+        default: Australia/Victoria
+        type: string
+  push:
+    tags:
+      - "app-v*"
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  BUILD_TIMEZONE: ${{ github.event.inputs.timezone || 'Australia/Victoria' }}
+  EAS_CLI_VERSION: "18"
+  NODE_VERSION: "22"
+
+jobs:
+  android-apk:
+    name: Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'android' }}
+    env:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install EAS CLI
+        run: npm install --global eas-cli@${EAS_CLI_VERSION}
+
+      - name: Generate build version
+        id: version
+        shell: bash
+        run: |
+          build_version="$(TZ="${BUILD_TIMEZONE}" date +'%y%m%d%H%M')"
+          android_version_code="$(TZ="${BUILD_TIMEZONE}" date +'%y%j%H%M')"
+          echo "TODEX_BUILD_VERSION=${build_version}" >> "${GITHUB_ENV}"
+          echo "TODEX_ANDROID_VERSION_CODE=${android_version_code}" >> "${GITHUB_ENV}"
+          echo "build_version=${build_version}" >> "${GITHUB_OUTPUT}"
+          echo "android_version_code=${android_version_code}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build local APK
+        run: |
+          mkdir -p dist
+          eas build \
+            --local \
+            --non-interactive \
+            --platform android \
+            --profile local-apk \
+            --output "dist/todex-mobile-${TODEX_BUILD_VERSION}.apk"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: todex-mobile-android-${{ steps.version.outputs.build_version }}
+          path: dist/*.apk
+          if-no-files-found: error
+
+  ios-ipa:
+    name: iOS IPA
+    runs-on: macos-latest
+    timeout-minutes: 120
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'ios' }}
+    env:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install EAS CLI
+        run: npm install --global eas-cli@${EAS_CLI_VERSION}
+
+      - name: Generate build version
+        id: version
+        shell: bash
+        run: |
+          build_version="$(TZ="${BUILD_TIMEZONE}" date +'%y%m%d%H%M')"
+          android_version_code="$(TZ="${BUILD_TIMEZONE}" date +'%y%j%H%M')"
+          echo "TODEX_BUILD_VERSION=${build_version}" >> "${GITHUB_ENV}"
+          echo "TODEX_ANDROID_VERSION_CODE=${android_version_code}" >> "${GITHUB_ENV}"
+          echo "build_version=${build_version}" >> "${GITHUB_OUTPUT}"
+          echo "android_version_code=${android_version_code}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build local IPA
+        run: |
+          mkdir -p dist
+          eas build \
+            --local \
+            --non-interactive \
+            --platform ios \
+            --profile local-ipa \
+            --output "dist/todex-mobile-${TODEX_BUILD_VERSION}.ipa"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: todex-mobile-ios-${{ steps.version.outputs.build_version }}
+          path: dist/*.ipa
+          if-no-files-found: error
