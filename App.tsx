@@ -7501,7 +7501,7 @@ function ChatScreen({
   }
 
   return (
-    <Surface className="flex-1 bg-background">
+    <Surface className="flex-1 bg-background" style={styles.chatRoot}>
       {lastError ? (
         <Surface variant="secondary" className="mx-3 mt-2 rounded-lg px-3 py-2">
           <HeroText className="text-sm text-danger">{lastError}</HeroText>
@@ -7542,7 +7542,7 @@ function ChatScreen({
         ) : null}
       </View>
 
-      <KeyboardStickyView offset={composerKeyboardOffset}>
+      <KeyboardStickyView offset={composerKeyboardOffset} style={styles.composerSticky}>
         <View style={[styles.composer, { paddingBottom: composerPaddingBottom }]}>
         {slashSuggestions.length > 0 ? (
           <Surface variant="secondary" className="mb-2 overflow-hidden rounded-lg">
@@ -7658,13 +7658,13 @@ function ChatScreen({
         <View style={styles.composerInputRow}>
           <Button
             isIconOnly
-            size="md"
+            size="sm"
             variant="secondary"
             accessibilityLabel="添加附件"
             onPress={() => setAttachmentMenuVisible(true)}
             className="rounded-lg"
           >
-            <StyledIonicons name="attach" size={19} className="text-foreground" />
+            <StyledIonicons name="attach" size={18} className="text-foreground" />
           </Button>
           <TextInput
             ref={composerInputRef}
@@ -7677,7 +7677,7 @@ function ChatScreen({
               }
             }}
             selection={composerSelection}
-            placeholder="输入消息，@ 引用文件，/ 输入命令"
+            placeholder="输入消息，@文件，/命令"
             placeholderTextColor="#7a8391"
             style={styles.composerInput}
             multiline
@@ -7688,7 +7688,7 @@ function ChatScreen({
             {turnId ? (
               <Button
                 isIconOnly
-                size="md"
+                size="sm"
                 variant="danger-soft"
                 accessibilityLabel="中断当前任务"
                 onPress={() => stopThinking(route.params.conversationId)}
@@ -7699,7 +7699,7 @@ function ChatScreen({
             ) : null}
             <Button
               isIconOnly
-              size="md"
+              size="sm"
               variant="primary"
               accessibilityLabel="发送消息"
               onPress={() => submitChat(route.params.conversationId)}
@@ -9985,6 +9985,8 @@ const styles = StyleSheet.create({
   },
   chatRoot: {
     flex: 1,
+    width: '100%',
+    alignSelf: 'stretch',
     backgroundColor: '#f4f6f8',
   },
   loadingScreen: {
@@ -11372,12 +11374,19 @@ const styles = StyleSheet.create({
     paddingTop: 4,
   },
   composer: {
-    paddingHorizontal: 14,
-    paddingVertical: 12,
+    width: '100%',
+    alignSelf: 'stretch',
+    paddingHorizontal: 12,
+    paddingTop: 10,
+    paddingBottom: 12,
     borderTopWidth: 1,
     borderTopColor: '#d8e0e7',
     backgroundColor: '#ffffff',
     gap: 10,
+  },
+  composerSticky: {
+    width: '100%',
+    alignSelf: 'stretch',
   },
   attachmentRail: {
     gap: 8,
@@ -11463,9 +11472,11 @@ const styles = StyleSheet.create({
     lineHeight: 16,
   },
   composerInputRow: {
+    width: '100%',
+    minHeight: 40,
     flexDirection: 'row',
     flexWrap: 'nowrap',
-    alignItems: 'center',
+    alignItems: 'flex-end',
     gap: 8,
   },
   attachmentButton: {
@@ -11570,6 +11581,8 @@ const styles = StyleSheet.create({
   },
   composerInput: {
     flex: 1,
+    flexGrow: 1,
+    flexShrink: 1,
     minWidth: 0,
     maxHeight: 96,
     minHeight: 40,
@@ -11581,11 +11594,13 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     color: '#17202a',
     fontSize: 14,
+    lineHeight: 20,
     textAlignVertical: 'top',
   },
   composerActions: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexShrink: 0,
     gap: 8,
   },
   sendButton: {
