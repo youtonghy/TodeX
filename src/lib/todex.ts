@@ -10,6 +10,7 @@ export type ConnectionSettings = {
   defaultModel: string;
   defaultReasoningEffort?: string | null;
   approvalPolicy: string;
+  approvalsReviewer?: string | null;
   sandboxMode: string;
 };
 
@@ -53,6 +54,55 @@ export type CodexPermissionProfileSummary = {
   description: string;
 };
 
+export type CodexHookSummary = {
+  key: string;
+  eventName: string;
+  handlerType: string;
+  matcher: string;
+  command: string;
+  sourcePath: string;
+  enabled: boolean;
+  trustStatus: string;
+  pluginId: string;
+};
+
+export type CodexHooksListEntry = {
+  cwd: string;
+  hooks: CodexHookSummary[];
+  warnings: string[];
+  errors: string[];
+};
+
+export type CodexPluginSummary = {
+  id: string;
+  name: string;
+  displayName: string;
+  description: string;
+  category: string;
+  source: string;
+  installed: boolean;
+  enabled: boolean;
+  availability: string;
+};
+
+export type CodexPluginMarketplaceSummary = {
+  name: string;
+  displayName: string;
+  path: string;
+  plugins: CodexPluginSummary[];
+};
+
+export type CodexPluginListResult = {
+  marketplaces: CodexPluginMarketplaceSummary[];
+  marketplaceLoadErrors: string[];
+  featuredPluginIds: string[];
+};
+
+export type CodexMemorySettings = {
+  useMemories: boolean;
+  generateMemories: boolean;
+};
+
 export type LocalAdapterState = 'idle' | 'starting' | 'running' | 'stopped' | 'error';
 
 export type WorkspaceRecord = {
@@ -65,6 +115,7 @@ export type WorkspaceRecord = {
   model: string;
   reasoningEffort?: string | null;
   approvalPolicy: string;
+  approvalsReviewer?: string | null;
   sandboxMode: string;
   serviceTier?: string | null;
   permissionProfile?: string | null;
@@ -533,6 +584,7 @@ export function normalizeWorkspaceRecord(value: unknown): WorkspaceRecord | null
     model: stringField(value, ['model']) || 'gpt-5.5',
     reasoningEffort: normalizeReasoningEffort(stringField(value, ['reasoningEffort', 'reasoning_effort'])) ?? null,
     approvalPolicy: stringField(value, ['approvalPolicy', 'approval_policy']) || 'on-request',
+    approvalsReviewer: stringField(value, ['approvalsReviewer', 'approvals_reviewer']) || null,
     sandboxMode: stringField(value, ['sandboxMode', 'sandbox_mode']) || 'workspace-write',
     serviceTier: stringField(value, ['serviceTier', 'service_tier']) || null,
     permissionProfile: stringField(value, ['permissionProfile', 'permission_profile', 'permissions']) || null,
@@ -685,6 +737,148 @@ export function parsePermissionProfileListResponse(value: unknown): CodexPermiss
       };
     })
     .filter((item): item is CodexPermissionProfileSummary => Boolean(item));
+}
+
+function responseObject(value: unknown): Record<string, unknown> {
+  if (!isObject(value)) {
+    return {};
+  }
+  if (isObject(value.payload)) {
+    const nested = responseObject(value.payload.data ?? value.payload);
+    if (Object.keys(nested).length) {
+      return nested;
+    }
+  }
+  if (isObject(value.result)) {
+    const nested = responseObject(value.result);
+    if (Object.keys(nested).length) {
+      return nested;
+    }
+  }
+  return value;
+}
+
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => {
+      if (typeof item === 'string') {
+        return item.trim();
+      }
+      if (isObject(item)) {
+        return stringField(item, ['message', 'summary', 'path', 'key', 'name']);
+      }
+      return '';
+    })
+    .filter(Boolean);
+}
+
+export function parseHooksListResponse(value: unknown): CodexHooksListEntry[] {
+  return responseDataArray(value)
+    .map((entry): CodexHooksListEntry | null => {
+      if (!isObject(entry)) {
+        return null;
+      }
+      const cwd = stringField(entry, ['cwd', 'path']) || 'workspace';
+      const hooks = Array.isArray(entry.hooks)
+        ? entry.hooks
+            .map((hook): CodexHookSummary | null => {
+              if (!isObject(hook)) {
+                return null;
+              }
+              const key = stringField(hook, ['key', 'id', 'name']);
+              if (!key) {
+                return null;
+              }
+              return {
+                key,
+                eventName: stringField(hook, ['eventName', 'event_name']),
+                handlerType: stringField(hook, ['handlerType', 'handler_type']),
+                matcher: stringField(hook, ['matcher']),
+                command: stringField(hook, ['command']),
+                sourcePath: stringField(hook, ['sourcePath', 'source_path', 'path']),
+                enabled: booleanField(hook, ['enabled'], true),
+                trustStatus: stringField(hook, ['trustStatus', 'trust_status']),
+                pluginId: stringField(hook, ['pluginId', 'plugin_id']),
+              };
+            })
+            .filter((hook): hook is CodexHookSummary => Boolean(hook))
+        : [];
+      return {
+        cwd,
+        hooks,
+        warnings: stringList(entry.warnings),
+        errors: stringList(entry.errors),
+      };
+    })
+    .filter((entry): entry is CodexHooksListEntry => Boolean(entry));
+}
+
+export function parsePluginListResponse(value: unknown): CodexPluginListResult {
+  const root = responseObject(value);
+  const marketplaces = Array.isArray(root.marketplaces)
+    ? root.marketplaces
+        .map((marketplace): CodexPluginMarketplaceSummary | null => {
+          if (!isObject(marketplace)) {
+            return null;
+          }
+          const name = stringField(marketplace, ['name', 'id']);
+          if (!name) {
+            return null;
+          }
+          const iface = isObject(marketplace.interface) ? marketplace.interface : {};
+          const plugins = Array.isArray(marketplace.plugins)
+            ? marketplace.plugins
+                .map((plugin): CodexPluginSummary | null => {
+                  if (!isObject(plugin)) {
+                    return null;
+                  }
+                  const pluginName = stringField(plugin, ['name', 'id']);
+                  if (!pluginName) {
+                    return null;
+                  }
+                  const pluginInterface = isObject(plugin.interface) ? plugin.interface : {};
+                  const source = isObject(plugin.source) ? stringField(plugin.source, ['type']) : stringField(plugin, ['source']);
+                  return {
+                    id: stringField(plugin, ['id']) || pluginName,
+                    name: pluginName,
+                    displayName: stringField(pluginInterface, ['displayName', 'display_name']) || pluginName,
+                    description: stringField(pluginInterface, ['shortDescription', 'short_description', 'longDescription', 'long_description']),
+                    category: stringField(pluginInterface, ['category']),
+                    source,
+                    installed: booleanField(plugin, ['installed']),
+                    enabled: booleanField(plugin, ['enabled']),
+                    availability: stringField(plugin, ['availability']) || 'AVAILABLE',
+                  };
+                })
+                .filter((plugin): plugin is CodexPluginSummary => Boolean(plugin))
+            : [];
+          return {
+            name,
+            displayName: stringField(iface, ['displayName', 'display_name']) || name,
+            path: stringField(marketplace, ['path']),
+            plugins,
+          };
+        })
+        .filter((marketplace): marketplace is CodexPluginMarketplaceSummary => Boolean(marketplace))
+    : [];
+  return {
+    marketplaces,
+    marketplaceLoadErrors: stringList(root.marketplaceLoadErrors ?? root.marketplace_load_errors),
+    featuredPluginIds: stringList(root.featuredPluginIds ?? root.featured_plugin_ids),
+  };
+}
+
+export function parseMemorySettingsResponse(value: unknown): CodexMemorySettings {
+  const root = responseObject(value);
+  const config = isObject(root.config) ? root.config : root;
+  const memories = isObject(config.memories) ? config.memories : {};
+  return {
+    useMemories: booleanField(memories, ['useMemories', 'use_memories']),
+    generateMemories: booleanField(memories, ['generateMemories', 'generate_memories']),
+  };
 }
 
 function sameWorkspaceRecord(left: WorkspaceRecord, right: WorkspaceRecord): boolean {
@@ -1667,7 +1861,6 @@ export function parseSlashCommand(input: string): {
   }
 
   if (
-    commandLower === 'permission' ||
     commandLower === 'approve' ||
     commandLower === 'approval'
   ) {

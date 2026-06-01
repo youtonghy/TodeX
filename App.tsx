@@ -68,7 +68,10 @@ import {
   CodexNativeThread,
   CodexModelCatalogItem,
   CodexMcpServerStatus,
+  CodexHooksListEntry,
+  CodexMemorySettings,
   CodexPermissionProfileSummary,
+  CodexPluginListResult,
   CodexReasoningEffortOption,
   DEFAULT_REASONING_EFFORT_OPTIONS,
   FAST_SERVICE_TIER,
@@ -96,8 +99,11 @@ import {
   parseCodexNativeThread,
   parseCodexNativeThreadListResponse,
   parseCodexNativeThreadReadResponse,
+  parseHooksListResponse,
+  parseMemorySettingsResponse,
   parseMcpServerStatusListResponse,
   parsePermissionProfileListResponse,
+  parsePluginListResponse,
   parseWorkspaceSyncResponse,
   prepareWorkspaceSyncPayload,
   sandboxPolicyForMode,
@@ -224,6 +230,30 @@ type PermissionProfilesState = {
   updatedAt: number;
 };
 
+type HooksCatalogState = {
+  status: 'idle' | 'loading' | 'ready' | 'error';
+  entries: CodexHooksListEntry[];
+  raw: unknown;
+  error: string;
+  updatedAt: number;
+};
+
+type PluginsCatalogState = {
+  status: 'idle' | 'loading' | 'ready' | 'error';
+  catalog: CodexPluginListResult;
+  raw: unknown;
+  error: string;
+  updatedAt: number;
+};
+
+type MemorySettingsState = {
+  status: 'idle' | 'loading' | 'ready' | 'saving' | 'error';
+  settings: CodexMemorySettings;
+  raw: unknown;
+  error: string;
+  updatedAt: number;
+};
+
 type TerminalLifecycleState = 'idle' | 'starting' | 'running' | 'stopping' | 'exited' | 'error';
 
 type TerminalOutputEntry = {
@@ -274,9 +304,12 @@ type PendingThreadAction = {
     | 'guardian'
     | 'clean'
     | 'loaded'
+    | 'hooks'
+    | 'plugins'
     | 'mcp'
     | 'permission'
     | 'permissionProfiles'
+    | 'memorySettings'
     | 'inject';
   timeoutId: ReturnType<typeof setTimeout>;
   sourceConversationId?: string;
@@ -285,6 +318,7 @@ type PendingThreadAction = {
   showResult?: boolean;
   resultTitle?: string;
   resultDetail?: string;
+  memorySettings?: CodexMemorySettings;
 };
 
 type ComposerSelection = TextInputSelectionChangeEventData['selection'];
@@ -869,13 +903,14 @@ type MentionSuggestion = {
   insertText: string;
 };
 
-type PermissionPresetId = 'read-only' | 'default' | 'full-access';
+type PermissionPresetId = 'read-only' | 'default' | 'auto-review' | 'full-access';
 
 type PermissionPreset = {
   id: PermissionPresetId;
   title: string;
   description: string;
   approvalPolicy: string;
+  approvalsReviewer?: string | null;
   sandboxMode: string;
   profileId: string;
 };
@@ -1074,12 +1109,13 @@ const CHAT_BOTTOM_FOLLOW_THRESHOLD = 72;
 const TERMINAL_MAX_OUTPUT_ENTRIES = 420;
 const DEFAULT_TERMINAL_ROWS = 24;
 const DEFAULT_TERMINAL_COLS = 80;
+const LOCAL_SESSION_IDLE_SUSPEND_MS = 30 * 60 * 1000;
+const LOCAL_SESSION_IDLE_SWEEP_MS = 2 * 60 * 1000;
 
 const SLASH_COMMANDS: SlashCommand[] = [
   { command: '/model', title: 'Model', description: 'choose what model and reasoning effort to use', category: 'settings' },
   { command: '/fast', title: 'Fast', description: 'toggle fastest inference with increased plan usage', category: 'core' },
   { command: '/permissions', title: 'Permissions', description: 'choose what Codex is allowed to do', category: 'settings' },
-  { command: '/permission', title: 'Permissions', description: 'alias for /permissions', category: 'settings' },
   { command: '/personality', title: 'Personality', description: 'choose a communication style for Codex', category: 'settings' },
   { command: '/experimental', title: 'Experimental', description: 'toggle experimental features', category: 'settings' },
   { command: '/approve', title: 'Approve', description: 'approve one retry of a recent auto-review denial', category: 'runtime' },
@@ -1163,14 +1199,17 @@ const DIRECT_SLASH_COMMANDS = new Set([
 
 function canonicalSlashCommand(command: string): string {
   const normalized = command.trim().toLowerCase();
-  if (normalized === '/permission') {
-    return '/permissions';
-  }
   if (normalized === '/clean') {
     return '/stop';
   }
   if (normalized === '/btw') {
     return '/side';
+  }
+  if (normalized === '/hook') {
+    return '/hooks';
+  }
+  if (normalized === '/plugin') {
+    return '/plugins';
   }
   return normalized.startsWith('/') ? normalized : `/${normalized}`;
 }
@@ -1212,14 +1251,25 @@ const PERMISSION_PRESETS: PermissionPreset[] = [
     title: 'Read Only',
     description: 'Codex can read files. Approval is required to edit files or access the internet.',
     approvalPolicy: 'on-request',
+    approvalsReviewer: 'user',
     sandboxMode: 'read-only',
     profileId: ':read-only',
   },
   {
     id: 'default',
-    title: 'Default',
+    title: 'Ask for approval',
     description: 'Codex can read and edit files in the current workspace. Approval is required for network or outside edits.',
     approvalPolicy: 'on-request',
+    approvalsReviewer: 'user',
+    sandboxMode: 'workspace-write',
+    profileId: ':workspace',
+  },
+  {
+    id: 'auto-review',
+    title: 'Approve for me',
+    description: 'Route approval requests to Codex auto-review before asking you.',
+    approvalPolicy: 'on-request',
+    approvalsReviewer: 'auto_review',
     sandboxMode: 'workspace-write',
     profileId: ':workspace',
   },
@@ -1228,21 +1278,54 @@ const PERMISSION_PRESETS: PermissionPreset[] = [
     title: 'Full Access',
     description: 'Codex can edit files outside this workspace and access the internet without asking.',
     approvalPolicy: 'never',
+    approvalsReviewer: 'user',
     sandboxMode: 'danger-full-access',
     profileId: ':danger-full-access',
   },
 ];
 
-function permissionPresetForProfile(profileId: string | null | undefined): PermissionPreset | null {
+function permissionPresetForProfile(
+  profileId: string | null | undefined,
+  approvalsReviewer?: string | null,
+): PermissionPreset | null {
   if (!profileId) {
     return null;
   }
-  return PERMISSION_PRESETS.find((preset) => preset.profileId === profileId || preset.id === profileId) ?? null;
+  const normalizedReviewer = approvalsReviewer || null;
+  return (
+    PERMISSION_PRESETS.find((preset) =>
+      (preset.profileId === profileId || preset.id === profileId) &&
+      (!normalizedReviewer || preset.approvalsReviewer === normalizedReviewer)
+    ) ??
+    PERMISSION_PRESETS.find((preset) =>
+      (preset.profileId === profileId || preset.id === profileId) &&
+      preset.approvalsReviewer !== 'auto_review'
+    ) ??
+    null
+  );
 }
 
-function permissionProfileLabel(profileId: string | null | undefined): string {
-  const preset = permissionPresetForProfile(profileId);
+function permissionProfileLabel(profileId: string | null | undefined, approvalsReviewer?: string | null): string {
+  const preset = permissionPresetForProfile(profileId, approvalsReviewer);
   return preset?.title ?? profileId ?? 'Legacy approval/sandbox';
+}
+
+function approvalsReviewerValue(
+  workspace: WorkspaceRecord | null | undefined,
+  settings: ConnectionSettings,
+): string | null {
+  return workspace?.approvalsReviewer ?? settings.approvalsReviewer ?? null;
+}
+
+function permissionPresetSelected(
+  preset: PermissionPreset,
+  workspace: WorkspaceRecord | null | undefined,
+  settings: ConnectionSettings,
+): boolean {
+  return (
+    workspace?.permissionProfile === preset.profileId &&
+    (approvalsReviewerValue(workspace, settings) || 'user') === preset.approvalsReviewer
+  );
 }
 
 // Codex `Personality` enum serializes lowercase: "none" | "friendly" | "pragmatic".
@@ -1276,6 +1359,7 @@ const defaultSettings: ConnectionSettings = {
   defaultModel: 'gpt-5.5',
   defaultReasoningEffort: 'medium',
   approvalPolicy: 'on-request',
+  approvalsReviewer: 'user',
   sandboxMode: 'workspace-write',
 };
 
@@ -2298,6 +2382,9 @@ export default function App() {
   const workspacesRef = useRef<WorkspaceRecord[]>([]);
   const conversationsRef = useRef<ConversationRecord[]>([]);
   const timelineRef = useRef<TimelineEntry[]>([]);
+  const turnIdsRef = useRef<Record<string, string>>({});
+  const thinkingConversationsRef = useRef<Record<string, boolean>>({});
+  const terminalByIdRef = useRef<Record<string, TerminalClientState>>({});
   const pendingLocalStartsRef = useRef(new Map<string, PendingLocalStart>());
   const pendingThreadStartsRef = useRef(new Map<string, PendingThreadStart>());
   const pendingThreadListsRef = useRef(new Map<string, PendingThreadList>());
@@ -2364,6 +2451,9 @@ export default function App() {
   const [gitDiffByConversation, setGitDiffByConversation] = useState<Record<string, GitDiffState>>({});
   const [mcpInventoryByConversation, setMcpInventoryByConversation] = useState<Record<string, McpInventoryState>>({});
   const [permissionProfilesByConversation, setPermissionProfilesByConversation] = useState<Record<string, PermissionProfilesState>>({});
+  const [hooksCatalogByConversation, setHooksCatalogByConversation] = useState<Record<string, HooksCatalogState>>({});
+  const [pluginsCatalogByConversation, setPluginsCatalogByConversation] = useState<Record<string, PluginsCatalogState>>({});
+  const [memorySettingsByConversation, setMemorySettingsByConversation] = useState<Record<string, MemorySettingsState>>({});
   const [terminalById, setTerminalById] = useState<Record<string, TerminalClientState>>({});
 
   useEffect(() => {
@@ -2741,6 +2831,18 @@ export default function App() {
   useEffect(() => {
     conversationsRef.current = conversations;
   }, [conversations]);
+
+  useEffect(() => {
+    turnIdsRef.current = turnIds;
+  }, [turnIds]);
+
+  useEffect(() => {
+    thinkingConversationsRef.current = thinkingConversations;
+  }, [thinkingConversations]);
+
+  useEffect(() => {
+    terminalByIdRef.current = terminalById;
+  }, [terminalById]);
 
   useEffect(() => {
     if (!hydrated) {
@@ -3215,6 +3317,54 @@ export default function App() {
             updatedAt: Date.now(),
           },
         }));
+      } else if (pending.action === 'hooks') {
+        setHooksCatalogByConversation((current) => ({
+          ...current,
+          [pending.conversationId]: {
+            ...(current[pending.conversationId] ?? {
+              status: 'idle',
+              entries: [],
+              raw: null,
+              error: '',
+              updatedAt: 0,
+            }),
+            status: 'error',
+            error: errorMessage,
+            updatedAt: Date.now(),
+          },
+        }));
+      } else if (pending.action === 'plugins') {
+        setPluginsCatalogByConversation((current) => ({
+          ...current,
+          [pending.conversationId]: {
+            ...(current[pending.conversationId] ?? {
+              status: 'idle',
+              catalog: { marketplaces: [], marketplaceLoadErrors: [], featuredPluginIds: [] },
+              raw: null,
+              error: '',
+              updatedAt: 0,
+            }),
+            status: 'error',
+            error: errorMessage,
+            updatedAt: Date.now(),
+          },
+        }));
+      } else if (pending.action === 'memorySettings') {
+        setMemorySettingsByConversation((current) => ({
+          ...current,
+          [pending.conversationId]: {
+            ...(current[pending.conversationId] ?? {
+              status: 'idle',
+              settings: { useMemories: false, generateMemories: false },
+              raw: null,
+              error: '',
+              updatedAt: 0,
+            }),
+            status: 'error',
+            error: errorMessage,
+            updatedAt: Date.now(),
+          },
+        }));
       }
       setLastError(errorMessage);
       return;
@@ -3609,6 +3759,42 @@ export default function App() {
               [pendingThreadAction.conversationId]: {
                 status: 'ready',
                 profiles,
+                raw: responseValue,
+                error: '',
+                updatedAt: Date.now(),
+              },
+            }));
+          } else if (pendingThreadAction.action === 'hooks') {
+            const entries = parseHooksListResponse(responseValue);
+            setHooksCatalogByConversation((current) => ({
+              ...current,
+              [pendingThreadAction.conversationId]: {
+                status: 'ready',
+                entries,
+                raw: responseValue,
+                error: '',
+                updatedAt: Date.now(),
+              },
+            }));
+          } else if (pendingThreadAction.action === 'plugins') {
+            const catalog = parsePluginListResponse(responseValue);
+            setPluginsCatalogByConversation((current) => ({
+              ...current,
+              [pendingThreadAction.conversationId]: {
+                status: 'ready',
+                catalog,
+                raw: responseValue,
+                error: '',
+                updatedAt: Date.now(),
+              },
+            }));
+          } else if (pendingThreadAction.action === 'memorySettings') {
+            const settings = pendingThreadAction.memorySettings ?? parseMemorySettingsResponse(responseValue);
+            setMemorySettingsByConversation((current) => ({
+              ...current,
+              [pendingThreadAction.conversationId]: {
+                status: 'ready',
+                settings,
                 raw: responseValue,
                 error: '',
                 updatedAt: Date.now(),
@@ -4397,6 +4583,7 @@ export default function App() {
         model: settings.defaultModel,
         reasoningEffort: null,
         approvalPolicy: settings.approvalPolicy,
+        approvalsReviewer: null,
         sandboxMode: settings.sandboxMode,
         serviceTier: null,
         permissionProfile: null,
@@ -4616,6 +4803,7 @@ export default function App() {
           cwd: workspace.path,
           model: workspace.model || settings.defaultModel || undefined,
           approvalPolicy: workspace.approvalPolicy,
+          approvalsReviewer: workspace.approvalsReviewer || settings.approvalsReviewer || undefined,
           sandboxMode: workspace.sandboxMode,
           configOverrides: {
             reasoningEffort: workspace.reasoningEffort || settings.defaultReasoningEffort || undefined,
@@ -4631,7 +4819,7 @@ export default function App() {
         }
       });
     },
-    [pushSystem, sendProtocolMessage, settings.defaultModel, settings.defaultReasoningEffort, updateConversation],
+    [pushSystem, sendProtocolMessage, settings.approvalsReviewer, settings.defaultModel, settings.defaultReasoningEffort, updateConversation],
   );
 
   const ensureThreadId = useCallback(
@@ -4694,6 +4882,7 @@ export default function App() {
             model: workspace.model || settings.defaultModel || undefined,
             reasoningEffort: workspace.reasoningEffort || settings.defaultReasoningEffort || undefined,
             approvalPolicy: workspace.approvalPolicy || settings.approvalPolicy || undefined,
+            approvalsReviewer: workspace.approvalsReviewer || settings.approvalsReviewer || undefined,
             sandbox: workspace.permissionProfile ? undefined : workspace.sandboxMode || settings.sandboxMode || undefined,
             permissions: workspace.permissionProfile || undefined,
             serviceTier: workspace.serviceTier || undefined,
@@ -4709,7 +4898,7 @@ export default function App() {
         }
       });
     },
-    [sendProtocolMessage, settings.approvalPolicy, settings.defaultModel, settings.defaultReasoningEffort, settings.sandboxMode],
+    [sendProtocolMessage, settings.approvalPolicy, settings.approvalsReviewer, settings.defaultModel, settings.defaultReasoningEffort, settings.sandboxMode],
   );
 
   const requestNativeThreadList = useCallback(async (workspaceId: string, includeArchived = false) => {
@@ -4790,7 +4979,23 @@ export default function App() {
       setLastError(error instanceof Error ? localTurnErrorMessage(error.message) : '本地会话未启动');
       return false;
     }
-    const threadId = normalizeThreadId(conversation.threadId);
+    let threadId = normalizeThreadId(conversation.threadId);
+    const canCreateThreadForAction = ![
+      'archive',
+      'fork',
+      'resume',
+      'rollback',
+      'unarchive',
+      'unsubscribe',
+    ].includes(action);
+    if (!threadId && canCreateThreadForAction) {
+      try {
+        threadId = await ensureThreadId(workspace, conversation, true);
+      } catch (error) {
+        setLastError(error instanceof Error ? localTurnErrorMessage(error.message) : '创建 thread 失败');
+        return false;
+      }
+    }
     if (!threadId) {
       setLastError('当前记录还没有原生 thread id。');
       return false;
@@ -4825,7 +5030,7 @@ export default function App() {
       return false;
     }
     return true;
-  }, [finishPendingThreadAction, getConversationContext, sendLocalMethodRequest, startLocalAdapter]);
+  }, [ensureThreadId, finishPendingThreadAction, getConversationContext, sendLocalMethodRequest, startLocalAdapter]);
 
   const sendTrackedLocalMethod = useCallback(async (
     conversationId: string,
@@ -5035,10 +5240,226 @@ export default function App() {
     return true;
   }, [finishPendingThreadAction, getConversationContext, sendLocalMethodRequest, startLocalAdapter]);
 
-  const applyPermissionProfile = useCallback(async (
+  const requestHooksCatalog = useCallback(async (conversationId = activeConversationRef.current) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      return false;
+    }
+    const { workspace, conversation } = context;
+    setHooksCatalogByConversation((current) => ({
+      ...current,
+      [conversation.id]: {
+        ...(current[conversation.id] ?? {
+          status: 'idle',
+          entries: [],
+          raw: null,
+          error: '',
+          updatedAt: 0,
+        }),
+        status: 'loading',
+        error: '',
+      },
+    }));
+    try {
+      await startLocalAdapter(workspace, conversation);
+    } catch (error) {
+      const message = error instanceof Error ? localTurnErrorMessage(error.message) : '本地会话未启动';
+      setHooksCatalogByConversation((current) => ({
+        ...current,
+        [conversation.id]: {
+          ...(current[conversation.id] ?? {
+            status: 'idle',
+            entries: [],
+            raw: null,
+            error: '',
+            updatedAt: 0,
+          }),
+          status: 'error',
+          error: message,
+          updatedAt: Date.now(),
+        },
+      }));
+      setLastError(message);
+      return false;
+    }
+    const requestId = createRequestId('hooks');
+    const timeoutId = setTimeout(() => {
+      const pending = pendingThreadActionsRef.current.get(requestId);
+      if (pending) {
+        finishPendingThreadAction(pending, 'hooks/list 请求超时');
+      }
+    }, 15000);
+    pendingThreadActionsRef.current.set(requestId, {
+      workspaceId: workspace.id,
+      conversationId: conversation.id,
+      requestId,
+      action: 'hooks',
+      timeoutId,
+      sourceConversationId: conversation.id,
+      showResult: false,
+    });
+    const sent = sendLocalMethodRequest(workspace, conversation, 'hooks/list', {
+      cwds: [workspace.path],
+    }, requestId);
+    if (!sent) {
+      const pending = pendingThreadActionsRef.current.get(requestId);
+      if (pending) {
+        finishPendingThreadAction(pending, '请先在设置里连接后端。');
+      }
+      return false;
+    }
+    return true;
+  }, [finishPendingThreadAction, getConversationContext, sendLocalMethodRequest, startLocalAdapter]);
+
+  const requestPluginsCatalog = useCallback(async (conversationId = activeConversationRef.current) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      return false;
+    }
+    const { workspace, conversation } = context;
+    setPluginsCatalogByConversation((current) => ({
+      ...current,
+      [conversation.id]: {
+        ...(current[conversation.id] ?? {
+          status: 'idle',
+          catalog: { marketplaces: [], marketplaceLoadErrors: [], featuredPluginIds: [] },
+          raw: null,
+          error: '',
+          updatedAt: 0,
+        }),
+        status: 'loading',
+        error: '',
+      },
+    }));
+    try {
+      await startLocalAdapter(workspace, conversation);
+    } catch (error) {
+      const message = error instanceof Error ? localTurnErrorMessage(error.message) : '本地会话未启动';
+      setPluginsCatalogByConversation((current) => ({
+        ...current,
+        [conversation.id]: {
+          ...(current[conversation.id] ?? {
+            status: 'idle',
+            catalog: { marketplaces: [], marketplaceLoadErrors: [], featuredPluginIds: [] },
+            raw: null,
+            error: '',
+            updatedAt: 0,
+          }),
+          status: 'error',
+          error: message,
+          updatedAt: Date.now(),
+        },
+      }));
+      setLastError(message);
+      return false;
+    }
+    const requestId = createRequestId('plugins');
+    const timeoutId = setTimeout(() => {
+      const pending = pendingThreadActionsRef.current.get(requestId);
+      if (pending) {
+        finishPendingThreadAction(pending, 'plugin/list 请求超时');
+      }
+    }, 15000);
+    pendingThreadActionsRef.current.set(requestId, {
+      workspaceId: workspace.id,
+      conversationId: conversation.id,
+      requestId,
+      action: 'plugins',
+      timeoutId,
+      sourceConversationId: conversation.id,
+      showResult: false,
+    });
+    const sent = sendLocalMethodRequest(workspace, conversation, 'plugin/list', {
+      cwds: [workspace.path],
+      extraUserRoots: [],
+    }, requestId);
+    if (!sent) {
+      const pending = pendingThreadActionsRef.current.get(requestId);
+      if (pending) {
+        finishPendingThreadAction(pending, '请先在设置里连接后端。');
+      }
+      return false;
+    }
+    return true;
+  }, [finishPendingThreadAction, getConversationContext, sendLocalMethodRequest, startLocalAdapter]);
+
+  const requestMemorySettings = useCallback(async (conversationId = activeConversationRef.current) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      return false;
+    }
+    const { workspace, conversation } = context;
+    setMemorySettingsByConversation((current) => ({
+      ...current,
+      [conversation.id]: {
+        ...(current[conversation.id] ?? {
+          status: 'idle',
+          settings: { useMemories: false, generateMemories: false },
+          raw: null,
+          error: '',
+          updatedAt: 0,
+        }),
+        status: 'loading',
+        error: '',
+      },
+    }));
+    try {
+      await startLocalAdapter(workspace, conversation);
+    } catch (error) {
+      const message = error instanceof Error ? localTurnErrorMessage(error.message) : '本地会话未启动';
+      setMemorySettingsByConversation((current) => ({
+        ...current,
+        [conversation.id]: {
+          ...(current[conversation.id] ?? {
+            status: 'idle',
+            settings: { useMemories: false, generateMemories: false },
+            raw: null,
+            error: '',
+            updatedAt: 0,
+          }),
+          status: 'error',
+          error: message,
+          updatedAt: Date.now(),
+        },
+      }));
+      setLastError(message);
+      return false;
+    }
+    const requestId = createRequestId('memory-settings');
+    const timeoutId = setTimeout(() => {
+      const pending = pendingThreadActionsRef.current.get(requestId);
+      if (pending) {
+        finishPendingThreadAction(pending, 'config/read 请求超时');
+      }
+    }, 15000);
+    pendingThreadActionsRef.current.set(requestId, {
+      workspaceId: workspace.id,
+      conversationId: conversation.id,
+      requestId,
+      action: 'memorySettings',
+      timeoutId,
+      sourceConversationId: conversation.id,
+      showResult: false,
+    });
+    const sent = sendLocalMethodRequest(workspace, conversation, 'config/read', {
+      cwd: workspace.path,
+    }, requestId);
+    if (!sent) {
+      const pending = pendingThreadActionsRef.current.get(requestId);
+      if (pending) {
+        finishPendingThreadAction(pending, '请先在设置里连接后端。');
+      }
+      return false;
+    }
+    return true;
+  }, [finishPendingThreadAction, getConversationContext, sendLocalMethodRequest, startLocalAdapter]);
+
+  const updateMemorySettings = useCallback(async (
     conversationId: string,
-    profileId: string,
-    description = '',
+    patch: Partial<CodexMemorySettings>,
   ) => {
     const context = getConversationContext(conversationId);
     if (!context) {
@@ -5046,14 +5467,165 @@ export default function App() {
       return false;
     }
     const { workspace, conversation } = context;
-    const preset = permissionPresetForProfile(profileId);
+    const previousSettings = memorySettingsByConversation[conversation.id]?.settings ?? {
+      useMemories: false,
+      generateMemories: false,
+    };
+    const nextMemorySettings: CodexMemorySettings = {
+      ...previousSettings,
+      ...patch,
+    };
+    const edits = [
+      patch.useMemories === undefined
+        ? null
+        : { keyPath: 'memories.use_memories', value: patch.useMemories, mergeStrategy: 'replace' },
+      patch.generateMemories === undefined
+        ? null
+        : { keyPath: 'memories.generate_memories', value: patch.generateMemories, mergeStrategy: 'replace' },
+    ].filter((edit): edit is { keyPath: string; value: boolean; mergeStrategy: string } => Boolean(edit));
+    if (!edits.length) {
+      return true;
+    }
+    setMemorySettingsByConversation((current) => ({
+      ...current,
+      [conversation.id]: {
+        ...(current[conversation.id] ?? {
+          raw: null,
+          error: '',
+          updatedAt: 0,
+        }),
+        status: 'saving',
+        settings: nextMemorySettings,
+        error: '',
+        updatedAt: Date.now(),
+      },
+    }));
+    try {
+      await startLocalAdapter(workspace, conversation);
+      if (
+        patch.generateMemories !== undefined &&
+        patch.generateMemories !== previousSettings.generateMemories
+      ) {
+        const threadId = await ensureThreadId(workspace, conversation, !normalizeThreadId(conversation.threadId));
+        sendLocalMethodRequest(workspace, conversation, 'thread/memoryMode/set', {
+          threadId,
+          mode: patch.generateMemories ? 'enabled' : 'disabled',
+        }, createRequestId('memory-mode'));
+      }
+    } catch (error) {
+      const message = error instanceof Error ? localTurnErrorMessage(error.message) : 'Memory 设置失败';
+      setMemorySettingsByConversation((current) => ({
+        ...current,
+        [conversation.id]: {
+          ...(current[conversation.id] ?? {
+            settings: nextMemorySettings,
+            raw: null,
+            error: '',
+            updatedAt: 0,
+          }),
+          status: 'error',
+          error: message,
+          updatedAt: Date.now(),
+        },
+      }));
+      setLastError(message);
+      return false;
+    }
+    const requestId = createRequestId('memory-settings-save');
+    const timeoutId = setTimeout(() => {
+      const pending = pendingThreadActionsRef.current.get(requestId);
+      if (pending) {
+        finishPendingThreadAction(pending, 'config/batchWrite 请求超时');
+      }
+    }, 15000);
+    pendingThreadActionsRef.current.set(requestId, {
+      workspaceId: workspace.id,
+      conversationId: conversation.id,
+      requestId,
+      action: 'memorySettings',
+      timeoutId,
+      sourceConversationId: conversation.id,
+      showResult: false,
+      memorySettings: nextMemorySettings,
+    });
+    const sent = sendLocalMethodRequest(workspace, conversation, 'config/batchWrite', {
+      edits,
+      reloadUserConfig: true,
+    }, requestId);
+    if (!sent) {
+      const pending = pendingThreadActionsRef.current.get(requestId);
+      if (pending) {
+        finishPendingThreadAction(pending, '请先在设置里连接后端。');
+      }
+      return false;
+    }
+    return true;
+  }, [ensureThreadId, finishPendingThreadAction, getConversationContext, memorySettingsByConversation, sendLocalMethodRequest, startLocalAdapter]);
+
+  const resetMemories = useCallback(async (conversationId: string) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      return false;
+    }
+    const { workspace, conversation } = context;
+    try {
+      await startLocalAdapter(workspace, conversation);
+    } catch (error) {
+      const message = error instanceof Error ? localTurnErrorMessage(error.message) : '本地会话未启动';
+      setLastError(message);
+      return false;
+    }
+    const requestId = createRequestId('memory-reset');
+    const timeoutId = setTimeout(() => {
+      const pending = pendingThreadActionsRef.current.get(requestId);
+      if (pending) {
+        finishPendingThreadAction(pending, 'memory/reset 请求超时');
+      }
+    }, 15000);
+    pendingThreadActionsRef.current.set(requestId, {
+      workspaceId: workspace.id,
+      conversationId: conversation.id,
+      requestId,
+      action: 'memoryReset',
+      timeoutId,
+      sourceConversationId: conversation.id,
+      showResult: false,
+    });
+    const sent = sendLocalMethodRequest(workspace, conversation, 'memory/reset', null, requestId);
+    if (!sent) {
+      const pending = pendingThreadActionsRef.current.get(requestId);
+      if (pending) {
+        finishPendingThreadAction(pending, '请先在设置里连接后端。');
+      }
+      return false;
+    }
+    appendTimeline(makeSystemEntry('Memory reset requested', '已请求重置本地 memories。', workspace.id, conversation.id));
+    return true;
+  }, [appendTimeline, finishPendingThreadAction, getConversationContext, sendLocalMethodRequest, startLocalAdapter]);
+
+  const applyPermissionProfile = useCallback(async (
+    conversationId: string,
+    profileId: string,
+    description = '',
+    approvalsReviewer?: string | null,
+  ) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      return false;
+    }
+    const { workspace, conversation } = context;
+    const nextApprovalsReviewer = approvalsReviewer ?? workspace.approvalsReviewer ?? settings.approvalsReviewer ?? 'user';
+    const preset = permissionPresetForProfile(profileId, nextApprovalsReviewer);
     updateWorkspace(workspace.id, {
       approvalPolicy: preset?.approvalPolicy ?? workspace.approvalPolicy,
       sandboxMode: preset?.sandboxMode ?? workspace.sandboxMode,
       permissionProfile: profileId,
+      approvalsReviewer: nextApprovalsReviewer,
     });
     appendTimeline(makeSystemEntry(
-      `Permissions updated to ${permissionProfileLabel(profileId)}`,
+      `Permissions updated to ${permissionProfileLabel(profileId, nextApprovalsReviewer)}`,
       description || preset?.description || profileId,
       workspace.id,
       conversation.id,
@@ -5089,6 +5661,7 @@ export default function App() {
       threadId,
       permissions: profileId,
       approvalPolicy: preset?.approvalPolicy ?? workspace.approvalPolicy,
+      approvalsReviewer: nextApprovalsReviewer,
     }, requestId);
     if (!sent) {
       const pending = pendingThreadActionsRef.current.get(requestId);
@@ -5098,7 +5671,7 @@ export default function App() {
       return false;
     }
     return true;
-  }, [appendTimeline, finishPendingThreadAction, getConversationContext, sendLocalMethodRequest, startLocalAdapter, updateWorkspace]);
+  }, [appendTimeline, finishPendingThreadAction, getConversationContext, sendLocalMethodRequest, settings.approvalsReviewer, startLocalAdapter, updateWorkspace]);
 
   const setWorkspaceServiceTier = useCallback((conversationId: string, nextTier: string, title: string) => {
     const context = getConversationContext(conversationId);
@@ -5466,13 +6039,14 @@ export default function App() {
         cwd: workspace.path,
         model: workspace.model || settings.defaultModel || undefined,
         approvalPolicy: workspace.approvalPolicy || settings.approvalPolicy || undefined,
+        approvalsReviewer: workspace.approvalsReviewer || settings.approvalsReviewer || undefined,
         sandbox: workspace.permissionProfile ? undefined : workspace.sandboxMode || settings.sandboxMode || undefined,
         permissions: workspace.permissionProfile || undefined,
       }),
       { selectResult: true, resultConversationId: nextConversation.id },
     );
     return nextConversation;
-  }, [getConversationContext, sendNativeThreadAction, settings.approvalPolicy, settings.defaultModel, settings.sandboxMode]);
+  }, [getConversationContext, sendNativeThreadAction, settings.approvalPolicy, settings.approvalsReviewer, settings.defaultModel, settings.sandboxMode]);
 
   const removeConversation = useCallback((conversationId: string) => {
     const context = getConversationContext(conversationId);
@@ -5569,6 +6143,7 @@ export default function App() {
         threadId,
         input: codexInputFromComposer(text, attachments, skills),
         approvalPolicy: workspace.approvalPolicy || settings.approvalPolicy || undefined,
+        approvalsReviewer: workspace.approvalsReviewer || settings.approvalsReviewer || undefined,
         sandboxPolicy: workspace.permissionProfile ? undefined : sandboxPolicyForMode(workspace.sandboxMode || settings.sandboxMode),
         permissions: workspace.permissionProfile || undefined,
         serviceTier: workspace.serviceTier || undefined,
@@ -5607,7 +6182,7 @@ export default function App() {
       setConversationThinking(conversation.id, false);
       return false;
     },
-    [appendTimeline, ensureThreadId, getConversationContext, sendProtocolMessage, setConversationThinking, settings.approvalPolicy, settings.defaultModel, settings.defaultReasoningEffort, settings.sandboxMode, startLocalAdapter],
+    [appendTimeline, ensureThreadId, getConversationContext, sendProtocolMessage, setConversationThinking, settings.approvalPolicy, settings.approvalsReviewer, settings.defaultModel, settings.defaultReasoningEffort, settings.sandboxMode, startLocalAdapter],
   );
 
   useEffect(() => {
@@ -5927,11 +6502,11 @@ export default function App() {
         })();
       };
 
-      if (lower === 'permissions' || lower === 'permission') {
+      if (lower === 'permissions') {
         const presetName = rest[0]?.toLowerCase() ?? '';
         const preset = PERMISSION_PRESETS.find((candidate) => candidate.id === presetName || candidate.profileId.toLowerCase() === presetName || candidate.title.toLowerCase() === presetName);
         if (preset) {
-          void applyPermissionProfile(conversation.id, preset.profileId, preset.description);
+          void applyPermissionProfile(conversation.id, preset.profileId, preset.description, preset.approvalsReviewer);
           return;
         }
         openSlashCommandActionPage(workspace, conversation, '/permissions');
@@ -5973,13 +6548,13 @@ export default function App() {
         return;
       }
 
-      if (lower === 'hooks') {
-        sendLocalMethod('hooks/list', { cwds: [workspace.path] }, 'Hooks requested', '已请求 Codex app-server 列出当前工作区 hooks。');
+      if (lower === 'hooks' || lower === 'hook') {
+        openSlashCommandActionPage(workspace, conversation, '/hooks');
         return;
       }
 
-      if (lower === 'plugins') {
-        sendLocalMethod('plugin/list', { cwds: [workspace.path], extraUserRoots: [] }, 'Plugins requested', '已请求 Codex app-server 列出插件。');
+      if (lower === 'plugins' || lower === 'plugin') {
+        openSlashCommandActionPage(workspace, conversation, '/plugins');
         return;
       }
 
@@ -6209,6 +6784,7 @@ export default function App() {
             cwd: workspace.path,
             model: workspace.model || settings.defaultModel || undefined,
             approvalPolicy: workspace.approvalPolicy || settings.approvalPolicy || undefined,
+            approvalsReviewer: workspace.approvalsReviewer || settings.approvalsReviewer || undefined,
             sandbox: workspace.permissionProfile ? undefined : workspace.sandboxMode || settings.sandboxMode || undefined,
             permissions: workspace.permissionProfile || undefined,
             ephemeral: lower === 'side' || lower === 'btw',
@@ -6334,7 +6910,7 @@ export default function App() {
             return;
           }
         }
-        openThreadCommandPrompt(conversation.id, 'memory');
+        openSlashCommandActionPage(workspace, conversation, '/memories');
         return;
       }
 
@@ -6393,6 +6969,131 @@ export default function App() {
       updateWorkspace,
     ],
   );
+
+  useEffect(() => {
+    if (!hydrated) {
+      return;
+    }
+    if (!activeWorkspaceId) {
+      const firstWorkspaceId = workspaces[0]?.id ?? '';
+      if (firstWorkspaceId) {
+        setActiveWorkspaceId(firstWorkspaceId);
+      }
+      return;
+    }
+    const workspace = workspaces.find((item) => item.id === activeWorkspaceId) ?? null;
+    if (!workspace) {
+      const firstWorkspaceId = workspaces[0]?.id ?? '';
+      if (firstWorkspaceId !== activeWorkspaceId) {
+        setActiveWorkspaceId(firstWorkspaceId);
+        setActiveConversationId('');
+      }
+      return;
+    }
+    const workspaceConversations = conversations
+      .filter((item) => item.workspaceId === workspace.id && item.archived !== true)
+      .sort((left, right) => right.updatedAt - left.updatedAt);
+    if (workspaceConversations.some((item) => item.id === activeConversationId)) {
+      return;
+    }
+    if (workspaceConversations.length > 0) {
+      setActiveConversationId(workspaceConversations[0].id);
+      return;
+    }
+    const nextConversation = createDefaultConversation(workspace);
+    setConversations((current) => {
+      if (current.some((item) => item.id === nextConversation.id)) {
+        return current;
+      }
+      return [nextConversation, ...current];
+    });
+    setActiveConversationId(nextConversation.id);
+  }, [activeConversationId, activeWorkspaceId, conversations, hydrated, workspaces]);
+
+  useEffect(() => {
+    if (
+      !hydrated ||
+      connectionState !== 'open' ||
+      !activeWorkspace ||
+      !activeConversation ||
+      activeConversation.archived === true
+    ) {
+      return;
+    }
+    const state = localConversationStateOf(activeConversation);
+    if (
+      state === 'running' ||
+      state === 'starting' ||
+      pendingLocalStartsRef.current.has(activeConversation.id)
+    ) {
+      return;
+    }
+    void startLocalAdapter(activeWorkspace, activeConversation).catch(() => undefined);
+  }, [
+    activeConversation?.archived,
+    activeConversation?.id,
+    activeConversation?.localAdapterState,
+    activeConversation?.sessionId,
+    activeWorkspace?.approvalPolicy,
+    activeWorkspace?.approvalsReviewer,
+    activeWorkspace?.id,
+    activeWorkspace?.model,
+    activeWorkspace?.path,
+    activeWorkspace?.reasoningEffort,
+    activeWorkspace?.sandboxMode,
+    connectionState,
+    hydrated,
+    startLocalAdapter,
+  ]);
+
+  useEffect(() => {
+    if (!hydrated || connectionState !== 'open') {
+      return;
+    }
+    const suspendIdleSessions = () => {
+      const now = Date.now();
+      const activeConversationId = activeConversationRef.current;
+      conversationsRef.current.forEach((conversation) => {
+        if (
+          conversation.id === activeConversationId ||
+          conversation.archived === true ||
+          localConversationStateOf(conversation) !== 'running' ||
+          now - conversation.updatedAt < LOCAL_SESSION_IDLE_SUSPEND_MS ||
+          pendingLocalStartsRef.current.has(conversation.id) ||
+          pendingThreadStartsRef.current.has(conversation.id) ||
+          turnIdsRef.current[conversation.id] ||
+          thinkingConversationsRef.current[conversation.id]
+        ) {
+          return;
+        }
+        const hasPendingThreadAction = [...pendingThreadActionsRef.current.values()].some(
+          (pending) =>
+            pending.conversationId === conversation.id ||
+            pending.sourceConversationId === conversation.id,
+        );
+        if (hasPendingThreadAction) {
+          return;
+        }
+        const hasActiveTerminal = Object.values(terminalByIdRef.current).some(
+          (terminal) =>
+            terminal.conversationId === conversation.id &&
+            (terminal.status === 'starting' || terminal.status === 'running' || terminal.status === 'stopping'),
+        );
+        if (hasActiveTerminal) {
+          return;
+        }
+        const workspace = workspacesRef.current.find((item) => item.id === conversation.workspaceId) ?? null;
+        if (!workspace) {
+          return;
+        }
+        if (sendWorkspaceCommand(workspace, 'codex.local.stop', { force: false }, conversation)) {
+          updateConversation(conversation.id, { localAdapterState: 'stopped' });
+        }
+      });
+    };
+    const intervalId = setInterval(suspendIdleSessions, LOCAL_SESSION_IDLE_SWEEP_MS);
+    return () => clearInterval(intervalId);
+  }, [connectionState, hydrated, sendWorkspaceCommand, updateConversation]);
 
   const stopThinking = useCallback((conversationId: string) => {
     const conversation = conversationsRef.current.find((item) => item.id === conversationId) ?? null;
@@ -6835,10 +7536,18 @@ export default function App() {
                     modelCatalogError={modelCatalogError}
                     mcpInventory={mcpInventoryByConversation[props.route.params.conversationId] ?? null}
                     permissionProfilesState={permissionProfilesByConversation[props.route.params.conversationId] ?? null}
+                    hooksCatalog={hooksCatalogByConversation[props.route.params.conversationId] ?? null}
+                    pluginsCatalog={pluginsCatalogByConversation[props.route.params.conversationId] ?? null}
+                    memorySettingsState={memorySettingsByConversation[props.route.params.conversationId] ?? null}
                     refreshModelCatalog={requestModelCatalog}
                     applyWorkspaceModelSelection={applyWorkspaceModelSelection}
                     requestMcpInventory={requestMcpInventory}
                     requestPermissionProfiles={requestPermissionProfiles}
+                    requestHooksCatalog={requestHooksCatalog}
+                    requestPluginsCatalog={requestPluginsCatalog}
+                    requestMemorySettings={requestMemorySettings}
+                    updateMemorySettings={updateMemorySettings}
+                    resetMemories={resetMemories}
                     applyPermissionProfile={applyPermissionProfile}
                     toggleFastServiceTier={toggleFastServiceTier}
                     applyPersonality={applyPersonality}
@@ -8569,10 +9278,18 @@ function SlashCommandActionScreen({
   modelCatalogError,
   mcpInventory,
   permissionProfilesState,
+  hooksCatalog,
+  pluginsCatalog,
+  memorySettingsState,
   refreshModelCatalog,
   applyWorkspaceModelSelection,
   requestMcpInventory,
   requestPermissionProfiles,
+  requestHooksCatalog,
+  requestPluginsCatalog,
+  requestMemorySettings,
+  updateMemorySettings,
+  resetMemories,
   applyPermissionProfile,
   toggleFastServiceTier,
   applyPersonality,
@@ -8590,11 +9307,19 @@ function SlashCommandActionScreen({
   modelCatalogError: string;
   mcpInventory: McpInventoryState | null;
   permissionProfilesState: PermissionProfilesState | null;
+  hooksCatalog: HooksCatalogState | null;
+  pluginsCatalog: PluginsCatalogState | null;
+  memorySettingsState: MemorySettingsState | null;
   refreshModelCatalog: () => boolean;
   applyWorkspaceModelSelection: (conversationId: string, model: string, reasoningEffort: string | null) => void;
   requestMcpInventory: (conversationId?: string, detail?: McpInventoryState['detail']) => Promise<boolean>;
   requestPermissionProfiles: (conversationId?: string) => Promise<boolean>;
-  applyPermissionProfile: (conversationId: string, profileId: string, description?: string) => Promise<boolean>;
+  requestHooksCatalog: (conversationId?: string) => Promise<boolean>;
+  requestPluginsCatalog: (conversationId?: string) => Promise<boolean>;
+  requestMemorySettings: (conversationId?: string) => Promise<boolean>;
+  updateMemorySettings: (conversationId: string, patch: Partial<CodexMemorySettings>) => Promise<boolean>;
+  resetMemories: (conversationId: string) => Promise<boolean>;
+  applyPermissionProfile: (conversationId: string, profileId: string, description?: string, approvalsReviewer?: string | null) => Promise<boolean>;
   toggleFastServiceTier: (conversationId: string) => boolean;
   applyPersonality: (conversationId: string, personality: string) => boolean;
   submitFeedback: (conversationId: string, classification: string, reason: string, includeLogs: boolean) => boolean;
@@ -8623,13 +9348,34 @@ function SlashCommandActionScreen({
   }, [command, settings.defaultReasoningEffort, workspace?.reasoningEffort]);
 
   useEffect(() => {
-    if (command === '/permissions' && conversation && !permissionProfilesState) {
+    if (!conversation) {
+      return;
+    }
+    if (command === '/permissions') {
       void requestPermissionProfiles(conversation.id);
     }
-    if (command === '/mcp' && conversation && !mcpInventory) {
+    if (command === '/mcp' && !mcpInventory) {
       void requestMcpInventory(conversation.id, 'toolsAndAuthOnly');
     }
-  }, [command, conversation, mcpInventory, permissionProfilesState, requestMcpInventory, requestPermissionProfiles]);
+    if (command === '/hooks') {
+      void requestHooksCatalog(conversation.id);
+    }
+    if (command === '/plugins') {
+      void requestPluginsCatalog(conversation.id);
+    }
+    if (command === '/memories') {
+      void requestMemorySettings(conversation.id);
+    }
+  }, [
+    activeConversationId,
+    command,
+    mcpInventory,
+    requestHooksCatalog,
+    requestMcpInventory,
+    requestMemorySettings,
+    requestPermissionProfiles,
+    requestPluginsCatalog,
+  ]);
 
   const runSlash = useCallback((input: string) => {
     if (!conversation) {
@@ -8728,18 +9474,20 @@ function SlashCommandActionScreen({
   const renderPermissionsControls = () => (
     <View style={styles.commandDetailCard}>
       <Text style={styles.commandDetailLabel}>当前权限</Text>
-      <Text style={styles.commandDetailValue}>{permissionProfileLabel(workspace?.permissionProfile)}</Text>
-      <Text style={styles.commandDetailHint}>{workspace?.approvalPolicy || settings.approvalPolicy} · {workspace?.sandboxMode || settings.sandboxMode}</Text>
+      <Text style={styles.commandDetailValue}>{permissionProfileLabel(workspace?.permissionProfile, approvalsReviewerValue(workspace, settings))}</Text>
+      <Text style={styles.commandDetailHint}>
+        {workspace?.approvalPolicy || settings.approvalPolicy} · {approvalsReviewerValue(workspace, settings) || 'user'} · {workspace?.sandboxMode || settings.sandboxMode}
+      </Text>
       <View style={styles.commandActionGrid}>
         <ActionButton title="刷新 Profiles" onPress={() => requestPermissionProfiles(activeConversationId)} tone="ghost" disabled={permissionProfilesState?.status === 'loading'} />
       </View>
       {PERMISSION_PRESETS.map((preset) => (
-        <Pressable key={preset.id} style={styles.commandChoiceItem} onPress={() => applyPermissionProfile(activeConversationId, preset.profileId, preset.description)}>
+        <Pressable key={preset.id} style={styles.commandChoiceItem} onPress={() => applyPermissionProfile(activeConversationId, preset.profileId, preset.description, preset.approvalsReviewer)}>
           <View style={styles.commandListText}>
             <Text style={styles.commandName}>{preset.title}</Text>
             <Text style={styles.commandDescription}>{preset.description}</Text>
           </View>
-          <StyledIonicons name={workspace?.permissionProfile === preset.profileId ? 'checkmark-circle' : 'checkmark-circle-outline'} size={18} className="text-muted" />
+          <StyledIonicons name={permissionPresetSelected(preset, workspace, settings) ? 'checkmark-circle' : 'checkmark-circle-outline'} size={18} className="text-muted" />
         </Pressable>
       ))}
       {permissionProfilesState?.profiles
@@ -8853,12 +9601,92 @@ function SlashCommandActionScreen({
         </View>
       );
     }
-    if (command === '/hooks' || command === '/apps' || command === '/plugins') {
+    if (command === '/hooks') {
+      const status = hooksCatalog?.status ?? 'idle';
+      const entries = hooksCatalog?.entries ?? [];
+      const hookCount = entries.reduce((total, entry) => total + entry.hooks.length, 0);
+      return (
+        <View style={styles.commandDetailCard}>
+          <View style={styles.commandActionGrid}>
+            <ActionButton title="刷新 Hooks" onPress={() => requestHooksCatalog(activeConversationId)} disabled={status === 'loading'} />
+          </View>
+          {status === 'loading' ? <ActivityIndicator /> : null}
+          {status === 'error' ? <Text style={styles.warningText}>{hooksCatalog?.error || 'hooks/list 请求失败'}</Text> : null}
+          {status === 'ready' && hookCount === 0 ? (
+            <Text style={styles.commandDetailHint}>No hooks returned for this workspace.</Text>
+          ) : null}
+          {entries.map((entry) => (
+            <View key={entry.cwd} style={styles.commandSection}>
+              <Text style={styles.commandSectionTitle} numberOfLines={1}>{entry.cwd}</Text>
+              {entry.warnings.map((warning, index) => (
+                <Text key={`warning-${index}`} style={styles.commandDetailHint}>{warning}</Text>
+              ))}
+              {entry.errors.map((error, index) => (
+                <Text key={`error-${index}`} style={styles.warningText}>{error}</Text>
+              ))}
+              {entry.hooks.map((hook) => (
+                <View key={hook.key} style={styles.commandChoiceItem}>
+                  <View style={styles.commandListText}>
+                    <Text style={styles.commandName} numberOfLines={1}>{hook.eventName || hook.key}</Text>
+                    <Text style={styles.commandDescription} numberOfLines={2}>
+                      {hook.handlerType || 'handler'} · {hook.enabled ? 'enabled' : 'disabled'} · {hook.trustStatus || 'trust unknown'}
+                    </Text>
+                    {hook.command ? <Text style={styles.commandDetailHint} numberOfLines={2}>{hook.command}</Text> : null}
+                    {hook.sourcePath ? <Text style={styles.commandDetailHint} numberOfLines={1}>{hook.sourcePath}</Text> : null}
+                  </View>
+                </View>
+              ))}
+            </View>
+          ))}
+        </View>
+      );
+    }
+    if (command === '/plugins') {
+      const status = pluginsCatalog?.status ?? 'idle';
+      const catalog = pluginsCatalog?.catalog ?? { marketplaces: [], marketplaceLoadErrors: [], featuredPluginIds: [] };
+      const pluginCount = catalog.marketplaces.reduce((total, marketplace) => total + marketplace.plugins.length, 0);
+      return (
+        <View style={styles.commandDetailCard}>
+          <View style={styles.commandActionGrid}>
+            <ActionButton title="刷新 Plugins" onPress={() => requestPluginsCatalog(activeConversationId)} disabled={status === 'loading'} />
+          </View>
+          {status === 'loading' ? <ActivityIndicator /> : null}
+          {status === 'error' ? <Text style={styles.warningText}>{pluginsCatalog?.error || 'plugin/list 请求失败'}</Text> : null}
+          {catalog.marketplaceLoadErrors.map((error, index) => (
+            <Text key={`marketplace-error-${index}`} style={styles.warningText}>{error}</Text>
+          ))}
+          {status === 'ready' && pluginCount === 0 ? (
+            <Text style={styles.commandDetailHint}>No plugins returned.</Text>
+          ) : null}
+          {catalog.marketplaces.map((marketplace) => (
+            <View key={marketplace.name} style={styles.commandSection}>
+              <Text style={styles.commandSectionTitle} numberOfLines={1}>{marketplace.displayName || marketplace.name}</Text>
+              {marketplace.path ? <Text style={styles.commandDetailHint} numberOfLines={1}>{marketplace.path}</Text> : null}
+              {marketplace.plugins.map((plugin) => (
+                <View key={plugin.id} style={styles.commandChoiceItem}>
+                  <View style={styles.commandListText}>
+                    <Text style={styles.commandName} numberOfLines={1}>{plugin.displayName || plugin.name}</Text>
+                    <Text style={styles.commandDescription} numberOfLines={2}>
+                      {plugin.category || 'plugin'} · {plugin.enabled ? 'enabled' : 'disabled'} · {plugin.installed ? 'installed' : plugin.availability || 'available'}
+                    </Text>
+                    {plugin.description ? <Text style={styles.commandDetailHint} numberOfLines={2}>{plugin.description}</Text> : null}
+                  </View>
+                  {catalog.featuredPluginIds.includes(plugin.id) ? (
+                    <StyledIonicons name="star" size={18} className="text-muted" />
+                  ) : null}
+                </View>
+              ))}
+            </View>
+          ))}
+        </View>
+      );
+    }
+    if (command === '/apps') {
       return (
         <View style={styles.commandDetailCard}>
           <View style={styles.commandActionGrid}>
             <ActionButton title="读取列表" onPress={() => runSlash(command)} />
-            {command === '/apps' ? <ActionButton title="强制刷新" onPress={() => runSlash('/apps refresh')} tone="ghost" /> : null}
+            <ActionButton title="强制刷新" onPress={() => runSlash('/apps refresh')} tone="ghost" />
           </View>
         </View>
       );
@@ -8948,13 +9776,46 @@ function SlashCommandActionScreen({
       );
     }
     if (command === '/memories') {
+      const status = memorySettingsState?.status ?? 'idle';
+      const memorySettings = memorySettingsState?.settings ?? {
+        useMemories: false,
+        generateMemories: false,
+      };
+      const saving = status === 'loading' || status === 'saving';
       return (
         <View style={styles.commandDetailCard}>
-          <View style={styles.commandActionGrid}>
-            <ActionButton title="开启" onPress={() => runSlash('/memories on')} />
-            <ActionButton title="关闭" onPress={() => runSlash('/memories off')} tone="ghost" />
-            <ActionButton title="重置" onPress={() => runSlash('/memories reset')} tone="danger" />
+          <View style={styles.commandChoiceItem}>
+            <View style={styles.commandListText}>
+              <Text style={styles.commandName}>Use memories</Text>
+              <Text style={styles.commandDescription}>Read saved memories when starting work.</Text>
+            </View>
+            <Switch
+              value={memorySettings.useMemories}
+              onValueChange={(value) => {
+                void updateMemorySettings(activeConversationId, { useMemories: value });
+              }}
+              disabled={saving}
+            />
           </View>
+          <View style={styles.commandChoiceItem}>
+            <View style={styles.commandListText}>
+              <Text style={styles.commandName}>Generate memories</Text>
+              <Text style={styles.commandDescription}>Allow Codex to update local memories for this thread.</Text>
+            </View>
+            <Switch
+              value={memorySettings.generateMemories}
+              onValueChange={(value) => {
+                void updateMemorySettings(activeConversationId, { generateMemories: value });
+              }}
+              disabled={saving}
+            />
+          </View>
+          <View style={styles.commandActionGrid}>
+            <ActionButton title="刷新" onPress={() => requestMemorySettings(activeConversationId)} tone="ghost" disabled={saving} />
+            <ActionButton title="Reset" onPress={() => resetMemories(activeConversationId)} tone="danger" disabled={saving} />
+          </View>
+          {saving ? <ActivityIndicator /> : null}
+          {status === 'error' ? <Text style={styles.warningText}>{memorySettingsState?.error || 'memory settings 请求失败'}</Text> : null}
         </View>
       );
     }

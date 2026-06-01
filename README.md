@@ -87,7 +87,7 @@ App 会识别并路由这些常见命令：
 
 - `/model`
 - `/fast` and model service-tier commands from the Codex model catalog
-- `/permissions` / `/permission`
+- `/permissions`
 - `/personality`
 - `/plan`
 - `/goal`
@@ -112,7 +112,7 @@ The app recognizes and routes these common commands:
 
 - `/model`
 - `/fast` and model service-tier commands from the Codex model catalog
-- `/permissions` / `/permission`
+- `/permissions`
 - `/personality`
 - `/plan`
 - `/goal`

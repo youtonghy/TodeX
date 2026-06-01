@@ -216,6 +216,98 @@ test('parses permission profile list responses', () => {
   ]);
 });
 
+test('parses hooks list responses', () => {
+  const parsed = todex.parseHooksListResponse({
+    result: {
+      data: [{
+        cwd: '/workspace/app',
+        hooks: [{
+          key: 'pre-tool',
+          eventName: 'PreToolUse',
+          handlerType: 'command',
+          matcher: '.*',
+          command: 'npm test',
+          sourcePath: '/workspace/app/.codex/hooks.json',
+          enabled: true,
+          trustStatus: 'trusted',
+          pluginId: 'local',
+        }],
+        warnings: ['one warning'],
+        errors: [],
+      }],
+    },
+  });
+
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].cwd, '/workspace/app');
+  assert.equal(parsed[0].hooks[0].eventName, 'PreToolUse');
+  assert.equal(parsed[0].hooks[0].command, 'npm test');
+  assert.deepEqual(parsed[0].warnings, ['one warning']);
+});
+
+test('parses plugin list responses', () => {
+  const parsed = todex.parsePluginListResponse({
+    result: {
+      marketplaces: [{
+        name: 'personal',
+        interface: { displayName: 'Personal' },
+        path: '/home/dev/.codex/plugins',
+        plugins: [{
+          id: 'plugin-1',
+          name: 'review-helper',
+          interface: {
+            displayName: 'Review Helper',
+            shortDescription: 'Adds review commands.',
+            category: 'dev',
+          },
+          source: { type: 'local' },
+          installed: true,
+          enabled: true,
+          availability: 'AVAILABLE',
+        }],
+      }],
+      marketplaceLoadErrors: ['bad marketplace'],
+      featuredPluginIds: ['plugin-1'],
+    },
+  });
+
+  assert.equal(parsed.marketplaces.length, 1);
+  assert.equal(parsed.marketplaces[0].displayName, 'Personal');
+  assert.equal(parsed.marketplaces[0].plugins[0].displayName, 'Review Helper');
+  assert.equal(parsed.marketplaces[0].plugins[0].source, 'local');
+  assert.deepEqual(parsed.marketplaceLoadErrors, ['bad marketplace']);
+  assert.deepEqual(parsed.featuredPluginIds, ['plugin-1']);
+});
+
+test('parses memory config responses', () => {
+  const parsed = todex.parseMemorySettingsResponse({
+    result: {
+      config: {
+        memories: {
+          use_memories: true,
+          generate_memories: false,
+        },
+      },
+    },
+  });
+
+  assert.deepEqual(parsed, {
+    useMemories: true,
+    generateMemories: false,
+  });
+});
+
+test('parses workspace approvals reviewer from sync records', () => {
+  const parsed = todex.parseWorkspaceSyncResponse([{
+    id: 'workspace-1',
+    name: 'App',
+    path: '/workspace/app',
+    approvalsReviewer: 'auto_review',
+  }]);
+
+  assert.equal(parsed[0].approvalsReviewer, 'auto_review');
+});
+
 test('extracts thread ids from nested server event payloads', () => {
   assert.equal(
     todex.extractThreadIdFromEvent({
