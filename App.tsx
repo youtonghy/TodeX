@@ -67,8 +67,11 @@ import {
   ConnectionSettings,
   CodexNativeThread,
   CodexModelCatalogItem,
+  CodexMcpServerStatus,
+  CodexPermissionProfileSummary,
   CodexReasoningEffortOption,
   DEFAULT_REASONING_EFFORT_OPTIONS,
+  FAST_SERVICE_TIER,
   FALLBACK_CODEX_MODELS,
   LocalAdapterState,
   PendingRequest,
@@ -93,6 +96,8 @@ import {
   parseCodexNativeThread,
   parseCodexNativeThreadListResponse,
   parseCodexNativeThreadReadResponse,
+  parseMcpServerStatusListResponse,
+  parsePermissionProfileListResponse,
   parseWorkspaceSyncResponse,
   prepareWorkspaceSyncPayload,
   sandboxPolicyForMode,
@@ -201,6 +206,23 @@ type GitDiffState = {
   updatedAt: number;
 };
 
+type McpInventoryState = {
+  status: 'idle' | 'loading' | 'ready' | 'error';
+  detail: 'toolsAndAuthOnly' | 'full';
+  servers: CodexMcpServerStatus[];
+  raw: unknown;
+  error: string;
+  updatedAt: number;
+};
+
+type PermissionProfilesState = {
+  status: 'idle' | 'loading' | 'ready' | 'error';
+  profiles: CodexPermissionProfileSummary[];
+  raw: unknown;
+  error: string;
+  updatedAt: number;
+};
+
 type TerminalLifecycleState = 'idle' | 'starting' | 'running' | 'stopping' | 'exited' | 'error';
 
 type TerminalOutputEntry = {
@@ -251,6 +273,9 @@ type PendingThreadAction = {
     | 'guardian'
     | 'clean'
     | 'loaded'
+    | 'mcp'
+    | 'permission'
+    | 'permissionProfiles'
     | 'inject';
   timeoutId: ReturnType<typeof setTimeout>;
   sourceConversationId?: string;
@@ -851,6 +876,7 @@ type PermissionPreset = {
   description: string;
   approvalPolicy: string;
   sandboxMode: string;
+  profileId: string;
 };
 
 type MentionReference = {
@@ -899,6 +925,28 @@ function defaultReasoningForModel(model: string | null | undefined, catalog: Cod
   return preset?.defaultReasoningEffort ?? null;
 }
 
+function serviceTiersForModel(model: string | null | undefined, catalog: CodexModelCatalogItem[]) {
+  const preset = catalog.find((item) => item.model === model);
+  return preset?.serviceTiers.length ? preset.serviceTiers : [FAST_SERVICE_TIER];
+}
+
+function fastServiceTierForModel(model: string | null | undefined, catalog: CodexModelCatalogItem[]) {
+  return (
+    serviceTiersForModel(model, catalog).find((tier) => tier.name === 'fast' || tier.id === FAST_SERVICE_TIER.id) ??
+    FAST_SERVICE_TIER
+  );
+}
+
+function serviceTierLabel(value: string | null | undefined): string {
+  if (!value || value === 'default') {
+    return 'Default';
+  }
+  if (value === FAST_SERVICE_TIER.id || value === 'fast') {
+    return 'Fast';
+  }
+  return value;
+}
+
 function mergeModelCatalog(remoteModels: CodexModelCatalogItem[], currentModels: string[]): CodexModelCatalogItem[] {
   const byModel = new Map<string, CodexModelCatalogItem>();
   FALLBACK_CODEX_MODELS.forEach((item) => byModel.set(item.model, item));
@@ -917,6 +965,7 @@ function mergeModelCatalog(remoteModels: CodexModelCatalogItem[], currentModels:
           isDefault: false,
           supportedReasoningEfforts: DEFAULT_REASONING_EFFORT_OPTIONS,
           defaultReasoningEffort: 'medium',
+          serviceTiers: [FAST_SERVICE_TIER],
         });
       }
     });
@@ -1027,8 +1076,10 @@ const DEFAULT_TERMINAL_COLS = 80;
 
 const SLASH_COMMANDS: SlashCommand[] = [
   { command: '/model', title: 'Model', description: 'choose what model and reasoning effort to use', category: 'settings' },
+  { command: '/fast', title: 'Fast', description: 'toggle fastest inference with increased plan usage', category: 'core' },
   { command: '/ide', title: 'IDE Context', description: 'include current selection, open files, and other context from your IDE', category: 'context' },
   { command: '/permissions', title: 'Permissions', description: 'choose what Codex is allowed to do', category: 'settings' },
+  { command: '/permission', title: 'Permissions', description: 'alias for /permissions', category: 'settings' },
   { command: '/keymap', title: 'Keymap', description: 'remap TUI shortcuts', category: 'settings' },
   { command: '/vim', title: 'Vim', description: 'toggle Vim mode for the composer', category: 'settings' },
   { command: '/setup-default-sandbox', title: 'Setup Default Sandbox', description: 'set up elevated agent sandbox', category: 'settings' },
@@ -1133,6 +1184,9 @@ const DIRECT_SLASH_COMMANDS = new Set([
 
 function canonicalSlashCommand(command: string): string {
   const normalized = command.trim().toLowerCase();
+  if (normalized === '/permission') {
+    return '/permissions';
+  }
   if (normalized === '/pet') {
     return '/pets';
   }
@@ -1158,6 +1212,7 @@ const PERMISSION_PRESETS: PermissionPreset[] = [
     description: 'Codex can read files. Approval is required to edit files or access the internet.',
     approvalPolicy: 'on-request',
     sandboxMode: 'read-only',
+    profileId: ':read-only',
   },
   {
     id: 'default',
@@ -1165,6 +1220,7 @@ const PERMISSION_PRESETS: PermissionPreset[] = [
     description: 'Codex can read and edit files in the current workspace. Approval is required for network or outside edits.',
     approvalPolicy: 'on-request',
     sandboxMode: 'workspace-write',
+    profileId: ':workspace',
   },
   {
     id: 'full-access',
@@ -1172,8 +1228,21 @@ const PERMISSION_PRESETS: PermissionPreset[] = [
     description: 'Codex can edit files outside this workspace and access the internet without asking.',
     approvalPolicy: 'never',
     sandboxMode: 'danger-full-access',
+    profileId: ':danger-full-access',
   },
 ];
+
+function permissionPresetForProfile(profileId: string | null | undefined): PermissionPreset | null {
+  if (!profileId) {
+    return null;
+  }
+  return PERMISSION_PRESETS.find((preset) => preset.profileId === profileId || preset.id === profileId) ?? null;
+}
+
+function permissionProfileLabel(profileId: string | null | undefined): string {
+  const preset = permissionPresetForProfile(profileId);
+  return preset?.title ?? profileId ?? 'Legacy approval/sandbox';
+}
 
 const defaultSettings: ConnectionSettings = {
   serverUrl: 'http://127.0.0.1:7345',
@@ -1459,6 +1528,21 @@ function resultThreadFromValue(value: unknown): CodexNativeThread | null {
 }
 
 function formatThreadActionResult(action: PendingThreadAction, responseValue: unknown): string {
+  if (action.action === 'mcp') {
+    const servers = parseMcpServerStatusListResponse(responseValue);
+    if (!servers.length) {
+      return 'No MCP servers returned.';
+    }
+    return servers
+      .map((server) => `${server.name}: ${server.tools.length} tools, ${server.resources.length} resources, auth ${server.authStatus}`)
+      .join('\n');
+  }
+  if (action.action === 'permissionProfiles') {
+    const profiles = parsePermissionProfileListResponse(responseValue);
+    return profiles.length
+      ? profiles.map((profile) => `${profile.id}: ${profile.description}`).join('\n')
+      : 'No permission profiles returned.';
+  }
   const thread = resultThreadFromValue(responseValue);
   if (thread && (action.action === 'detail' || action.action === 'metadata' || action.action === 'rollback' || action.action === 'unarchive')) {
     return formatThreadSummary(thread);
@@ -2255,6 +2339,8 @@ export default function App() {
   const [threadListStatusByWorkspace, setThreadListStatusByWorkspace] = useState<Record<string, 'idle' | 'loading' | 'ready' | 'error'>>({});
   const [threadListErrorByWorkspace, setThreadListErrorByWorkspace] = useState<Record<string, string>>({});
   const [gitDiffByConversation, setGitDiffByConversation] = useState<Record<string, GitDiffState>>({});
+  const [mcpInventoryByConversation, setMcpInventoryByConversation] = useState<Record<string, McpInventoryState>>({});
+  const [permissionProfilesByConversation, setPermissionProfilesByConversation] = useState<Record<string, PermissionProfilesState>>({});
   const [terminalById, setTerminalById] = useState<Record<string, TerminalClientState>>({});
   const queuedChatDraftsRef = useRef<Record<string, QueuedChatSubmission[]>>({});
   const queuedChatDispatchingRef = useRef(new Set<string>());
@@ -3069,6 +3155,40 @@ export default function App() {
       if (pending.action === 'fork' && pending.sourceConversationId && pending.conversationId !== pending.sourceConversationId) {
         setConversations((current) => current.filter((conversation) => conversation.id !== pending.conversationId));
       }
+      if (pending.action === 'mcp') {
+        setMcpInventoryByConversation((current) => ({
+          ...current,
+          [pending.conversationId]: {
+            ...(current[pending.conversationId] ?? {
+              status: 'idle',
+              detail: 'toolsAndAuthOnly',
+              servers: [],
+              raw: null,
+              error: '',
+              updatedAt: 0,
+            }),
+            status: 'error',
+            error: errorMessage,
+            updatedAt: Date.now(),
+          },
+        }));
+      } else if (pending.action === 'permissionProfiles') {
+        setPermissionProfilesByConversation((current) => ({
+          ...current,
+          [pending.conversationId]: {
+            ...(current[pending.conversationId] ?? {
+              status: 'idle',
+              profiles: [],
+              raw: null,
+              error: '',
+              updatedAt: 0,
+            }),
+            status: 'error',
+            error: errorMessage,
+            updatedAt: Date.now(),
+          },
+        }));
+      }
       setLastError(errorMessage);
       return;
     }
@@ -3442,6 +3562,32 @@ export default function App() {
       if (pendingThreadAction) {
         if (event.type === 'codex.control.response') {
           const responseValue = data.result ?? data;
+          if (pendingThreadAction.action === 'mcp') {
+            const servers = parseMcpServerStatusListResponse(responseValue);
+            setMcpInventoryByConversation((current) => ({
+              ...current,
+              [pendingThreadAction.conversationId]: {
+                status: 'ready',
+                detail: pendingThreadAction.resultDetail === 'full' ? 'full' : 'toolsAndAuthOnly',
+                servers,
+                raw: responseValue,
+                error: '',
+                updatedAt: Date.now(),
+              },
+            }));
+          } else if (pendingThreadAction.action === 'permissionProfiles') {
+            const profiles = parsePermissionProfileListResponse(responseValue);
+            setPermissionProfilesByConversation((current) => ({
+              ...current,
+              [pendingThreadAction.conversationId]: {
+                status: 'ready',
+                profiles,
+                raw: responseValue,
+                error: '',
+                updatedAt: Date.now(),
+              },
+            }));
+          }
           const nativeThread = parseCodexNativeThread(responseValue);
           const nativeThreadRead = pendingThreadAction.restoreHistory
             ? parseCodexNativeThreadReadResponse(responseValue)
@@ -4226,6 +4372,7 @@ export default function App() {
         approvalPolicy: settings.approvalPolicy,
         sandboxMode: settings.sandboxMode,
         serviceTier: null,
+        permissionProfile: null,
         localAdapterState: 'idle',
         createdAt: Date.now(),
         updatedAt: Date.now(),
@@ -4519,7 +4666,8 @@ export default function App() {
             model: workspace.model || settings.defaultModel || undefined,
             reasoningEffort: workspace.reasoningEffort || settings.defaultReasoningEffort || undefined,
             approvalPolicy: workspace.approvalPolicy || settings.approvalPolicy || undefined,
-            sandbox: workspace.sandboxMode || settings.sandboxMode || undefined,
+            sandbox: workspace.permissionProfile ? undefined : workspace.sandboxMode || settings.sandboxMode || undefined,
+            permissions: workspace.permissionProfile || undefined,
             serviceTier: workspace.serviceTier || undefined,
           },
         }, requestId);
@@ -4700,6 +4848,258 @@ export default function App() {
     }
     return true;
   }, [finishPendingThreadAction, getConversationContext, sendLocalMethodRequest, startLocalAdapter]);
+
+  const requestMcpInventory = useCallback(async (
+    conversationId = activeConversationRef.current,
+    detail: McpInventoryState['detail'] = 'toolsAndAuthOnly',
+  ) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      return false;
+    }
+    const { workspace, conversation } = context;
+    setMcpInventoryByConversation((current) => ({
+      ...current,
+      [conversation.id]: {
+        ...(current[conversation.id] ?? {
+          status: 'idle',
+          detail,
+          servers: [],
+          raw: null,
+          error: '',
+          updatedAt: 0,
+        }),
+        status: 'loading',
+        detail,
+        error: '',
+      },
+    }));
+    try {
+      await startLocalAdapter(workspace, conversation);
+      const threadId = await ensureThreadId(workspace, conversation, !normalizeThreadId(conversation.threadId));
+      const requestId = createRequestId('mcp-status');
+      const timeoutId = setTimeout(() => {
+        const pending = pendingThreadActionsRef.current.get(requestId);
+        if (pending) {
+          finishPendingThreadAction(pending, 'mcpServerStatus/list 请求超时');
+        }
+      }, 15000);
+      pendingThreadActionsRef.current.set(requestId, {
+        workspaceId: workspace.id,
+        conversationId: conversation.id,
+        requestId,
+        action: 'mcp',
+        timeoutId,
+        sourceConversationId: conversation.id,
+        showResult: false,
+        resultDetail: detail,
+      });
+      const sent = sendLocalMethodRequest(workspace, conversation, 'mcpServerStatus/list', {
+        cursor: null,
+        limit: null,
+        detail,
+        threadId,
+      }, requestId);
+      if (!sent) {
+        const pending = pendingThreadActionsRef.current.get(requestId);
+        if (pending) {
+          finishPendingThreadAction(pending, '请先在设置里连接后端。');
+        }
+        return false;
+      }
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? localTurnErrorMessage(error.message) : 'MCP 状态读取失败';
+      setMcpInventoryByConversation((current) => ({
+        ...current,
+        [conversation.id]: {
+          ...(current[conversation.id] ?? {
+            status: 'idle',
+            detail,
+            servers: [],
+            raw: null,
+            error: '',
+            updatedAt: 0,
+          }),
+          status: 'error',
+          detail,
+          error: message,
+          updatedAt: Date.now(),
+        },
+      }));
+      setLastError(message);
+      return false;
+    }
+  }, [ensureThreadId, finishPendingThreadAction, getConversationContext, sendLocalMethodRequest, startLocalAdapter]);
+
+  const requestPermissionProfiles = useCallback(async (conversationId = activeConversationRef.current) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      return false;
+    }
+    const { workspace, conversation } = context;
+    setPermissionProfilesByConversation((current) => ({
+      ...current,
+      [conversation.id]: {
+        ...(current[conversation.id] ?? {
+          status: 'idle',
+          profiles: [],
+          raw: null,
+          error: '',
+          updatedAt: 0,
+        }),
+        status: 'loading',
+        error: '',
+      },
+    }));
+    try {
+      await startLocalAdapter(workspace, conversation);
+    } catch (error) {
+      const message = error instanceof Error ? localTurnErrorMessage(error.message) : '本地会话未启动';
+      setPermissionProfilesByConversation((current) => ({
+        ...current,
+        [conversation.id]: {
+          ...(current[conversation.id] ?? {
+            status: 'idle',
+            profiles: [],
+            raw: null,
+            error: '',
+            updatedAt: 0,
+          }),
+          status: 'error',
+          error: message,
+          updatedAt: Date.now(),
+        },
+      }));
+      setLastError(message);
+      return false;
+    }
+    const requestId = createRequestId('permission-profiles');
+    const timeoutId = setTimeout(() => {
+      const pending = pendingThreadActionsRef.current.get(requestId);
+      if (pending) {
+        finishPendingThreadAction(pending, 'permissionProfile/list 请求超时');
+      }
+    }, 15000);
+    pendingThreadActionsRef.current.set(requestId, {
+      workspaceId: workspace.id,
+      conversationId: conversation.id,
+      requestId,
+      action: 'permissionProfiles',
+      timeoutId,
+      sourceConversationId: conversation.id,
+      showResult: false,
+    });
+    const sent = sendLocalMethodRequest(workspace, conversation, 'permissionProfile/list', {
+      cursor: null,
+      limit: null,
+      cwd: workspace.path,
+    }, requestId);
+    if (!sent) {
+      const pending = pendingThreadActionsRef.current.get(requestId);
+      if (pending) {
+        finishPendingThreadAction(pending, '请先在设置里连接后端。');
+      }
+      return false;
+    }
+    return true;
+  }, [finishPendingThreadAction, getConversationContext, sendLocalMethodRequest, startLocalAdapter]);
+
+  const applyPermissionProfile = useCallback(async (
+    conversationId: string,
+    profileId: string,
+    description = '',
+  ) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      return false;
+    }
+    const { workspace, conversation } = context;
+    const preset = permissionPresetForProfile(profileId);
+    updateWorkspace(workspace.id, {
+      approvalPolicy: preset?.approvalPolicy ?? workspace.approvalPolicy,
+      sandboxMode: preset?.sandboxMode ?? workspace.sandboxMode,
+      permissionProfile: profileId,
+    });
+    appendTimeline(makeSystemEntry(
+      `Permissions updated to ${permissionProfileLabel(profileId)}`,
+      description || preset?.description || profileId,
+      workspace.id,
+      conversation.id,
+    ));
+
+    const threadId = normalizeThreadId(conversation.threadId);
+    if (!threadId) {
+      return true;
+    }
+    try {
+      await startLocalAdapter(workspace, conversation);
+    } catch (error) {
+      setLastError(error instanceof Error ? localTurnErrorMessage(error.message) : '本地会话未启动');
+      return false;
+    }
+    const requestId = createRequestId('permission-set');
+    const timeoutId = setTimeout(() => {
+      const pending = pendingThreadActionsRef.current.get(requestId);
+      if (pending) {
+        finishPendingThreadAction(pending, 'thread/settings/update 请求超时');
+      }
+    }, 10000);
+    pendingThreadActionsRef.current.set(requestId, {
+      workspaceId: workspace.id,
+      conversationId: conversation.id,
+      requestId,
+      action: 'permission',
+      timeoutId,
+      sourceConversationId: conversation.id,
+      showResult: false,
+    });
+    const sent = sendLocalMethodRequest(workspace, conversation, 'thread/settings/update', {
+      threadId,
+      permissions: profileId,
+      approvalPolicy: preset?.approvalPolicy ?? workspace.approvalPolicy,
+    }, requestId);
+    if (!sent) {
+      const pending = pendingThreadActionsRef.current.get(requestId);
+      if (pending) {
+        finishPendingThreadAction(pending, '请先在设置里连接后端。');
+      }
+      return false;
+    }
+    return true;
+  }, [appendTimeline, finishPendingThreadAction, getConversationContext, sendLocalMethodRequest, startLocalAdapter, updateWorkspace]);
+
+  const toggleFastServiceTier = useCallback((conversationId: string) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      return false;
+    }
+    const { workspace, conversation } = context;
+    const model = workspace.model || settings.defaultModel;
+    const fastTier = fastServiceTierForModel(model, modelCatalog);
+    const currentTier = workspace.serviceTier || null;
+    const fastEnabled = currentTier === fastTier.id || currentTier === 'fast';
+    const nextTier = fastEnabled ? 'default' : fastTier.id;
+    updateWorkspace(workspace.id, { serviceTier: nextTier });
+    appendTimeline(makeSystemEntry(
+      nextTier === fastTier.id ? 'Fast mode enabled' : 'Fast mode disabled',
+      `${modelDisplayLabel(model, modelCatalog)} · ${serviceTierLabel(nextTier)}`,
+      workspace.id,
+      conversation.id,
+    ));
+    const threadId = normalizeThreadId(conversation.threadId);
+    if (threadId) {
+      sendLocalMethodRequest(workspace, conversation, 'thread/settings/update', {
+        threadId,
+        serviceTier: nextTier,
+      }, createRequestId('service-tier'));
+    }
+    return true;
+  }, [appendTimeline, getConversationContext, modelCatalog, sendLocalMethodRequest, settings.defaultModel, updateWorkspace]);
 
   const requestGitDiff = useCallback(async (conversationId = activeConversationRef.current) => {
     const context = getConversationContext(conversationId);
@@ -4961,7 +5361,8 @@ export default function App() {
         cwd: workspace.path,
         model: workspace.model || settings.defaultModel || undefined,
         approvalPolicy: workspace.approvalPolicy || settings.approvalPolicy || undefined,
-        sandbox: workspace.sandboxMode || settings.sandboxMode || undefined,
+        sandbox: workspace.permissionProfile ? undefined : workspace.sandboxMode || settings.sandboxMode || undefined,
+        permissions: workspace.permissionProfile || undefined,
       }),
       { selectResult: true, resultConversationId: nextConversation.id },
     );
@@ -5063,7 +5464,8 @@ export default function App() {
         threadId,
         input: codexInputFromComposer(text, attachments, skills),
         approvalPolicy: workspace.approvalPolicy || settings.approvalPolicy || undefined,
-        sandboxPolicy: sandboxPolicyForMode(workspace.sandboxMode || settings.sandboxMode),
+        sandboxPolicy: workspace.permissionProfile ? undefined : sandboxPolicyForMode(workspace.sandboxMode || settings.sandboxMode),
+        permissions: workspace.permissionProfile || undefined,
         serviceTier: workspace.serviceTier || undefined,
         collaborationMode: {
           mode: 'default',
@@ -5158,22 +5560,13 @@ export default function App() {
 
   const applyPermissionPreset = useCallback(
     (preset: PermissionPreset) => {
-      if (!activeWorkspace || !activeConversation) {
+      if (!activeConversation) {
         Alert.alert('未选择工作区', '请先选择一个工作区。');
         return;
       }
-      updateWorkspace(activeWorkspace.id, {
-        approvalPolicy: preset.approvalPolicy,
-        sandboxMode: preset.sandboxMode,
-      });
-      appendTimeline(makeSystemEntry(
-        `Permissions updated to ${preset.title}`,
-        preset.description,
-        activeWorkspace.id,
-        activeConversation.id,
-      ));
+      void applyPermissionProfile(activeConversation.id, preset.profileId, preset.description);
     },
-    [activeConversation, activeWorkspace, appendTimeline, updateWorkspace],
+    [activeConversation, applyPermissionProfile],
   );
 
   const openPermissionsMenu = useCallback(() => {
@@ -5362,6 +5755,14 @@ export default function App() {
     });
   }, [turnIds]);
 
+  const openSlashCommandActionPage = useCallback((workspace: WorkspaceRecord, conversation: ConversationRecord, command: string) => {
+    navigationRef.current?.navigate('SlashCommandAction', {
+      workspaceId: workspace.id,
+      conversationId: conversation.id,
+      command: canonicalSlashCommand(command),
+    });
+  }, []);
+
   const sendSlashCommand = useCallback(
     (input: string, conversationId = activeConversationRef.current) => {
       const trimmed = input.trim();
@@ -5403,18 +5804,19 @@ export default function App() {
         })();
       };
 
-      if (lower === 'permissions') {
+      if (lower === 'permissions' || lower === 'permission') {
         const presetName = rest[0]?.toLowerCase() ?? '';
-        const preset = PERMISSION_PRESETS.find((candidate) => candidate.id === presetName || candidate.title.toLowerCase() === presetName);
+        const preset = PERMISSION_PRESETS.find((candidate) => candidate.id === presetName || candidate.profileId.toLowerCase() === presetName || candidate.title.toLowerCase() === presetName);
         if (preset) {
-          updateWorkspace(workspace.id, {
-            approvalPolicy: preset.approvalPolicy,
-            sandboxMode: preset.sandboxMode,
-          });
-          addCommandNotice(`Permissions updated to ${preset.title}`, preset.description);
+          void applyPermissionProfile(conversation.id, preset.profileId, preset.description);
           return;
         }
-        openPermissionsMenu();
+        openSlashCommandActionPage(workspace, conversation, '/permissions');
+        return;
+      }
+
+      if (lower === 'fast') {
+        toggleFastServiceTier(conversation.id);
         return;
       }
 
@@ -5464,8 +5866,22 @@ export default function App() {
       }
 
       if (lower === 'mcp') {
-        sendWorkspaceCommand(workspace, 'codex.mcp.server.listStatus', {}, conversation);
-        addCommandNotice('MCP status requested', rest[0] === 'verbose' ? '已请求 MCP server 状态；详细事件会在时间线中返回。' : '已请求 MCP server 状态。');
+        const subcommand = rest[0]?.toLowerCase() ?? '';
+        if (!subcommand) {
+          openSlashCommandActionPage(workspace, conversation, '/mcp');
+          return;
+        }
+        if (subcommand === 'verbose') {
+          void requestMcpInventory(conversation.id, 'full');
+          addCommandNotice('MCP inventory requested', '已请求 MCP server 详细状态。');
+          return;
+        }
+        if (/^(status|list|tools|refresh)$/i.test(subcommand)) {
+          void requestMcpInventory(conversation.id, 'toolsAndAuthOnly');
+          addCommandNotice('MCP inventory requested', '已请求 MCP server 状态。');
+          return;
+        }
+        Alert.alert('MCP', 'Usage: /mcp [verbose]');
         return;
       }
 
@@ -5649,7 +6065,8 @@ export default function App() {
             cwd: workspace.path,
             model: workspace.model || settings.defaultModel || undefined,
             approvalPolicy: workspace.approvalPolicy || settings.approvalPolicy || undefined,
-            sandbox: workspace.sandboxMode || settings.sandboxMode || undefined,
+            sandbox: workspace.permissionProfile ? undefined : workspace.sandboxMode || settings.sandboxMode || undefined,
+            permissions: workspace.permissionProfile || undefined,
             ephemeral: lower === 'side',
           }),
           { selectResult: true },
@@ -5808,6 +6225,7 @@ export default function App() {
       addCommandNotice(`/${lower} recognized`, '该命令不在当前内置命令清单中，已阻止作为普通 prompt 发送。');
     },
     [
+      applyPermissionProfile,
       applyModelCommand,
       appendTimeline,
       createConversation,
@@ -5815,9 +6233,10 @@ export default function App() {
       getConversationContext,
       openModelPicker,
       openExperimentalFeatures,
-      openPermissionsMenu,
+      openSlashCommandActionPage,
       openThreadCommandPrompt,
       pendingRequests,
+      requestMcpInventory,
       requestSkillList,
       selectConversation,
       selectedRequest,
@@ -5834,6 +6253,7 @@ export default function App() {
       setConversationChatDraft,
       setConversationComposerSelection,
       setLastError,
+      toggleFastServiceTier,
       turnIds,
       updateConversation,
       updateWorkspace,
@@ -6274,8 +6694,14 @@ export default function App() {
                     modelCatalog={modelCatalog}
                     modelCatalogStatus={modelCatalogStatus}
                     modelCatalogError={modelCatalogError}
+                    mcpInventory={mcpInventoryByConversation[props.route.params.conversationId] ?? null}
+                    permissionProfilesState={permissionProfilesByConversation[props.route.params.conversationId] ?? null}
                     refreshModelCatalog={requestModelCatalog}
                     applyWorkspaceModelSelection={applyWorkspaceModelSelection}
+                    requestMcpInventory={requestMcpInventory}
+                    requestPermissionProfiles={requestPermissionProfiles}
+                    applyPermissionProfile={applyPermissionProfile}
+                    toggleFastServiceTier={toggleFastServiceTier}
                     sendSlashCommand={sendSlashCommand}
                     openGitDiff={openGitDiff}
                   />
@@ -7975,8 +8401,14 @@ function SlashCommandActionScreen({
   modelCatalog,
   modelCatalogStatus,
   modelCatalogError,
+  mcpInventory,
+  permissionProfilesState,
   refreshModelCatalog,
   applyWorkspaceModelSelection,
+  requestMcpInventory,
+  requestPermissionProfiles,
+  applyPermissionProfile,
+  toggleFastServiceTier,
   sendSlashCommand,
   openGitDiff,
 }: NativeStackScreenProps<RootStackParamList, 'SlashCommandAction'> & {
@@ -7986,8 +8418,14 @@ function SlashCommandActionScreen({
   modelCatalog: CodexModelCatalogItem[];
   modelCatalogStatus: 'idle' | 'loading' | 'ready' | 'error';
   modelCatalogError: string;
+  mcpInventory: McpInventoryState | null;
+  permissionProfilesState: PermissionProfilesState | null;
   refreshModelCatalog: () => boolean;
   applyWorkspaceModelSelection: (conversationId: string, model: string, reasoningEffort: string | null) => void;
+  requestMcpInventory: (conversationId?: string, detail?: McpInventoryState['detail']) => Promise<boolean>;
+  requestPermissionProfiles: (conversationId?: string) => Promise<boolean>;
+  applyPermissionProfile: (conversationId: string, profileId: string, description?: string) => Promise<boolean>;
+  toggleFastServiceTier: (conversationId: string) => boolean;
   sendSlashCommand: (input: string, conversationId?: string) => void;
   openGitDiff: (conversationId: string) => void;
 }) {
@@ -8007,6 +8445,15 @@ function SlashCommandActionScreen({
     setTextValue('');
     setReasoningEffort(normalizeReasoningEffort(workspace?.reasoningEffort ?? settings.defaultReasoningEffort));
   }, [command, settings.defaultReasoningEffort, workspace?.reasoningEffort]);
+
+  useEffect(() => {
+    if (command === '/permissions' && conversation && !permissionProfilesState) {
+      void requestPermissionProfiles(conversation.id);
+    }
+    if (command === '/mcp' && conversation && !mcpInventory) {
+      void requestMcpInventory(conversation.id, 'toolsAndAuthOnly');
+    }
+  }, [command, conversation, mcpInventory, permissionProfilesState, requestMcpInventory, requestPermissionProfiles]);
 
   const runSlash = useCallback((input: string) => {
     if (!conversation) {
@@ -8039,9 +8486,11 @@ function SlashCommandActionScreen({
         <Text style={styles.commandDetailLabel}>当前模型</Text>
         <Text style={styles.commandDetailValue}>{modelDisplayLabel(currentModel, safeCatalog)}</Text>
         <Text style={styles.commandDetailHint}>Reasoning: {reasoningEffortLabel(workspace?.reasoningEffort ?? settings.defaultReasoningEffort)}</Text>
+        <Text style={styles.commandDetailHint}>Service tier: {serviceTierLabel(workspace?.serviceTier)}</Text>
         <View style={styles.commandActionGrid}>
           <ActionButton title="刷新模型" onPress={refreshModelCatalog} tone="ghost" disabled={modelCatalogStatus === 'loading'} />
           <ActionButton title="手动应用" onPress={() => commandWithText('/model')} tone="ghost" />
+          <ActionButton title={serviceTierLabel(workspace?.serviceTier) === 'Fast' ? '关闭 Fast' : '开启 Fast'} onPress={() => toggleFastServiceTier(activeConversationId)} tone="ghost" />
         </View>
         {modelCatalogError ? <Text style={styles.warningText}>{modelCatalogError}</Text> : null}
         <TextInput
@@ -8100,16 +8549,33 @@ function SlashCommandActionScreen({
   const renderPermissionsControls = () => (
     <View style={styles.commandDetailCard}>
       <Text style={styles.commandDetailLabel}>当前权限</Text>
-      <Text style={styles.commandDetailValue}>{workspace?.approvalPolicy || settings.approvalPolicy} · {workspace?.sandboxMode || settings.sandboxMode}</Text>
+      <Text style={styles.commandDetailValue}>{permissionProfileLabel(workspace?.permissionProfile)}</Text>
+      <Text style={styles.commandDetailHint}>{workspace?.approvalPolicy || settings.approvalPolicy} · {workspace?.sandboxMode || settings.sandboxMode}</Text>
+      <View style={styles.commandActionGrid}>
+        <ActionButton title="刷新 Profiles" onPress={() => requestPermissionProfiles(activeConversationId)} tone="ghost" disabled={permissionProfilesState?.status === 'loading'} />
+      </View>
       {PERMISSION_PRESETS.map((preset) => (
-        <Pressable key={preset.id} style={styles.commandChoiceItem} onPress={() => runSlash(`/permissions ${preset.id}`)}>
+        <Pressable key={preset.id} style={styles.commandChoiceItem} onPress={() => applyPermissionProfile(activeConversationId, preset.profileId, preset.description)}>
           <View style={styles.commandListText}>
             <Text style={styles.commandName}>{preset.title}</Text>
             <Text style={styles.commandDescription}>{preset.description}</Text>
           </View>
-          <StyledIonicons name="checkmark-circle-outline" size={18} className="text-muted" />
+          <StyledIonicons name={workspace?.permissionProfile === preset.profileId ? 'checkmark-circle' : 'checkmark-circle-outline'} size={18} className="text-muted" />
         </Pressable>
       ))}
+      {permissionProfilesState?.profiles
+        .filter((profile) => !permissionPresetForProfile(profile.id))
+        .map((profile) => (
+          <Pressable key={profile.id} style={styles.commandChoiceItem} onPress={() => applyPermissionProfile(activeConversationId, profile.id, profile.description)}>
+            <View style={styles.commandListText}>
+              <Text style={styles.commandName}>{profile.id}</Text>
+              <Text style={styles.commandDescription}>{profile.description}</Text>
+            </View>
+            <StyledIonicons name={workspace?.permissionProfile === profile.id ? 'checkmark-circle' : 'checkmark-circle-outline'} size={18} className="text-muted" />
+          </Pressable>
+        ))}
+      {permissionProfilesState?.status === 'loading' ? <ActivityIndicator /> : null}
+      {permissionProfilesState?.status === 'error' ? <Text style={styles.warningText}>{permissionProfilesState.error}</Text> : null}
     </View>
   );
 
@@ -8176,9 +8642,27 @@ function SlashCommandActionScreen({
       return (
         <View style={styles.commandDetailCard}>
           <View style={styles.commandActionGrid}>
-            <ActionButton title="MCP 状态" onPress={() => runSlash('/mcp')} />
-            <ActionButton title="Verbose" onPress={() => runSlash('/mcp verbose')} tone="ghost" />
+            <ActionButton title="刷新状态" onPress={() => requestMcpInventory(activeConversationId, 'toolsAndAuthOnly')} disabled={mcpInventory?.status === 'loading'} />
+            <ActionButton title="Verbose" onPress={() => requestMcpInventory(activeConversationId, 'full')} tone="ghost" disabled={mcpInventory?.status === 'loading'} />
           </View>
+          {mcpInventory?.status === 'loading' ? <ActivityIndicator /> : null}
+          {mcpInventory?.status === 'error' ? <Text style={styles.warningText}>{mcpInventory.error}</Text> : null}
+          {mcpInventory?.status === 'ready' && mcpInventory.servers.length === 0 ? (
+            <Text style={styles.commandDetailHint}>No MCP servers returned.</Text>
+          ) : null}
+          {mcpInventory?.servers.map((server) => (
+            <View key={server.name} style={styles.commandChoiceItem}>
+              <View style={styles.commandListText}>
+                <Text style={styles.commandName}>{server.title || server.name}</Text>
+                <Text style={styles.commandDescription}>
+                  {server.name} · auth {server.authStatus} · {server.tools.length} tools · {server.resources.length} resources
+                </Text>
+                {server.tools.length ? (
+                  <Text style={styles.commandDetailHint} numberOfLines={2}>{server.tools.slice(0, 8).join(', ')}</Text>
+                ) : null}
+              </View>
+            </View>
+          ))}
         </View>
       );
     }
@@ -8264,6 +8748,18 @@ function SlashCommandActionScreen({
   };
 
   const renderSettingsControls = () => {
+    if (command === '/fast') {
+      const fastTier = fastServiceTierForModel(currentModel, safeCatalog);
+      const fastEnabled = workspace?.serviceTier === fastTier.id || workspace?.serviceTier === 'fast';
+      return (
+        <View style={styles.commandDetailCard}>
+          <Text style={styles.commandDetailLabel}>当前服务层级</Text>
+          <Text style={styles.commandDetailValue}>{serviceTierLabel(workspace?.serviceTier)}</Text>
+          <Text style={styles.commandDetailHint}>{fastTier.description}</Text>
+          <ActionButton title={fastEnabled ? '关闭 Fast' : '开启 Fast'} onPress={() => toggleFastServiceTier(activeConversationId)} />
+        </View>
+      );
+    }
     if (command === '/memories') {
       return (
         <View style={styles.commandDetailCard}>

@@ -86,6 +86,7 @@ npm run web
 App 会识别并路由这些常见命令：
 
 - `/model`
+- `/fast`
 - `/permissions` / `/permission`
 - `/plan`
 - `/goal`
@@ -107,6 +108,7 @@ App 会识别并路由这些常见命令：
 The app recognizes and routes these common commands:
 
 - `/model`
+- `/fast`
 - `/permissions` / `/permission`
 - `/plan`
 - `/goal`

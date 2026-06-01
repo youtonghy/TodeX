@@ -22,10 +22,34 @@ export type CodexModelCatalogItem = {
   isDefault: boolean;
   supportedReasoningEfforts: CodexReasoningEffortOption[];
   defaultReasoningEffort: string | null;
+  serviceTiers: CodexServiceTierOption[];
 };
 
 export type CodexReasoningEffortOption = {
   reasoningEffort: string;
+  description: string;
+};
+
+export type CodexServiceTierOption = {
+  id: string;
+  name: string;
+  description: string;
+};
+
+export type CodexMcpServerStatus = {
+  name: string;
+  title: string;
+  version: string;
+  description: string;
+  authStatus: string;
+  tools: string[];
+  resources: string[];
+  resourceTemplates: string[];
+  raw: Record<string, unknown>;
+};
+
+export type CodexPermissionProfileSummary = {
+  id: string;
   description: string;
 };
 
@@ -43,6 +67,7 @@ export type WorkspaceRecord = {
   approvalPolicy: string;
   sandboxMode: string;
   serviceTier?: string | null;
+  permissionProfile?: string | null;
   localAdapterState?: LocalAdapterState;
   createdAt: number;
   updatedAt: number;
@@ -188,6 +213,12 @@ export const DEFAULT_REASONING_EFFORT_OPTIONS: CodexReasoningEffortOption[] = [
   description: REASONING_EFFORT_DESCRIPTIONS[reasoningEffort] ?? reasoningEffort,
 }));
 
+export const FAST_SERVICE_TIER: CodexServiceTierOption = {
+  id: 'priority',
+  name: 'fast',
+  description: 'Fastest inference with increased plan usage.',
+};
+
 export const FALLBACK_CODEX_MODELS: CodexModelCatalogItem[] = [
   {
     id: 'gpt-5.5',
@@ -198,6 +229,7 @@ export const FALLBACK_CODEX_MODELS: CodexModelCatalogItem[] = [
     isDefault: true,
     supportedReasoningEfforts: DEFAULT_REASONING_EFFORT_OPTIONS,
     defaultReasoningEffort: 'medium',
+    serviceTiers: [FAST_SERVICE_TIER],
   },
   {
     id: 'gpt-5.4',
@@ -208,6 +240,7 @@ export const FALLBACK_CODEX_MODELS: CodexModelCatalogItem[] = [
     isDefault: false,
     supportedReasoningEfforts: DEFAULT_REASONING_EFFORT_OPTIONS,
     defaultReasoningEffort: 'medium',
+    serviceTiers: [FAST_SERVICE_TIER],
   },
   {
     id: 'gpt-5.4-mini',
@@ -218,6 +251,7 @@ export const FALLBACK_CODEX_MODELS: CodexModelCatalogItem[] = [
     isDefault: false,
     supportedReasoningEfforts: DEFAULT_REASONING_EFFORT_OPTIONS.filter((option) => option.reasoningEffort !== 'xhigh'),
     defaultReasoningEffort: 'medium',
+    serviceTiers: [FAST_SERVICE_TIER],
   },
   {
     id: 'gpt-5.3-codex',
@@ -228,6 +262,7 @@ export const FALLBACK_CODEX_MODELS: CodexModelCatalogItem[] = [
     isDefault: false,
     supportedReasoningEfforts: DEFAULT_REASONING_EFFORT_OPTIONS,
     defaultReasoningEffort: 'medium',
+    serviceTiers: [FAST_SERVICE_TIER],
   },
 ];
 
@@ -315,6 +350,51 @@ function parseReasoningEffortOptions(value: unknown, defaultEffort: string | nul
   });
 }
 
+function parseServiceTierOptions(value: unknown): CodexServiceTierOption[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const options = value
+    .map((item): CodexServiceTierOption | null => {
+      if (typeof item === 'string') {
+        const name = item.trim().toLowerCase();
+        if (!name) {
+          return null;
+        }
+        return {
+          id: name === 'fast' ? FAST_SERVICE_TIER.id : name,
+          name,
+          description: name === 'fast' ? FAST_SERVICE_TIER.description : name,
+        };
+      }
+      if (!isObject(item)) {
+        return null;
+      }
+      const id = stringField(item, ['id', 'value', 'requestValue', 'request_value']);
+      const name = (stringField(item, ['name', 'label', 'displayName', 'display_name']) || id).toLowerCase();
+      if (!id || !name) {
+        return null;
+      }
+      return {
+        id,
+        name,
+        description: stringField(item, ['description']) || (name === 'fast' ? FAST_SERVICE_TIER.description : name),
+      };
+    })
+    .filter((item): item is CodexServiceTierOption => Boolean(item));
+
+  const seen = new Set<string>();
+  return options.filter((option) => {
+    const key = `${option.id}:${option.name}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
 function modelCatalogArray(value: unknown): unknown[] {
   if (Array.isArray(value)) {
     return value;
@@ -375,6 +455,7 @@ export function parseCodexModelListResponse(value: unknown): CodexModelCatalogIt
           supportedReasoningEfforts.find((option) => option.reasoningEffort === 'medium')?.reasoningEffort ??
           supportedReasoningEfforts[0]?.reasoningEffort ??
           null,
+        serviceTiers: parseServiceTierOptions(item.serviceTiers ?? item.service_tiers ?? item.speedTiers ?? item.speed_tiers),
       };
     })
     .filter((item): item is CodexModelCatalogItem => Boolean(item));
@@ -453,6 +534,7 @@ export function normalizeWorkspaceRecord(value: unknown): WorkspaceRecord | null
     approvalPolicy: stringField(value, ['approvalPolicy', 'approval_policy']) || 'on-request',
     sandboxMode: stringField(value, ['sandboxMode', 'sandbox_mode']) || 'workspace-write',
     serviceTier: stringField(value, ['serviceTier', 'service_tier']) || null,
+    permissionProfile: stringField(value, ['permissionProfile', 'permission_profile', 'permissions']) || null,
     localAdapterState,
     createdAt,
     updatedAt,
@@ -516,6 +598,91 @@ export function mergeWorkspaceRecords(local: WorkspaceRecord[], remote: Workspac
       reasoningEffort: normalizeReasoningEffort(workspace.reasoningEffort) ?? null,
     }))
     .sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+function responseDataArray(value: unknown): unknown[] {
+  if (Array.isArray(value)) {
+    return value;
+  }
+  if (!isObject(value)) {
+    return [];
+  }
+  if (isObject(value.payload)) {
+    const nested = responseDataArray(value.payload);
+    if (nested.length) {
+      return nested;
+    }
+  }
+  if (isObject(value.result)) {
+    const nested = responseDataArray(value.result);
+    if (nested.length) {
+      return nested;
+    }
+  }
+  for (const key of ['data', 'items', 'profiles', 'servers']) {
+    const nested = value[key];
+    if (Array.isArray(nested)) {
+      return nested;
+    }
+  }
+  return [];
+}
+
+function objectKeys(value: unknown): string[] {
+  return isObject(value) ? Object.keys(value) : [];
+}
+
+function namedItems(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (isObject(item) ? stringField(item, ['name', 'uri', 'title']) : typeof item === 'string' ? item : ''))
+      .filter(Boolean);
+  }
+  return objectKeys(value);
+}
+
+export function parseMcpServerStatusListResponse(value: unknown): CodexMcpServerStatus[] {
+  return responseDataArray(value)
+    .map((item): CodexMcpServerStatus | null => {
+      if (!isObject(item)) {
+        return null;
+      }
+      const name = stringField(item, ['name', 'server', 'serverName']);
+      if (!name) {
+        return null;
+      }
+      const serverInfo = isObject(item.serverInfo) ? item.serverInfo : isObject(item.server_info) ? item.server_info : {};
+      return {
+        name,
+        title: stringField(serverInfo, ['title', 'name']),
+        version: stringField(serverInfo, ['version']),
+        description: stringField(serverInfo, ['description']),
+        authStatus: stringField(item, ['authStatus', 'auth_status']) || 'unknown',
+        tools: namedItems(item.tools),
+        resources: namedItems(item.resources),
+        resourceTemplates: namedItems(item.resourceTemplates ?? item.resource_templates),
+        raw: item,
+      };
+    })
+    .filter((item): item is CodexMcpServerStatus => Boolean(item));
+}
+
+export function parsePermissionProfileListResponse(value: unknown): CodexPermissionProfileSummary[] {
+  return responseDataArray(value)
+    .map((item): CodexPermissionProfileSummary | null => {
+      if (!isObject(item)) {
+        return null;
+      }
+      const id = stringField(item, ['id', 'name']);
+      if (!id) {
+        return null;
+      }
+      return {
+        id,
+        description: stringField(item, ['description']) || 'Configured permission profile.',
+      };
+    })
+    .filter((item): item is CodexPermissionProfileSummary => Boolean(item));
 }
 
 function sameWorkspaceRecord(left: WorkspaceRecord, right: WorkspaceRecord): boolean {

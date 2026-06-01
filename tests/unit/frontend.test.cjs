@@ -64,6 +64,9 @@ test('parses Codex model list responses with reasoning efforts', () => {
         { reasoningEffort: 'high', description: 'Deeper reasoning' },
       ],
       defaultReasoningEffort: 'high',
+      serviceTiers: [
+        { id: 'priority', name: 'Fast', description: 'Fastest inference' },
+      ],
     }],
   });
 
@@ -72,6 +75,7 @@ test('parses Codex model list responses with reasoning efforts', () => {
   assert.equal(parsed[0].displayName, 'GPT 5.4');
   assert.equal(parsed[0].defaultReasoningEffort, 'high');
   assert.deepEqual(parsed[0].supportedReasoningEfforts.map((item) => item.reasoningEffort), ['low', 'high']);
+  assert.deepEqual(parsed[0].serviceTiers, [{ id: 'priority', name: 'fast', description: 'Fastest inference' }]);
 });
 
 test('merges workspace sync records by newest backend or local cache copy', () => {
@@ -87,6 +91,7 @@ test('merges workspace sync records by newest backend or local cache copy', () =
     approvalPolicy: 'on-request',
     sandboxMode: 'workspace-write',
     serviceTier: null,
+    permissionProfile: null,
     localAdapterState: 'running',
     createdAt: 10,
     updatedAt: 20,
@@ -119,6 +124,7 @@ test('prepares workspace sync payload as backend-safe cache records', () => {
     approvalPolicy: 'on-request',
     sandboxMode: 'workspace-write',
     serviceTier: null,
+    permissionProfile: null,
     localAdapterState: 'running',
     createdAt: 10,
     updatedAt: 20,
@@ -146,6 +152,45 @@ test('parses legacy snake_case model catalog shapes', () => {
   assert.equal(parsed[0].displayName, 'Codex');
   assert.equal(parsed[0].defaultReasoningEffort, 'medium');
   assert.equal(parsed[0].supportedReasoningEfforts[0].reasoningEffort, 'xhigh');
+});
+
+test('parses MCP server status list responses', () => {
+  const parsed = todex.parseMcpServerStatusListResponse({
+    data: [{
+      name: 'docs',
+      serverInfo: { title: 'Docs MCP', version: '1.2.3' },
+      authStatus: 'oauth',
+      tools: {
+        search: { name: 'search' },
+        read: { name: 'read' },
+      },
+      resources: [{ uri: 'mcp://docs/readme' }],
+      resourceTemplates: [{ uriTemplate: 'mcp://docs/{id}', name: 'doc' }],
+    }],
+  });
+
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].name, 'docs');
+  assert.equal(parsed[0].title, 'Docs MCP');
+  assert.deepEqual(parsed[0].tools, ['search', 'read']);
+  assert.deepEqual(parsed[0].resources, ['mcp://docs/readme']);
+  assert.deepEqual(parsed[0].resourceTemplates, ['doc']);
+});
+
+test('parses permission profile list responses', () => {
+  const parsed = todex.parsePermissionProfileListResponse({
+    result: {
+      data: [
+        { id: ':workspace' },
+        { id: 'audit', description: 'Inspect without writes.' },
+      ],
+    },
+  });
+
+  assert.deepEqual(parsed, [
+    { id: ':workspace', description: 'Configured permission profile.' },
+    { id: 'audit', description: 'Inspect without writes.' },
+  ]);
 });
 
 test('extracts thread ids from nested server event payloads', () => {
