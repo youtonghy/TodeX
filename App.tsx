@@ -1092,6 +1092,7 @@ const SLASH_COMMANDS: SlashCommand[] = [
   { command: '/review', title: 'Review', description: 'review my current changes and find issues', category: 'context' },
   { command: '/rename', title: 'Rename', description: 'rename the current thread', category: 'thread' },
   { command: '/new', title: 'New', description: 'start a new chat during a conversation', category: 'thread' },
+  { command: '/archive', title: 'Archive', description: 'archive this session and exit', category: 'thread' },
   { command: '/resume', title: 'Resume', description: 'resume a saved chat', category: 'thread' },
   { command: '/fork', title: 'Fork', description: 'fork the current chat', category: 'thread' },
   { command: '/init', title: 'Init', description: 'create an AGENTS.md file with instructions for Codex', category: 'context' },
@@ -1101,6 +1102,7 @@ const SLASH_COMMANDS: SlashCommand[] = [
   { command: '/agent', title: 'Agent', description: 'switch the active agent thread', category: 'thread' },
   { command: '/subagents', title: 'Subagents', description: 'switch the active agent thread', category: 'thread' },
   { command: '/side', title: 'Side', description: 'start a side conversation in an ephemeral fork', category: 'thread' },
+  { command: '/btw', title: 'BTW', description: 'alias for /side', category: 'thread' },
   { command: '/copy', title: 'Copy', description: 'copy last response as markdown', category: 'context' },
   { command: '/raw', title: 'Raw', description: 'toggle raw scrollback mode for copy-friendly selection', category: 'context' },
   { command: '/diff', title: 'Diff', description: 'show git diff including untracked files', category: 'context' },
@@ -1192,6 +1194,9 @@ function canonicalSlashCommand(command: string): string {
   }
   if (normalized === '/clean') {
     return '/stop';
+  }
+  if (normalized === '/btw') {
+    return '/side';
   }
   return normalized.startsWith('/') ? normalized : `/${normalized}`;
 }
@@ -6040,6 +6045,14 @@ export default function App() {
         return;
       }
 
+      if (lower === 'archive') {
+        Alert.alert('Archive thread', 'Archive this conversation and leave it from the active list?', [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Archive', style: 'destructive', onPress: () => removeConversation(conversation.id) },
+        ]);
+        return;
+      }
+
       if (lower === 'resume') {
         if (!normalizeThreadId(conversation.threadId)) {
           setLastError('当前记录还没有可 resume 的原生 thread。');
@@ -6055,7 +6068,7 @@ export default function App() {
         return;
       }
 
-      if (lower === 'fork' || lower === 'side') {
+      if (lower === 'fork' || lower === 'side' || lower === 'btw') {
         void sendNativeThreadAction(
           conversation.id,
           'fork',
@@ -6067,11 +6080,11 @@ export default function App() {
             approvalPolicy: workspace.approvalPolicy || settings.approvalPolicy || undefined,
             sandbox: workspace.permissionProfile ? undefined : workspace.sandboxMode || settings.sandboxMode || undefined,
             permissions: workspace.permissionProfile || undefined,
-            ephemeral: lower === 'side',
+            ephemeral: lower === 'side' || lower === 'btw',
           }),
           { selectResult: true },
         );
-        addCommandNotice('Thread fork sent', lower === 'side' ? '已请求创建临时 side thread。' : '已请求 fork 当前原生 thread。');
+        addCommandNotice('Thread fork sent', lower === 'side' || lower === 'btw' ? '已请求创建临时 side thread。' : '已请求 fork 当前原生 thread。');
         return;
       }
 
@@ -6238,6 +6251,7 @@ export default function App() {
       pendingRequests,
       requestMcpInventory,
       requestSkillList,
+      removeConversation,
       selectConversation,
       selectedRequest,
       sendApprovalResponse,
@@ -8612,6 +8626,14 @@ function SlashCommandActionScreen({
             <ActionButton title="恢复当前 thread" onPress={() => runSlash('/resume')} />
             <ActionButton title="查看 loaded threads" onPress={() => runSlash('/status loaded')} tone="ghost" />
           </View>
+        </View>
+      );
+    }
+    if (command === '/archive') {
+      return (
+        <View style={styles.commandDetailCard}>
+          <Text style={styles.commandDetailHint}>Archive the current mobile conversation and its native Codex thread when available.</Text>
+          <ActionButton title="Archive Thread" onPress={() => runSlash('/archive')} tone="danger" />
         </View>
       );
     }
