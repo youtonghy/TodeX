@@ -61,7 +61,7 @@ import {
   Text as HeroText,
   TextField,
 } from 'heroui-native';
-import { withUniwind } from 'uniwind';
+import { useUniwind, withUniwind } from 'uniwind';
 
 import {
   ConnectionSettings,
@@ -981,6 +981,24 @@ const navigationRef = createNavigationContainerRef<RootStackParamList>();
 enableScreens(true);
 
 const StyledIonicons = withUniwind(Ionicons);
+const LIGHT_NAV_THEME = {
+  background: '#f7f9fa',
+  title: '#17202a',
+  foreground: '#17202a',
+  chip: '#eef0f2',
+  chipAccent: '#dcefeb',
+  chipText: '#52606b',
+};
+const DARK_NAV_THEME = {
+  background: '#202b36',
+  title: '#e7edf2',
+  foreground: '#d7dde3',
+  chip: '#2d3a46',
+  chipAccent: '#20483f',
+  chipText: '#b9c5cf',
+};
+const LIGHT_STATUS_BAR_STYLE = 'dark' as const;
+const DARK_STATUS_BAR_STYLE = 'light' as const;
 
 const SETTINGS_STORAGE_KEY = 'todex.mobile.settings.v1';
 const WORKSPACES_STORAGE_KEY = 'todex.mobile.workspaces.v1';
@@ -2162,6 +2180,11 @@ function forkConversationRecord(conversation: ConversationRecord, title?: string
 }
 
 export default function App() {
+  const { theme } = useUniwind();
+  const darkMode = theme === 'dark';
+  const themedStyles = useMemo(() => makeAppThemeStyles(darkMode), [darkMode]);
+  const navTheme = darkMode ? DARK_NAV_THEME : LIGHT_NAV_THEME;
+  const statusBarStyle = darkMode ? DARK_STATUS_BAR_STYLE : LIGHT_STATUS_BAR_STYLE;
   const socketRef = useRef<WebSocket | null>(null);
   const socketCryptoRef = useRef<TransportCryptoSession | null>(null);
   const activeWorkspaceRef = useRef('');
@@ -6117,7 +6140,7 @@ export default function App() {
         <HeroUINativeProvider>
           <KeyboardProvider>
             <Surface className="flex-1 items-center justify-center bg-background px-8">
-              <StatusBar style="dark" />
+              <StatusBar style={statusBarStyle} />
               <View className="h-14 w-14 items-center justify-center rounded-lg bg-accent">
                 <HeroText className="text-2xl font-semibold text-accent-foreground">T</HeroText>
               </View>
@@ -6136,15 +6159,15 @@ export default function App() {
         <SafeAreaProvider>
           <KeyboardProvider>
             <NavigationContainer ref={navigationRef}>
-            <StatusBar style="dark" />
+            <StatusBar style={statusBarStyle} />
             <Stack.Navigator
               initialRouteName="Workspaces"
               screenOptions={{
-                headerStyle: { backgroundColor: '#f7f9fa' },
+                headerStyle: { backgroundColor: navTheme.background },
                 headerShadowVisible: false,
-                headerTitleStyle: styles.headerTitle,
-                headerTintColor: '#17202a',
-                contentStyle: styles.screenBackground,
+                headerTitleStyle: themedStyles.headerTitle,
+                headerTintColor: navTheme.foreground,
+                contentStyle: themedStyles.screenBackground,
               }}
             >
             <Stack.Screen name="Workspaces" options={{ title: '工作区' }}>
@@ -9308,20 +9331,27 @@ function ConversationHeaderTitle({
   goalLabel: string;
   localState: LocalAdapterState;
 }) {
+  const { theme } = useUniwind();
+  const navTheme = theme === 'dark' ? DARK_NAV_THEME : LIGHT_NAV_THEME;
   const stateLabel = localState === 'idle' ? '' : localState;
   return (
     <View style={styles.conversationHeaderTitle}>
-      <Text style={styles.conversationHeaderName} numberOfLines={1}>{title}</Text>
+      <Text style={[styles.conversationHeaderName, { color: navTheme.title }]} numberOfLines={1}>{title}</Text>
       <View style={styles.conversationHeaderStatusRow}>
-        <View style={[styles.headerStatusChip, mode === 'plan' ? styles.headerStatusChipAccent : styles.headerStatusChipMuted]}>
-          <Text style={styles.headerStatusText} numberOfLines={1}>{modeLabelOf(mode)}</Text>
+        <View
+          style={[
+            styles.headerStatusChip,
+            { backgroundColor: mode === 'plan' ? navTheme.chipAccent : navTheme.chip },
+          ]}
+        >
+          <Text style={[styles.headerStatusText, { color: navTheme.chipText }]} numberOfLines={1}>{modeLabelOf(mode)}</Text>
         </View>
-        <View style={styles.headerStatusChip}>
-          <Text style={styles.headerStatusText} numberOfLines={1}>{goalLabel}</Text>
+        <View style={[styles.headerStatusChip, { backgroundColor: navTheme.chip }]}>
+          <Text style={[styles.headerStatusText, { color: navTheme.chipText }]} numberOfLines={1}>{goalLabel}</Text>
         </View>
         {stateLabel ? (
-          <View style={styles.headerStatusChip}>
-            <Text style={styles.headerStatusText} numberOfLines={1}>{stateLabel}</Text>
+          <View style={[styles.headerStatusChip, { backgroundColor: navTheme.chip }]}>
+            <Text style={[styles.headerStatusText, { color: navTheme.chipText }]} numberOfLines={1}>{stateLabel}</Text>
           </View>
         ) : null}
       </View>
@@ -9970,6 +10000,20 @@ function ModelPickerModal({
       </View>
     </Modal>
   );
+}
+
+function makeAppThemeStyles(darkMode: boolean) {
+  const navTheme = darkMode ? DARK_NAV_THEME : LIGHT_NAV_THEME;
+  return StyleSheet.create({
+    screenBackground: {
+      backgroundColor: darkMode ? '#17202a' : '#f4f6f8',
+    },
+    headerTitle: {
+      color: navTheme.title,
+      fontSize: 17,
+      fontWeight: '800',
+    },
+  });
 }
 
 const styles = StyleSheet.create({
