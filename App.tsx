@@ -102,6 +102,7 @@ import {
   prepareWorkspaceSyncPayload,
   sandboxPolicyForMode,
   shortJson,
+  type CodexServiceTierOption,
   type CodexThreadHistoryEntry,
 } from './src/lib/todex';
 import { loadJson, loadSecret, saveJson, saveSecret } from './src/lib/storage';
@@ -1210,6 +1211,28 @@ function slashCommandNeedsActionPage(command: string): boolean {
   return !DIRECT_SLASH_COMMANDS.has(canonicalSlashCommand(command));
 }
 
+function serviceTierCommandForModel(command: string, model: string | null | undefined, catalog: CodexModelCatalogItem[]): CodexServiceTierOption | null {
+  const normalized = command.replace(/^\//, '').trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  return serviceTiersForModel(model, catalog).find(
+    (tier) => tier.name.toLowerCase() === normalized || tier.id.toLowerCase() === normalized,
+  ) ?? null;
+}
+
+function serviceTierSlashCommandsForModel(model: string | null | undefined, catalog: CodexModelCatalogItem[]): SlashCommand[] {
+  const existingCommands = new Set(SLASH_COMMANDS.map((item) => canonicalSlashCommand(item.command)));
+  return serviceTiersForModel(model, catalog)
+    .filter((tier) => !existingCommands.has(canonicalSlashCommand(`/${tier.name}`)))
+    .map((tier) => ({
+      command: `/${tier.name}`,
+      title: tier.name === 'fast' ? 'Fast' : tier.name,
+      description: tier.description,
+      category: 'core',
+    }));
+}
+
 const PERMISSION_PRESETS: PermissionPreset[] = [
   {
     id: 'read-only',
@@ -2280,6 +2303,7 @@ export default function App() {
   const activeConversationRef = useRef('');
   const workspacesRef = useRef<WorkspaceRecord[]>([]);
   const conversationsRef = useRef<ConversationRecord[]>([]);
+  const timelineRef = useRef<TimelineEntry[]>([]);
   const pendingLocalStartsRef = useRef(new Map<string, PendingLocalStart>());
   const pendingThreadStartsRef = useRef(new Map<string, PendingThreadStart>());
   const pendingThreadListsRef = useRef(new Map<string, PendingThreadList>());
@@ -2347,6 +2371,10 @@ export default function App() {
   const [mcpInventoryByConversation, setMcpInventoryByConversation] = useState<Record<string, McpInventoryState>>({});
   const [permissionProfilesByConversation, setPermissionProfilesByConversation] = useState<Record<string, PermissionProfilesState>>({});
   const [terminalById, setTerminalById] = useState<Record<string, TerminalClientState>>({});
+
+  useEffect(() => {
+    timelineRef.current = timeline;
+  }, [timeline]);
   const queuedChatDraftsRef = useRef<Record<string, QueuedChatSubmission[]>>({});
   const queuedChatDispatchingRef = useRef(new Set<string>());
   const sendQueuedChatDraftRef = useRef<(submission: QueuedChatSubmission, conversationId: string) => Promise<boolean>>(async () => false);
@@ -5077,7 +5105,7 @@ export default function App() {
     return true;
   }, [appendTimeline, finishPendingThreadAction, getConversationContext, sendLocalMethodRequest, startLocalAdapter, updateWorkspace]);
 
-  const toggleFastServiceTier = useCallback((conversationId: string) => {
+  const setWorkspaceServiceTier = useCallback((conversationId: string, nextTier: string, title: string) => {
     const context = getConversationContext(conversationId);
     if (!context) {
       Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
@@ -5085,13 +5113,9 @@ export default function App() {
     }
     const { workspace, conversation } = context;
     const model = workspace.model || settings.defaultModel;
-    const fastTier = fastServiceTierForModel(model, modelCatalog);
-    const currentTier = workspace.serviceTier || null;
-    const fastEnabled = currentTier === fastTier.id || currentTier === 'fast';
-    const nextTier = fastEnabled ? 'default' : fastTier.id;
     updateWorkspace(workspace.id, { serviceTier: nextTier });
     appendTimeline(makeSystemEntry(
-      nextTier === fastTier.id ? 'Fast mode enabled' : 'Fast mode disabled',
+      title,
       `${modelDisplayLabel(model, modelCatalog)} · ${serviceTierLabel(nextTier)}`,
       workspace.id,
       conversation.id,
@@ -5105,6 +5129,29 @@ export default function App() {
     }
     return true;
   }, [appendTimeline, getConversationContext, modelCatalog, sendLocalMethodRequest, settings.defaultModel, updateWorkspace]);
+
+  const applyServiceTier = useCallback((conversationId: string, serviceTier: CodexServiceTierOption) => {
+    return setWorkspaceServiceTier(conversationId, serviceTier.id, `${serviceTierLabel(serviceTier.id)} service tier enabled`);
+  }, [setWorkspaceServiceTier]);
+
+  const toggleFastServiceTier = useCallback((conversationId: string) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      return false;
+    }
+    const { workspace } = context;
+    const model = workspace.model || settings.defaultModel;
+    const fastTier = fastServiceTierForModel(model, modelCatalog);
+    const currentTier = workspace.serviceTier || null;
+    const fastEnabled = currentTier === fastTier.id || currentTier === 'fast';
+    const nextTier = fastEnabled ? 'default' : fastTier.id;
+    return setWorkspaceServiceTier(
+      conversationId,
+      nextTier,
+      nextTier === fastTier.id ? 'Fast mode enabled' : 'Fast mode disabled',
+    );
+  }, [getConversationContext, modelCatalog, setWorkspaceServiceTier, settings.defaultModel]);
 
   const requestGitDiff = useCallback(async (conversationId = activeConversationRef.current) => {
     const context = getConversationContext(conversationId);
@@ -5768,6 +5815,24 @@ export default function App() {
     });
   }, []);
 
+  const copyLastAgentMessage = useCallback(async (conversationId: string) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      return false;
+    }
+    const lastMessage = timelineRef.current.find(
+      (entry) => entry.conversationId === conversationId && entry.kind === 'incoming' && entry.subtitle.trim(),
+    );
+    if (!lastMessage) {
+      Alert.alert('Copy', '当前对话还没有可复制的 Codex 回复。');
+      return false;
+    }
+    await Clipboard.setStringAsync(lastMessage.subtitle);
+    appendTimeline(makeSystemEntry('Copied last response', '最近一条 Codex 回复已复制到剪贴板。', context.workspace.id, context.conversation.id));
+    return true;
+  }, [appendTimeline, getConversationContext]);
+
   const sendSlashCommand = useCallback(
     (input: string, conversationId = activeConversationRef.current) => {
       const trimmed = input.trim();
@@ -5897,6 +5962,10 @@ export default function App() {
 
       if (lower === 'goal') {
         const subcommand = rest[0]?.toLowerCase() ?? '';
+        if (!subcommand || subcommand === 'edit') {
+          openSlashCommandActionPage(workspace, conversation, '/goal');
+          return;
+        }
         if (subcommand === 'pause' || subcommand === 'resume') {
           const status = subcommand === 'pause' ? 'paused' : 'active';
           updateConversation(conversation.id, {
@@ -5911,7 +5980,16 @@ export default function App() {
           return;
         }
         const objective = subcommand === 'set' ? rest.slice(1).join(' ').trim() : rest.join(' ').trim();
-        const method = subcommand === 'clear' ? 'thread/goal/clear' : objective ? 'thread/goal/set' : 'thread/goal/get';
+        if (subcommand === 'set' && !objective) {
+          Alert.alert('Goal', 'Usage: /goal <objective>');
+          return;
+        }
+        const method =
+          subcommand === 'clear'
+            ? 'thread/goal/clear'
+            : /^(get|show|view)$/i.test(subcommand)
+              ? 'thread/goal/get'
+              : 'thread/goal/set';
         if (method === 'thread/goal/set') {
           updateConversation(conversation.id, {
             goalStatus: 'active',
@@ -6177,8 +6255,13 @@ export default function App() {
         return;
       }
 
-      if (lower === 'copy' || lower === 'raw') {
-        addCommandNotice(`/${lower} recognized`, '移动端使用系统选择和复制；该命令已识别但不需要发送到后端。');
+      if (lower === 'copy') {
+        void copyLastAgentMessage(conversation.id);
+        return;
+      }
+
+      if (lower === 'raw') {
+        addCommandNotice('/raw recognized', '移动端的事件详情页已提供 Raw JSON；该 TUI scrollback 切换命令不会作为普通 prompt 发送。');
         return;
       }
 
@@ -6235,12 +6318,20 @@ export default function App() {
         return;
       }
 
+      const serviceTierCommand = serviceTierCommandForModel(lower, workspace.model || settings.defaultModel, modelCatalog);
+      if (serviceTierCommand) {
+        applyServiceTier(conversation.id, serviceTierCommand);
+        return;
+      }
+
       addCommandNotice(`/${lower} recognized`, '该命令不在当前内置命令清单中，已阻止作为普通 prompt 发送。');
     },
     [
       applyPermissionProfile,
+      applyServiceTier,
       applyModelCommand,
       appendTimeline,
+      copyLastAgentMessage,
       createConversation,
       ensureThreadId,
       getConversationContext,
@@ -6264,6 +6355,7 @@ export default function App() {
       sendWorkspaceCommand,
       attachWorkspaceConversation,
       settings,
+      modelCatalog,
       setConversationChatDraft,
       setConversationComposerSelection,
       setLastError,
@@ -6688,6 +6780,8 @@ export default function App() {
                     {...props}
                     workspace={workspace}
                     conversation={conversation}
+                    settings={settings}
+                    modelCatalog={modelCatalog}
                     runThreadMenuAction={runThreadMenuAction}
                     sendSlashCommand={sendSlashCommand}
                     openGitDiff={openGitDiff}
@@ -8274,12 +8368,16 @@ function SlashCommandsScreen({
   route,
   workspace,
   conversation,
+  settings,
+  modelCatalog,
   runThreadMenuAction,
   sendSlashCommand,
   openGitDiff,
 }: NativeStackScreenProps<RootStackParamList, 'SlashCommands'> & {
   workspace: WorkspaceRecord | null;
   conversation: ConversationRecord | null;
+  settings: ConnectionSettings;
+  modelCatalog: CodexModelCatalogItem[];
   runThreadMenuAction: (conversationId: string, action: ThreadMenuAction) => void;
   sendSlashCommand: (input: string, conversationId?: string) => void;
   openGitDiff: (conversationId: string) => void;
@@ -8315,9 +8413,23 @@ function SlashCommandsScreen({
     });
   }, [conversation?.id, navigation, route.params.conversationId, route.params.workspaceId, workspace?.id]);
 
+  const currentModel = workspace?.model || settings.defaultModel;
+  const dynamicServiceTierCommands = useMemo(
+    () => serviceTierSlashCommandsForModel(currentModel, modelCatalog),
+    [currentModel, modelCatalog],
+  );
+  const dynamicServiceTierCommandNames = useMemo(
+    () => new Set(dynamicServiceTierCommands.map((item) => canonicalSlashCommand(item.command))),
+    [dynamicServiceTierCommands],
+  );
+
   const openCommandAction = useCallback((command: string) => {
     if (!conversation) {
       Alert.alert('未选择对话', '请先回到一个 Codex 对话。');
+      return;
+    }
+    if (dynamicServiceTierCommandNames.has(canonicalSlashCommand(command))) {
+      runSlash(command);
       return;
     }
     if (!slashCommandNeedsActionPage(command)) {
@@ -8329,12 +8441,17 @@ function SlashCommandsScreen({
       conversationId: conversation.id,
       command,
     });
-  }, [conversation, navigation, route.params.workspaceId, runSlash, workspace?.id]);
+  }, [conversation, dynamicServiceTierCommandNames, navigation, route.params.workspaceId, runSlash, workspace?.id]);
+
+  const slashCommandItems = useMemo(
+    () => SLASH_COMMANDS.flatMap((item) => (item.command === '/model' ? [item, ...dynamicServiceTierCommands] : [item])),
+    [dynamicServiceTierCommands],
+  );
 
   const slashGroups = SLASH_COMMAND_CATEGORY_ORDER
     .map((category) => ({
       category,
-      commands: SLASH_COMMANDS.filter((item) => item.category === category),
+      commands: slashCommandItems.filter((item) => item.category === category),
     }))
     .filter((group) => group.commands.length > 0);
 
@@ -8344,7 +8461,7 @@ function SlashCommandsScreen({
         <View style={styles.commandPageHeader}>
           <Text style={styles.commandPageTitle}>Slash Commands</Text>
           <Text style={styles.commandPageSubtitle} numberOfLines={2}>
-            {workspace?.name || '当前工作区'} · {SLASH_COMMANDS.length} commands
+            {workspace?.name || '当前工作区'} · {slashCommandItems.length} commands
           </Text>
         </View>
 
@@ -8504,7 +8621,14 @@ function SlashCommandActionScreen({
         <View style={styles.commandActionGrid}>
           <ActionButton title="刷新模型" onPress={refreshModelCatalog} tone="ghost" disabled={modelCatalogStatus === 'loading'} />
           <ActionButton title="手动应用" onPress={() => commandWithText('/model')} tone="ghost" />
-          <ActionButton title={serviceTierLabel(workspace?.serviceTier) === 'Fast' ? '关闭 Fast' : '开启 Fast'} onPress={() => toggleFastServiceTier(activeConversationId)} tone="ghost" />
+          {serviceTiersForModel(currentModel, safeCatalog).map((tier) => (
+            <ActionButton
+              key={tier.id}
+              title={tier.name === 'fast' && serviceTierLabel(workspace?.serviceTier) === 'Fast' ? '关闭 Fast' : `/${tier.name}`}
+              onPress={() => runSlash(`/${tier.name}`)}
+              tone="ghost"
+            />
+          ))}
         </View>
         {modelCatalogError ? <Text style={styles.warningText}>{modelCatalogError}</Text> : null}
         <TextInput
@@ -8610,7 +8734,7 @@ function SlashCommandActionScreen({
           <TextInput style={[styles.input, styles.inputMultiline]} value={textValue} onChangeText={setTextValue} placeholder="Objective" multiline />
           <View style={styles.commandActionGrid}>
             <ActionButton title="设置目标" onPress={() => commandWithText('/goal set')} />
-            <ActionButton title="查看" onPress={() => runSlash('/goal')} tone="ghost" />
+            <ActionButton title="查看" onPress={() => runSlash('/goal get')} tone="ghost" />
             <ActionButton title="暂停" onPress={() => runSlash('/goal pause')} tone="ghost" />
             <ActionButton title="继续" onPress={() => runSlash('/goal resume')} tone="ghost" />
             <ActionButton title="清除" onPress={() => runSlash('/goal clear')} tone="danger" />

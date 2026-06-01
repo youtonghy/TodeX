@@ -66,6 +66,7 @@ test('parses Codex model list responses with reasoning efforts', () => {
       defaultReasoningEffort: 'high',
       serviceTiers: [
         { id: 'priority', name: 'Fast', description: 'Fastest inference' },
+        { id: 'flex', name: 'Flex', description: 'Lower-cost flexible routing' },
       ],
     }],
   });
@@ -75,7 +76,10 @@ test('parses Codex model list responses with reasoning efforts', () => {
   assert.equal(parsed[0].displayName, 'GPT 5.4');
   assert.equal(parsed[0].defaultReasoningEffort, 'high');
   assert.deepEqual(parsed[0].supportedReasoningEfforts.map((item) => item.reasoningEffort), ['low', 'high']);
-  assert.deepEqual(parsed[0].serviceTiers, [{ id: 'priority', name: 'fast', description: 'Fastest inference' }]);
+  assert.deepEqual(parsed[0].serviceTiers, [
+    { id: 'priority', name: 'fast', description: 'Fastest inference' },
+    { id: 'flex', name: 'flex', description: 'Lower-cost flexible routing' },
+  ]);
 });
 
 test('merges workspace sync records by newest backend or local cache copy', () => {
