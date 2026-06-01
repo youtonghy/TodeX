@@ -68,6 +68,7 @@ export type WorkspaceRecord = {
   sandboxMode: string;
   serviceTier?: string | null;
   permissionProfile?: string | null;
+  personality?: string | null;
   localAdapterState?: LocalAdapterState;
   createdAt: number;
   updatedAt: number;
@@ -535,6 +536,7 @@ export function normalizeWorkspaceRecord(value: unknown): WorkspaceRecord | null
     sandboxMode: stringField(value, ['sandboxMode', 'sandbox_mode']) || 'workspace-write',
     serviceTier: stringField(value, ['serviceTier', 'service_tier']) || null,
     permissionProfile: stringField(value, ['permissionProfile', 'permission_profile', 'permissions']) || null,
+    personality: stringField(value, ['personality']) || null,
     localAdapterState,
     createdAt,
     updatedAt,

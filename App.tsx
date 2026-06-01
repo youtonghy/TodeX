@@ -1078,13 +1078,9 @@ const DEFAULT_TERMINAL_COLS = 80;
 const SLASH_COMMANDS: SlashCommand[] = [
   { command: '/model', title: 'Model', description: 'choose what model and reasoning effort to use', category: 'settings' },
   { command: '/fast', title: 'Fast', description: 'toggle fastest inference with increased plan usage', category: 'core' },
-  { command: '/ide', title: 'IDE Context', description: 'include current selection, open files, and other context from your IDE', category: 'context' },
   { command: '/permissions', title: 'Permissions', description: 'choose what Codex is allowed to do', category: 'settings' },
   { command: '/permission', title: 'Permissions', description: 'alias for /permissions', category: 'settings' },
-  { command: '/keymap', title: 'Keymap', description: 'remap TUI shortcuts', category: 'settings' },
-  { command: '/vim', title: 'Vim', description: 'toggle Vim mode for the composer', category: 'settings' },
-  { command: '/setup-default-sandbox', title: 'Setup Default Sandbox', description: 'set up elevated agent sandbox', category: 'settings' },
-  { command: '/sandbox-add-read-dir', title: 'Sandbox Read Root', description: 'let sandbox read a directory', category: 'settings' },
+  { command: '/personality', title: 'Personality', description: 'choose a communication style for Codex', category: 'settings' },
   { command: '/experimental', title: 'Experimental', description: 'toggle experimental features', category: 'settings' },
   { command: '/approve', title: 'Approve', description: 'approve one retry of a recent auto-review denial', category: 'runtime' },
   { command: '/memories', title: 'Memories', description: 'configure memory use and generation', category: 'settings' },
@@ -1100,39 +1096,24 @@ const SLASH_COMMANDS: SlashCommand[] = [
   { command: '/compact', title: 'Compact', description: 'summarize conversation to prevent hitting the context limit', category: 'thread' },
   { command: '/plan', title: 'Plan', description: 'switch to Plan mode', category: 'core' },
   { command: '/goal', title: 'Goal', description: 'set or view the goal for a long-running task', category: 'thread' },
-  { command: '/agent', title: 'Agent', description: 'switch the active agent thread', category: 'thread' },
-  { command: '/subagents', title: 'Subagents', description: 'switch the active agent thread', category: 'thread' },
+  { command: '/subagents', title: 'Subagents', description: 'manage and switch between sub-agent threads', category: 'thread' },
   { command: '/side', title: 'Side', description: 'start a side conversation in an ephemeral fork', category: 'thread' },
   { command: '/btw', title: 'BTW', description: 'alias for /side', category: 'thread' },
   { command: '/copy', title: 'Copy', description: 'copy last response as markdown', category: 'context' },
-  { command: '/raw', title: 'Raw', description: 'toggle raw scrollback mode for copy-friendly selection', category: 'context' },
   { command: '/diff', title: 'Diff', description: 'show git diff including untracked files', category: 'context' },
   { command: '/mention', title: 'Mention', description: 'mention a file', category: 'context' },
   { command: '/status', title: 'Status', description: 'show current session configuration and token usage', category: 'core' },
-  { command: '/debug-config', title: 'Debug Config', description: 'show config layers and requirement sources', category: 'settings' },
-  { command: '/title', title: 'Title', description: 'configure terminal title items', category: 'settings' },
-  { command: '/statusline', title: 'Statusline', description: 'configure status line items', category: 'settings' },
-  { command: '/theme', title: 'Theme', description: 'choose a syntax highlighting theme', category: 'settings' },
-  { command: '/pets', title: 'Pets', description: 'choose or hide the terminal pet', category: 'settings' },
-  { command: '/pet', title: 'Pets', description: 'alias for /pets', category: 'settings' },
   { command: '/mcp', title: 'MCP', description: 'list configured MCP tools; use /mcp verbose for details', category: 'context' },
   { command: '/apps', title: 'Apps', description: 'manage apps', category: 'context' },
   { command: '/plugins', title: 'Plugins', description: 'browse plugins', category: 'context' },
+  { command: '/feedback', title: 'Feedback', description: 'send logs to maintainers', category: 'settings' },
   { command: '/logout', title: 'Logout', description: 'log out of Codex', category: 'settings' },
   { command: '/quit', title: 'Quit', description: 'exit Codex', category: 'runtime' },
   { command: '/exit', title: 'Exit', description: 'exit Codex', category: 'runtime' },
-  { command: '/feedback', title: 'Feedback', description: 'send logs to maintainers', category: 'settings' },
-  { command: '/rollout', title: 'Rollout', description: 'print the rollout file path', category: 'thread' },
   { command: '/ps', title: 'PS', description: 'list background terminals', category: 'runtime' },
   { command: '/stop', title: 'Stop', description: 'stop all background terminals', category: 'runtime' },
   { command: '/clean', title: 'Clean', description: 'alias for /stop', category: 'runtime' },
   { command: '/clear', title: 'Clear', description: 'clear the terminal and start a new chat', category: 'thread' },
-  { command: '/personality', title: 'Personality', description: 'choose a communication style for Codex', category: 'settings' },
-  { command: '/realtime', title: 'Realtime', description: 'toggle realtime voice mode', category: 'settings' },
-  { command: '/settings', title: 'Settings', description: 'configure realtime microphone/speaker', category: 'settings' },
-  { command: '/test-approval', title: 'Test Approval', description: 'test approval request', category: 'debug' },
-  { command: '/debug-m-drop', title: 'Debug Memory Drop', description: 'debug memory drop', category: 'debug' },
-  { command: '/debug-m-update', title: 'Debug Memory Update', description: 'debug memory update', category: 'debug' },
 ];
 
 const EXPERIMENTAL_FEATURE_DEFAULTS: ExperimentalFeatureSettings = {
@@ -1178,20 +1159,12 @@ const DIRECT_SLASH_COMMANDS = new Set([
   '/init',
   '/mention',
   '/copy',
-  '/raw',
-  '/vim',
-  '/rollout',
-  '/debug-m-drop',
-  '/debug-m-update',
 ]);
 
 function canonicalSlashCommand(command: string): string {
   const normalized = command.trim().toLowerCase();
   if (normalized === '/permission') {
     return '/permissions';
-  }
-  if (normalized === '/pet') {
-    return '/pets';
   }
   if (normalized === '/clean') {
     return '/stop';
@@ -1271,6 +1244,27 @@ function permissionProfileLabel(profileId: string | null | undefined): string {
   const preset = permissionPresetForProfile(profileId);
   return preset?.title ?? profileId ?? 'Legacy approval/sandbox';
 }
+
+// Codex `Personality` enum serializes lowercase: "none" | "friendly" | "pragmatic".
+const PERSONALITY_OPTIONS: { id: string; title: string; description: string }[] = [
+  { id: 'friendly', title: 'Friendly', description: 'Warmer, more conversational communication style.' },
+  { id: 'pragmatic', title: 'Pragmatic', description: 'Direct, concise, action-oriented communication style.' },
+  { id: 'none', title: 'Default', description: 'Use the model default communication style.' },
+];
+
+function personalityLabel(personality: string | null | undefined): string {
+  const normalized = (personality || 'none').toLowerCase();
+  return PERSONALITY_OPTIONS.find((option) => option.id === normalized)?.title ?? 'Default';
+}
+
+// Codex `feedback/upload` classification accepts these exact snake_case strings.
+const FEEDBACK_CATEGORIES: { id: string; title: string; description: string }[] = [
+  { id: 'bad_result', title: 'Bad result', description: 'Codex produced an incorrect or unhelpful result.' },
+  { id: 'good_result', title: 'Good result', description: 'Codex did well — share positive feedback.' },
+  { id: 'bug', title: 'Bug', description: 'Something is broken in the app or Codex.' },
+  { id: 'safety_check', title: 'Safety check', description: 'A safety/approval concern to report.' },
+  { id: 'other', title: 'Other', description: 'Anything else worth telling the maintainers.' },
+];
 
 const defaultSettings: ConnectionSettings = {
   serverUrl: 'http://127.0.0.1:7345',
@@ -4406,6 +4400,7 @@ export default function App() {
         sandboxMode: settings.sandboxMode,
         serviceTier: null,
         permissionProfile: null,
+        personality: null,
         localAdapterState: 'idle',
         createdAt: Date.now(),
         updatedAt: Date.now(),
@@ -5152,6 +5147,64 @@ export default function App() {
       nextTier === fastTier.id ? 'Fast mode enabled' : 'Fast mode disabled',
     );
   }, [getConversationContext, modelCatalog, setWorkspaceServiceTier, settings.defaultModel]);
+
+  const applyPersonality = useCallback((conversationId: string, personality: string) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      return false;
+    }
+    const { workspace, conversation } = context;
+    const normalized = personality.toLowerCase();
+    updateWorkspace(workspace.id, { personality: normalized });
+    appendTimeline(makeSystemEntry(
+      `Personality set to ${personalityLabel(normalized)}`,
+      normalized,
+      workspace.id,
+      conversation.id,
+    ));
+    const threadId = normalizeThreadId(conversation.threadId);
+    if (threadId) {
+      sendLocalMethodRequest(workspace, conversation, 'thread/settings/update', {
+        threadId,
+        personality: normalized,
+      }, createRequestId('personality'));
+    }
+    return true;
+  }, [appendTimeline, getConversationContext, sendLocalMethodRequest, updateWorkspace]);
+
+  const submitFeedback = useCallback((
+    conversationId: string,
+    classification: string,
+    reason: string,
+    includeLogs: boolean,
+  ) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      return false;
+    }
+    const { workspace, conversation } = context;
+    const trimmedReason = reason.trim();
+    const threadId = normalizeThreadId(conversation.threadId);
+    const sent = sendLocalMethodRequest(workspace, conversation, 'feedback/upload', {
+      classification,
+      reason: trimmedReason || undefined,
+      threadId: threadId || undefined,
+      includeLogs,
+    }, createRequestId('feedback'));
+    if (!sent) {
+      setLastError('请先在设置里连接后端。');
+      return false;
+    }
+    appendTimeline(makeSystemEntry(
+      'Feedback submitted',
+      `${classification}${trimmedReason ? ` · ${trimmedReason}` : ''}${includeLogs ? ' · with logs' : ''}`,
+      workspace.id,
+      conversation.id,
+    ));
+    return true;
+  }, [appendTimeline, getConversationContext, sendLocalMethodRequest, setLastError]);
 
   const requestGitDiff = useCallback(async (conversationId = activeConversationRef.current) => {
     const context = getConversationContext(conversationId);
@@ -6245,43 +6298,23 @@ export default function App() {
         return;
       }
 
-      if (lower === 'rollout') {
-        addCommandNotice('Rollout', '移动端不会直接读取 Codex 本地 rollout 路径；后端事件会在时间线中显示。');
+      if (lower === 'subagents') {
+        openSlashCommandActionPage(workspace, conversation, '/subagents');
         return;
       }
 
-      if (lower === 'agent' || lower === 'subagents') {
-        addCommandNotice(`/${lower} recognized`, '移动端以工作区和对话列表管理会话；该命令已识别，等价操作请使用当前导航中的对话入口。');
+      if (lower === 'personality') {
+        openSlashCommandActionPage(workspace, conversation, '/personality');
+        return;
+      }
+
+      if (lower === 'feedback') {
+        openSlashCommandActionPage(workspace, conversation, '/feedback');
         return;
       }
 
       if (lower === 'copy') {
         void copyLastAgentMessage(conversation.id);
-        return;
-      }
-
-      if (lower === 'raw') {
-        addCommandNotice('/raw recognized', '移动端的事件详情页已提供 Raw JSON；该 TUI scrollback 切换命令不会作为普通 prompt 发送。');
-        return;
-      }
-
-      if (lower === 'ide' || lower === 'keymap' || lower === 'vim' || lower === 'theme' || lower === 'title' || lower === 'statusline' || lower === 'pets' || lower === 'pet') {
-        addCommandNotice(`/${lower} recognized`, '这是 TUI/IDE 展示配置命令；移动端已识别，但当前没有等价 app-server 执行动作。');
-        return;
-      }
-
-      if (
-        lower === 'setup-default-sandbox' ||
-        lower === 'sandbox-add-read-dir' ||
-        lower === 'personality' ||
-        lower === 'realtime' ||
-        lower === 'settings' ||
-        lower === 'debug-config' ||
-        lower === 'feedback' ||
-        lower === 'debug-m-drop' ||
-        lower === 'debug-m-update'
-      ) {
-        addCommandNotice(`/${lower} recognized`, '该命令已加入移动端命令集；当前移动端没有安全的直接执行协议，未作为普通 prompt 发送。');
         return;
       }
 
@@ -6302,11 +6335,6 @@ export default function App() {
           }
         }
         openThreadCommandPrompt(conversation.id, 'memory');
-        return;
-      }
-
-      if (lower === 'test-approval') {
-        sendLocalTurn('trigger a harmless approval test if the current Codex environment supports it', 'implement', conversation.id);
         return;
       }
 
@@ -6793,6 +6821,9 @@ export default function App() {
               {(props) => {
                 const conversation = conversations.find((item) => item.id === props.route.params.conversationId) ?? null;
                 const workspace = workspaces.find((item) => item.id === props.route.params.workspaceId) ?? null;
+                const workspaceConversations = workspace
+                  ? conversations.filter((item) => item.workspaceId === workspace.id)
+                  : [];
                 return (
                   <SlashCommandActionScreen
                     {...props}
@@ -6810,6 +6841,10 @@ export default function App() {
                     requestPermissionProfiles={requestPermissionProfiles}
                     applyPermissionProfile={applyPermissionProfile}
                     toggleFastServiceTier={toggleFastServiceTier}
+                    applyPersonality={applyPersonality}
+                    submitFeedback={submitFeedback}
+                    workspaceConversations={workspaceConversations}
+                    selectConversation={selectConversation}
                     sendSlashCommand={sendSlashCommand}
                     openGitDiff={openGitDiff}
                   />
@@ -8540,6 +8575,10 @@ function SlashCommandActionScreen({
   requestPermissionProfiles,
   applyPermissionProfile,
   toggleFastServiceTier,
+  applyPersonality,
+  submitFeedback,
+  workspaceConversations,
+  selectConversation,
   sendSlashCommand,
   openGitDiff,
 }: NativeStackScreenProps<RootStackParamList, 'SlashCommandAction'> & {
@@ -8557,6 +8596,10 @@ function SlashCommandActionScreen({
   requestPermissionProfiles: (conversationId?: string) => Promise<boolean>;
   applyPermissionProfile: (conversationId: string, profileId: string, description?: string) => Promise<boolean>;
   toggleFastServiceTier: (conversationId: string) => boolean;
+  applyPersonality: (conversationId: string, personality: string) => boolean;
+  submitFeedback: (conversationId: string, classification: string, reason: string, includeLogs: boolean) => boolean;
+  workspaceConversations: ConversationRecord[];
+  selectConversation: (workspaceId: string, conversationId: string) => void;
   sendSlashCommand: (input: string, conversationId?: string) => void;
   openGitDiff: (conversationId: string) => void;
 }) {
@@ -8568,6 +8611,8 @@ function SlashCommandActionScreen({
   const [reasoningEffort, setReasoningEffort] = useState<string | null>(
     normalizeReasoningEffort(workspace?.reasoningEffort ?? settings.defaultReasoningEffort),
   );
+  const [feedbackCategory, setFeedbackCategory] = useState<string>(FEEDBACK_CATEGORIES[0].id);
+  const [feedbackIncludeLogs, setFeedbackIncludeLogs] = useState(false);
   const safeCatalog = modelCatalog.length ? modelCatalog : FALLBACK_CODEX_MODELS;
   const currentModel = workspace?.model || settings.defaultModel;
   const activeConversationId = conversation?.id ?? route.params.conversationId;
@@ -8598,10 +8643,6 @@ function SlashCommandActionScreen({
     const trimmed = textValue.trim();
     runSlash(trimmed ? `${base} ${trimmed}` : base);
   }, [runSlash, textValue]);
-
-  const openSettings = useCallback(() => {
-    navigation.navigate('Settings');
-  }, [navigation]);
 
   const openDiff = useCallback(() => {
     if (!conversation) {
@@ -8924,13 +8965,6 @@ function SlashCommandActionScreen({
         </View>
       );
     }
-    if (command === '/settings') {
-      return (
-        <View style={styles.commandDetailCard}>
-          <ActionButton title="打开设置" onPress={openSettings} />
-        </View>
-      );
-    }
     if (command === '/diff') {
       return (
         <View style={styles.commandDetailCard}>
@@ -8938,15 +8972,105 @@ function SlashCommandActionScreen({
         </View>
       );
     }
-    if (command === '/sandbox-add-read-dir') {
-      return (
-        <View style={styles.commandDetailCard}>
-          <TextInput style={styles.input} value={textValue} onChangeText={setTextValue} placeholder="/absolute/path" autoCapitalize="none" />
-          <ActionButton title="添加只读目录" onPress={() => commandWithText('/sandbox-add-read-dir')} />
-        </View>
-      );
-    }
     return null;
+  };
+
+  const renderPersonalityControls = () => {
+    if (command !== '/personality') {
+      return null;
+    }
+    const current = (workspace?.personality || 'none').toLowerCase();
+    return (
+      <View style={styles.commandDetailCard}>
+        <Text style={styles.commandDetailLabel}>当前沟通风格</Text>
+        <Text style={styles.commandDetailValue}>{personalityLabel(current)}</Text>
+        {PERSONALITY_OPTIONS.map((option) => (
+          <Pressable key={option.id} style={styles.commandChoiceItem} onPress={() => applyPersonality(activeConversationId, option.id)}>
+            <View style={styles.commandListText}>
+              <Text style={styles.commandName}>{option.title}</Text>
+              <Text style={styles.commandDescription}>{option.description}</Text>
+            </View>
+            <StyledIonicons name={current === option.id ? 'checkmark-circle' : 'checkmark-circle-outline'} size={18} className="text-muted" />
+          </Pressable>
+        ))}
+      </View>
+    );
+  };
+
+  const renderFeedbackControls = () => {
+    if (command !== '/feedback') {
+      return null;
+    }
+    return (
+      <View style={styles.commandDetailCard}>
+        <Text style={styles.commandDetailLabel}>分类</Text>
+        {FEEDBACK_CATEGORIES.map((category) => (
+          <Pressable key={category.id} style={styles.commandChoiceItem} onPress={() => setFeedbackCategory(category.id)}>
+            <View style={styles.commandListText}>
+              <Text style={styles.commandName}>{category.title}</Text>
+              <Text style={styles.commandDescription}>{category.description}</Text>
+            </View>
+            <StyledIonicons name={feedbackCategory === category.id ? 'checkmark-circle' : 'checkmark-circle-outline'} size={18} className="text-muted" />
+          </Pressable>
+        ))}
+        <TextInput style={[styles.input, styles.inputMultiline]} value={textValue} onChangeText={setTextValue} placeholder="补充说明（可选）" multiline />
+        <View style={styles.commandChoiceItem}>
+          <View style={styles.commandListText}>
+            <Text style={styles.commandName}>附带日志</Text>
+            <Text style={styles.commandDescription}>随反馈上传本地会话日志</Text>
+          </View>
+          <Switch value={feedbackIncludeLogs} onValueChange={setFeedbackIncludeLogs} />
+        </View>
+        <ActionButton
+          title="提交反馈"
+          onPress={() => {
+            if (submitFeedback(activeConversationId, feedbackCategory, textValue, feedbackIncludeLogs)) {
+              setTextValue('');
+              setFeedbackIncludeLogs(false);
+              navigation.goBack();
+            }
+          }}
+        />
+      </View>
+    );
+  };
+
+  const renderSubagentControls = () => {
+    if (command !== '/subagents') {
+      return null;
+    }
+    return (
+      <View style={styles.commandDetailCard}>
+        <Text style={styles.commandDetailLabel}>子代理 / Sub-agents</Text>
+        <Text style={styles.commandDetailHint}>本工作区的会话线程。点选可切换为当前会话。</Text>
+        <View style={styles.commandActionGrid}>
+          <ActionButton title="刷新线程" onPress={() => runSlash('/status loaded')} tone="ghost" />
+        </View>
+        {workspaceConversations.length === 0 ? (
+          <Text style={styles.commandDetailHint}>当前工作区还没有其它会话。</Text>
+        ) : null}
+        {workspaceConversations.map((item) => (
+          <Pressable
+            key={item.id}
+            style={styles.commandChoiceItem}
+            onPress={() => {
+              if (workspace) {
+                selectConversation(workspace.id, item.id);
+                navigation.goBack();
+              }
+            }}
+          >
+            <View style={styles.commandListText}>
+              <Text style={styles.commandName} numberOfLines={1}>{item.title || item.id}</Text>
+              <Text style={styles.commandDescription} numberOfLines={1}>
+                {normalizeThreadId(item.threadId) ? `thread ${normalizeThreadId(item.threadId)}` : 'no native thread'} · {item.localAdapterState || 'idle'}
+              </Text>
+            </View>
+            <StyledIonicons name={item.id === activeConversationId ? 'radio-button-on' : 'radio-button-off'} size={18} className="text-muted" />
+          </Pressable>
+        ))}
+      </View>
+    );
   };
 
   const body =
@@ -8958,7 +9082,10 @@ function SlashCommandActionScreen({
           renderCatalogControls() ??
           renderRuntimeControls() ??
           renderPromptControls() ??
-          renderSettingsControls() ?? (
+          renderSettingsControls() ??
+          renderPersonalityControls() ??
+          renderFeedbackControls() ??
+          renderSubagentControls() ?? (
             <View style={styles.commandDetailCard}>
               <Text style={styles.commandDetailHint}>该命令在 Codex TUI 中是本地 TUI/IDE 配置或实验命令；移动端没有等价安全协议时只记录识别结果，不会把它作为普通 prompt 发送。</Text>
               <ActionButton title="执行兼容动作" onPress={() => runSlash(command)} tone="ghost" />

@@ -139,6 +139,25 @@ test('prepares workspace sync payload as backend-safe cache records', () => {
   assert.equal(payload[0].reasoningEffort, 'xhigh');
 });
 
+test('parses workspace personality from camelCase and defaults to null', () => {
+  const parsed = todex.parseWorkspaceSyncResponse([
+    {
+      id: 'workspace-1',
+      name: 'App',
+      path: '/workspace/app',
+      personality: 'pragmatic',
+    },
+    {
+      id: 'workspace-2',
+      name: 'Other',
+      path: '/workspace/other',
+    },
+  ]);
+
+  assert.equal(parsed[0].personality, 'pragmatic');
+  assert.equal(parsed[1].personality, null);
+});
+
 test('parses legacy snake_case model catalog shapes', () => {
   const parsed = todex.parseCodexModelListResponse({
     result: {
