@@ -125,6 +125,28 @@ export type WorkspaceRecord = {
   updatedAt: number;
 };
 
+export type CapabilityHashTrigger = {
+  start: number;
+  end: number;
+  query: string;
+};
+
+export function findCapabilityHashTrigger(text: string, cursor: number): CapabilityHashTrigger | null {
+  const end = Math.max(0, Math.min(cursor, text.length));
+  const beforeCursor = text.slice(0, end);
+  const hashIndex = beforeCursor.lastIndexOf('#');
+  if (hashIndex < 0) return null;
+  const prefix = beforeCursor.slice(0, hashIndex);
+  if (prefix && !/\s$/.test(prefix)) return null;
+  const query = beforeCursor.slice(hashIndex + 1);
+  if (/\s/.test(query) || query.includes('#')) return null;
+  return { start: hashIndex, end, query };
+}
+
+export function insertCapabilityReference(text: string, trigger: CapabilityHashTrigger, value: string): string {
+  return `${text.slice(0, trigger.start)}${value}${text.slice(trigger.end)}`;
+}
+
 export type CodexNativeThread = {
   id: string;
   title: string;

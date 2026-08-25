@@ -44,6 +44,13 @@ test('builds HTTP and WebSocket URLs from flexible server addresses', () => {
   );
 });
 
+test('matches capability references only after whitespace', () => {
+  assert.deepEqual(todex.findCapabilityHashTrigger('#skill/build', 12), { start: 0, end: 12, query: 'skill/build' });
+  assert.equal(todex.findCapabilityHashTrigger('foo#skill/build', 15), null);
+  assert.equal(todex.findCapabilityHashTrigger('#skill/build now', '#skill/build now'.length), null);
+  assert.equal(todex.insertCapabilityReference('do #old', { start: 3, end: 7, query: 'old' }, '#skill/new '), 'do #skill/new ');
+});
+
 test('builds v2 WebSocket URLs and parses protocol messages', () => {
   assert.equal(v2.buildV2WebSocketUrl('https://agent.example.test/base'), 'wss://agent.example.test/v2/ws');
   assert.equal(v2.buildV2WebSocketUrl('ws://127.0.0.1:7345'), 'ws://127.0.0.1:7345/v2/ws');
@@ -67,6 +74,23 @@ test('v2 API client sends bearer auth and JSON requests', async () => {
   assert.equal(requests[0].url, 'http://127.0.0.1:7345/v2/conversations/c1/prompt');
   assert.equal(requests[0].init.headers.get('Authorization'), 'Bearer secret');
   assert.equal(requests[0].init.headers.get('Content-Type'), 'application/json');
+});
+
+test('v2 API client builds read-only capability catalog requests', async () => {
+  const requests = [];
+  const client = new v2.V2ApiClient({
+    serverUrl: 'http://127.0.0.1:7345',
+    fetchImpl: async (url) => {
+      requests.push(url);
+      return new Response(JSON.stringify({ provider: 'codex', skills: [], servers: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    },
+  });
+  await client.listSkillCatalog('codex', '/workspace/app');
+  await client.getSkillResource('codex', '/workspace/app', 'skill-id');
+  await client.listMcpCatalog('codex', '/workspace/app');
+  assert.match(requests[0], /\/v2\/catalog\/skills\?provider=codex&workspace=%2Fworkspace%2Fapp/);
+  assert.match(requests[1], /\/v2\/catalog\/skills\/skill-id\?provider=codex&workspace=%2Fworkspace%2Fapp/);
+  assert.match(requests[2], /\/v2\/catalog\/mcp\?provider=codex&workspace=%2Fworkspace%2Fapp/);
 });
 
 test('v2 socket reconnects subscriptions from the latest sequence', () => {

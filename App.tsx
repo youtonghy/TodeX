@@ -106,6 +106,8 @@ import {
   parsePluginListResponse,
   parseWorkspaceSyncResponse,
   prepareWorkspaceSyncPayload,
+  findCapabilityHashTrigger,
+  insertCapabilityReference,
   sandboxPolicyForMode,
   shortJson,
   type CodexServiceTierOption,
@@ -128,6 +130,7 @@ import {
   sessionIdFromEvent as transportSessionIdFromEvent,
 } from './src/lib/transport';
 import { V2ApiClient, V2ConversationSocket, type ConversationEvent, type ConversationManifest, type ProviderDescriptor, type ProviderKind } from './src/lib/v2';
+import { CapabilitiesScreen, type CatalogState } from './src/components/CapabilitiesScreen';
 
 type RootStackParamList = {
   Workspaces: undefined;
@@ -140,6 +143,7 @@ type RootStackParamList = {
   GitDiff: { workspaceId: string; conversationId: string };
   Terminal: { workspaceId: string; conversationId: string };
   Settings: undefined;
+  Capabilities: undefined;
 };
 
 type ServerVersion = {
@@ -2401,6 +2405,7 @@ export default function App() {
   const pendingSocketFrameDrainRef = useRef<number | null>(null);
   const transportClientRef = useRef<TodeXTransportClient | null>(null);
   const v2SocketRef = useRef<V2ConversationSocket | null>(null);
+  const capabilityWorkspaceRef = useRef('');
   const socketGenerationRef = useRef(0);
   const autoConnectAttemptedRef = useRef(false);
   const sessionCursorsRef = useRef(new Map<string, number>());
@@ -2460,6 +2465,7 @@ export default function App() {
   const [terminalById, setTerminalById] = useState<Record<string, TerminalClientState>>({});
   const [v2Providers, setV2Providers] = useState<ProviderDescriptor[]>([]);
   const [v2Conversations, setV2Conversations] = useState<ConversationManifest[]>([]);
+  const [capabilityCatalogs, setCapabilityCatalogs] = useState<Partial<Record<ProviderKind, CatalogState>>>({});
 
   useEffect(() => {
     if (!hydrated || !settings.serverUrl.trim()) {
@@ -3026,6 +3032,37 @@ export default function App() {
     () => workspaces.find((item) => item.id === activeWorkspaceId) ?? null,
     [activeWorkspaceId, workspaces],
   );
+
+  const refreshCapabilityCatalog = useCallback(async (provider: ProviderKind) => {
+    const workspacePath = activeWorkspace?.path || settings.defaultWorkspacePath;
+    if (!workspacePath) return;
+    setCapabilityCatalogs((current) => ({ ...current, [provider]: { ...(current[provider] ?? {}), status: 'loading', error: undefined } }));
+    const api = new V2ApiClient({ serverUrl: settings.serverUrl, authToken: settings.authToken });
+    try {
+      const [skills, mcp] = await Promise.all([
+        api.listSkillCatalog(provider, workspacePath),
+        api.listMcpCatalog(provider, workspacePath),
+      ]);
+      setCapabilityCatalogs((current) => ({ ...current, [provider]: { status: 'ready', skills, mcp } }));
+    } catch (error) {
+      setCapabilityCatalogs((current) => ({
+        ...current,
+        [provider]: { ...(current[provider] ?? {}), status: 'error', error: error instanceof Error ? error.message : '能力目录读取失败' },
+      }));
+    }
+  }, [activeWorkspace?.path, settings.authToken, settings.defaultWorkspacePath, settings.serverUrl]);
+
+  useEffect(() => {
+    if (!hydrated || !activeWorkspace?.path || v2Providers.length === 0) return;
+    if (capabilityWorkspaceRef.current !== activeWorkspace.path) {
+      capabilityWorkspaceRef.current = activeWorkspace.path;
+      setCapabilityCatalogs({});
+      return;
+    }
+    for (const provider of v2Providers) {
+      if (!capabilityCatalogs[provider.id]) void refreshCapabilityCatalog(provider.id);
+    }
+  }, [activeWorkspace?.path, capabilityCatalogs, hydrated, refreshCapabilityCatalog, v2Providers]);
 
   const activeConversation = useMemo(
     () => conversations.find((item) => item.id === activeConversationId) ?? null,
@@ -7545,6 +7582,7 @@ export default function App() {
                   openGitDiff={openGitDiff}
                   openTerminal={openTerminal}
                   removeWorkspace={removeWorkspace}
+                  capabilityCatalog={capabilityCatalogs.codex}
                 />
               )}
             </Stack.Screen>
@@ -7659,6 +7697,16 @@ export default function App() {
                   />
                 );
               }}
+            </Stack.Screen>
+            <Stack.Screen name="Capabilities" options={{ title: 'Skills 和 MCPs' }}>
+              {() => (
+                <CapabilitiesScreen
+                  workspacePath={activeWorkspace?.path ?? serverVersion?.workspace_root ?? settings.defaultWorkspacePath}
+                  providers={v2Providers}
+                  catalogs={capabilityCatalogs}
+                  onRefresh={refreshCapabilityCatalog}
+                />
+              )}
             </Stack.Screen>
             <Stack.Screen name="Settings" options={{ title: '设置' }}>
               {(props) => (
@@ -8386,6 +8434,7 @@ function ChatScreen({
   openGitDiff,
   openTerminal,
   removeWorkspace,
+  capabilityCatalog,
 }: NativeStackScreenProps<RootStackParamList, 'Chat'> & {
   settings: ConnectionSettings;
   workspaces: WorkspaceRecord[];
@@ -8417,6 +8466,7 @@ function ChatScreen({
   openGitDiff: (conversationId: string) => void;
   openTerminal: (conversationId: string) => void;
   removeWorkspace: (workspaceId: string) => void;
+  capabilityCatalog?: CatalogState;
 }) {
   const [menuVisible, setMenuVisible] = useState(false);
   const [mentionEntries, setMentionEntries] = useState<WorkspaceEntry[]>([]);
@@ -8492,6 +8542,20 @@ function ChatScreen({
     : [];
   const mentionTrigger = slashSuggestions.length === 0 ? findMentionTrigger(chatDraft, composerSelection.start) : null;
   const mentionSuggestions = buildMentionSuggestions(mentionTrigger, mentionEntries);
+  const capabilityHashTrigger = slashSuggestions.length === 0 ? findCapabilityHashTrigger(chatDraft, composerSelection.start) : null;
+  const capabilitySuggestions = useMemo(() => {
+    if (!capabilityHashTrigger || !capabilityCatalog) return [];
+    const query = capabilityHashTrigger.query.toLowerCase();
+    const skills = (capabilityCatalog.skills?.skills ?? [])
+      .filter((item) => item.active && item.valid && (!query || item.name.toLowerCase().includes(query)))
+      .slice(0, 6)
+      .map((item) => ({ id: `skill:${item.resourceId}`, kind: 'skill' as const, name: item.name, description: item.description, insertText: `#skill/${item.name} ` }));
+    const servers = (capabilityCatalog.mcp?.servers ?? [])
+      .filter((item) => item.active && item.enabled && (!query || item.name.toLowerCase().includes(query)))
+      .slice(0, 6)
+      .map((item) => ({ id: `mcp:${item.resourceId}`, kind: 'mcp' as const, name: item.name, description: `${item.transport} MCP Server`, insertText: `#mcp/${item.name} ` }));
+    return [...skills, ...servers].slice(0, 8);
+  }, [capabilityCatalog, capabilityHashTrigger]);
 
   useEffect(() => {
     if (connectionState !== 'open' || !workspace || !conversation?.sessionId) {
@@ -8597,6 +8661,15 @@ function ChatScreen({
     setComposerSelection({ start: nextCursor, end: nextCursor });
     requestAnimationFrame(() => composerInputRef.current?.focus());
   }, [mentionTrigger, setChatDraft]);
+
+  const selectCapability = useCallback((item: { insertText: string }) => {
+    if (!capabilityHashTrigger) return;
+    const nextText = insertCapabilityReference(chatDraft, capabilityHashTrigger, item.insertText);
+    const nextCursor = capabilityHashTrigger.start + item.insertText.length;
+    setChatDraft(nextText);
+    setComposerSelection({ start: nextCursor, end: nextCursor });
+    requestAnimationFrame(() => composerInputRef.current?.focus());
+  }, [capabilityHashTrigger, chatDraft, setChatDraft, setComposerSelection]);
 
   const appendComposerAttachments = useCallback((items: ComposerAttachmentDraft[]) => {
     if (items.length === 0) {
@@ -9066,6 +9139,21 @@ function ChatScreen({
             </ScrollView>
           </Surface>
         ) : null}
+        {capabilitySuggestions.length > 0 ? (
+          <Surface variant="secondary" className="mb-2 overflow-hidden rounded-lg">
+            {capabilitySuggestions.map((item) => (
+              <Button key={item.id} variant="ghost" className="min-h-12 justify-start rounded-none px-3" onPress={() => selectCapability(item)}>
+                <View className={`h-8 w-8 items-center justify-center rounded-md ${item.kind === 'skill' ? 'bg-accent-soft' : 'bg-success-soft'}`}>
+                  <HeroText className={`text-sm font-semibold ${item.kind === 'skill' ? 'text-accent-soft-foreground' : 'text-success-soft-foreground'}`}>{item.kind === 'skill' ? '#' : 'M'}</HeroText>
+                </View>
+                <View className="min-w-0 flex-1">
+                  <HeroText className="font-semibold text-foreground" numberOfLines={1}>{item.name}</HeroText>
+                  <HeroText className="text-xs text-muted" numberOfLines={1}>{item.description || (item.kind === 'skill' ? 'Skill' : 'MCP Server')}</HeroText>
+                </View>
+              </Button>
+            ))}
+          </Surface>
+        ) : null}
         {mentionSuggestions.length > 0 ? (
           <Surface variant="secondary" className="mb-2 overflow-hidden rounded-lg">
             {mentionSuggestions.map((item) => (
@@ -9166,7 +9254,7 @@ function ChatScreen({
               }
             }}
             selection={composerSelection}
-            placeholder="输入消息，@文件，/命令"
+            placeholder="输入消息，#能力，@文件，/命令"
             placeholderTextColor="#7a8391"
             style={styles.composerInput}
             multiline
@@ -9226,6 +9314,11 @@ function ChatScreen({
               <MenuItem
                 title="Slash Commands"
                 onPress={() => navigation.navigate('SlashCommands', { workspaceId: workspace.id, conversationId: conversation.id })}
+                close={() => setMenuVisible(false)}
+              />
+              <MenuItem
+                title="Skills 和 MCPs"
+                onPress={() => navigation.navigate('Capabilities')}
                 close={() => setMenuVisible(false)}
               />
               <MenuItem title="启动" onPress={() => runWorkspaceCommand(workspace, conversation, 'start')} close={() => setMenuVisible(false)} />

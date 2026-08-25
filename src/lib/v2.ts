@@ -11,6 +11,42 @@ export type ProviderDescriptor = {
   capabilities: Record<string, boolean>;
 };
 
+export type CatalogScope = 'user' | 'project';
+
+export type SkillCatalogDescriptor = {
+  resourceId: string;
+  name: string;
+  description: string;
+  scope: CatalogScope;
+  source: string;
+  active: boolean;
+  shadowedBy?: string;
+  valid: boolean;
+  error?: string;
+};
+
+export type SkillCatalog = {
+  provider: ProviderKind;
+  skills: SkillCatalogDescriptor[];
+};
+
+export type McpServerCatalogDescriptor = {
+  resourceId: string;
+  name: string;
+  provider: ProviderKind;
+  scope: CatalogScope;
+  source: string;
+  transport: 'stdio' | 'http' | 'unknown';
+  enabled: boolean;
+  active: boolean;
+  shadowedBy?: string;
+};
+
+export type McpCatalog = {
+  provider: ProviderKind;
+  servers: McpServerCatalogDescriptor[];
+};
+
 export type ConversationManifest = {
   schemaVersion: number;
   id: string;
@@ -104,6 +140,21 @@ export class V2ApiClient {
 
   async listProviders(): Promise<{ providers: ProviderDescriptor[] }> {
     return this.request('/v2/providers');
+  }
+
+  async listSkillCatalog(provider: ProviderKind, workspace: string): Promise<SkillCatalog> {
+    const query = new URLSearchParams({ provider, workspace });
+    return this.request(`/v2/catalog/skills?${query}`);
+  }
+
+  async getSkillResource(provider: ProviderKind, workspace: string, resourceId: string): Promise<{ resourceId: string; content: string }> {
+    const query = new URLSearchParams({ provider, workspace });
+    return this.request(`/v2/catalog/skills/${encodeURIComponent(resourceId)}?${query}`);
+  }
+
+  async listMcpCatalog(provider: ProviderKind, workspace: string): Promise<McpCatalog> {
+    const query = new URLSearchParams({ provider, workspace });
+    return this.request(`/v2/catalog/mcp?${query}`);
   }
 
   async listConversations(): Promise<{ conversations: ConversationManifest[] }> {

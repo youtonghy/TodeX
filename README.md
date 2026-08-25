@@ -11,6 +11,7 @@ TodeX App is the mobile client for connecting to `todex-agentd`, managing worksp
 - 聊天界面：支持消息输入、历史时间线、跳到最新消息
 - `@` 文件引用：从后端工作区目录中检索文件和目录建议
 - `/` 命令：内置命令补全和命令路由，不是 shell 执行
+- Skills 和 MCPs：从对话菜单查看通用及各 Agent 的只读启用状态；输入 `#` 可匹配当前 Codex Agent 的启用 Skill 和 MCP Server，并插入能力引用
 - 审批处理：支持命令执行、权限、工具请求等审批卡片
 - 运行控制：启动、状态、附加、中断、停止本地 Codex 会话
 - 设置保存：连接地址、token、tenant、可选传输加密、默认目录、默认模型、权限和沙盒模式
@@ -66,7 +67,7 @@ npm run web
 2. 打开 App，在设置里扫描后端 TUI 的配对二维码，或手动填写后端地址和 `Auth token`。
 3. 新建一个工作区，选择本地目录。
 4. 进入对话，开始发送消息。
-5. 输入 `@` 选择文件，输入 `/` 选择内置命令。
+5. 输入 `@` 选择文件，输入 `/` 选择内置命令，输入 `#` 选择当前 Agent 的 Skill 或 MCP Server。
 
 1. Start `TodeX_backend` first.
 2. Open the app and set the backend URL and `Auth token`.
