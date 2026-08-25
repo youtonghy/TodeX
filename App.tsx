@@ -127,10 +127,11 @@ import {
   cursorFromEvent as transportCursorFromEvent,
   sessionIdFromEvent as transportSessionIdFromEvent,
 } from './src/lib/transport';
-import { V2ApiClient, V2ConversationSocket, type ConversationManifest, type ProviderDescriptor } from './src/lib/v2';
+import { V2ApiClient, V2ConversationSocket, type ConversationEvent, type ConversationManifest, type ProviderDescriptor, type ProviderKind } from './src/lib/v2';
 
 type RootStackParamList = {
   Workspaces: undefined;
+  V2Conversations: undefined;
   Conversations: { workspaceId: string };
   Chat: { workspaceId: string; conversationId: string };
   SlashCommands: { workspaceId: string; conversationId: string };
@@ -7479,6 +7480,16 @@ export default function App() {
                 />
               )}
             </Stack.Screen>
+            <Stack.Screen name="V2Conversations" options={{ title: 'TodeX 2.0' }}>
+              {(props) => (
+                <V2ConversationsScreen
+                  {...props}
+                  settings={settings}
+                  providers={v2Providers}
+                  defaultWorkspace={activeWorkspace?.path ?? serverVersion?.workspace_root ?? settings.defaultWorkspacePath}
+                />
+              )}
+            </Stack.Screen>
             <Stack.Screen name="Conversations">
               {(props) => (
                 <ConversationListScreen
@@ -7846,6 +7857,7 @@ function WorkspaceListScreen({
     navigation.setOptions({
       headerRight: () => (
         <View style={styles.headerActions}>
+          <HeaderIconButton label="2.0" onPress={() => navigation.navigate('V2Conversations')} />
           <HeaderIconButton label="设置" onPress={() => navigation.navigate('Settings')} />
           <HeaderIconButton label="+" onPress={() => setModalVisible(true)} />
         </View>
@@ -8011,6 +8023,139 @@ function WorkspaceListScreen({
           setRenamingWorkspace(null);
         }}
       />
+    </Surface>
+  );
+}
+
+function V2ConversationsScreen({
+  settings,
+  providers,
+  defaultWorkspace,
+}: NativeStackScreenProps<RootStackParamList, 'V2Conversations'> & {
+  settings: ConnectionSettings;
+  providers: ProviderDescriptor[];
+  defaultWorkspace: string;
+}) {
+  const [conversations, setConversations] = useState<ConversationManifest[]>([]);
+  const [events, setEvents] = useState<ConversationEvent[]>([]);
+  const [selectedId, setSelectedId] = useState('');
+  const [provider, setProvider] = useState<ProviderKind>('codex');
+  const [workspace, setWorkspace] = useState(defaultWorkspace);
+  const [title, setTitle] = useState('');
+  const [draft, setDraft] = useState('');
+  const [status, setStatus] = useState('正在连接 v2');
+  const socketRef = useRef<V2ConversationSocket | null>(null);
+  const api = useMemo(() => new V2ApiClient({ serverUrl: settings.serverUrl, authToken: settings.authToken }), [settings.authToken, settings.serverUrl]);
+
+  useEffect(() => {
+    setWorkspace(defaultWorkspace);
+  }, [defaultWorkspace]);
+
+  useEffect(() => {
+    let active = true;
+    void api.listConversations().then((result) => {
+      if (!active) return;
+      setConversations(result.conversations);
+      setSelectedId((current) => current || result.conversations[0]?.id || '');
+    }).catch((error) => {
+      if (active) setStatus(error instanceof Error ? error.message : 'v2 conversation 加载失败');
+    });
+    const socket = new V2ConversationSocket({
+      serverUrl: settings.serverUrl,
+      authToken: settings.authToken,
+      onStatus: (next) => { if (active) setStatus(`WebSocket ${next}`); },
+      onEvent: (event) => {
+        if (!active) return;
+        setEvents((current) => [...current, event].slice(-200));
+        setConversations((current) => current.map((item) => item.id === event.conversationId
+          ? { ...item, lastSequence: Math.max(item.lastSequence, event.sequence), updatedAt: event.time }
+          : item));
+      },
+      onError: (error) => { if (active) setStatus(error.message); },
+    });
+    socketRef.current = socket;
+    socket.connect();
+    return () => {
+      active = false;
+      socket.close();
+      if (socketRef.current === socket) socketRef.current = null;
+    };
+  }, [api, settings.authToken, settings.serverUrl]);
+
+  const createRemoteConversation = async () => {
+    const selectedProvider = providers.find((item) => item.id === provider && item.available);
+    if (!selectedProvider) {
+      Alert.alert('Provider 不可用', '请先在 backend 配置并登录可用的 Provider。');
+      return;
+    }
+    try {
+      const created = await api.createConversation({ provider, workspace: workspace.trim(), title: title.trim() || undefined });
+      setConversations((current) => [created, ...current.filter((item) => item.id !== created.id)]);
+      setSelectedId(created.id);
+      setTitle('');
+      socketRef.current?.subscribe(created.id, 0, 200);
+    } catch (error) {
+      Alert.alert('创建 v2 对话失败', error instanceof Error ? error.message : 'backend 拒绝了请求。');
+    }
+  };
+
+  const sendPrompt = () => {
+    const text = draft.trim();
+    if (!selectedId || !text) return;
+    socketRef.current?.sendPrompt(selectedId, text);
+    setDraft('');
+  };
+
+  const selected = conversations.find((item) => item.id === selectedId) ?? null;
+  const selectedEvents = events.filter((event) => event.conversationId === selectedId);
+  return (
+    <Surface className="flex-1 bg-background">
+      <ScrollView contentContainerStyle={styles.pageContent}>
+        <Card className="gap-3">
+          <Card.Header><Card.Title>Provider-neutral conversations</Card.Title><Card.Description>{status}</Card.Description></Card.Header>
+          <Card.Body className="gap-3">
+            <HeroText className="text-xs text-muted">Provider</HeroText>
+            <View className="flex-row flex-wrap gap-2">
+              {providers.filter((item) => item.available).map((item) => (
+                <Button key={item.id} size="sm" variant={provider === item.id ? 'primary' : 'secondary'} onPress={() => setProvider(item.id)}>
+                  <Button.Label>{item.displayName}</Button.Label>
+                </Button>
+              ))}
+            </View>
+            <Field label="Workspace" value={workspace} onChangeText={setWorkspace} placeholder="/path/to/workspace" />
+            <Field label="Title" value={title} onChangeText={setTitle} placeholder="可选" />
+            <ActionButton title="创建 v2 conversation" onPress={() => void createRemoteConversation()} disabled={!workspace.trim()} />
+          </Card.Body>
+        </Card>
+        <Card className="gap-3">
+          <Card.Header><Card.Title>Remote conversations</Card.Title></Card.Header>
+          <Card.Body className="gap-2">
+            {conversations.length === 0 ? <EmptyState text="尚无远端 conversation。" /> : conversations.map((item) => (
+              <Button key={item.id} variant={selectedId === item.id ? 'primary' : 'secondary'} onPress={() => {
+                setSelectedId(item.id);
+                socketRef.current?.subscribe(item.id, item.lastSequence, 200);
+              }} className="justify-start">
+                <Button.Label>{item.title || item.provider} · seq {item.lastSequence}</Button.Label>
+              </Button>
+            ))}
+          </Card.Body>
+        </Card>
+        {selected ? (
+          <Card className="gap-3">
+            <Card.Header><Card.Title>{selected.title || selected.provider}</Card.Title><Card.Description>{selected.workspace}</Card.Description></Card.Header>
+            <Card.Body className="gap-3">
+              <TextInput value={draft} onChangeText={setDraft} placeholder="发送 prompt" placeholderTextColor="#8a8f98" multiline style={styles.composerInput} />
+              <ActionButton title="发送" onPress={sendPrompt} disabled={!draft.trim()} />
+              {selectedEvents.slice(-30).map((event) => (
+                <Surface key={event.eventId} variant="secondary" className="rounded-lg p-3">
+                  <HeroText className="text-xs font-semibold text-foreground">{event.type} · {event.sequence}</HeroText>
+                  <HeroText className="mt-1 text-xs text-muted" numberOfLines={6}>{shortJson(event.payload)}</HeroText>
+                </Surface>
+              ))}
+            </Card.Body>
+          </Card>
+        ) : null}
+      </ScrollView>
     </Surface>
   );
 }

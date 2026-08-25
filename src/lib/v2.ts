@@ -168,6 +168,8 @@ export class V2ConversationSocket {
   private socket: WebSocket | null = null;
   private nextId = 1;
   private closedExplicitly = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectDelayMs = 1000;
 
   constructor(options: V2SocketOptions) { this.options = options; }
 
@@ -185,6 +187,7 @@ export class V2ConversationSocket {
     }
     this.socket = socket;
     socket.onopen = () => {
+      this.reconnectDelayMs = 1000;
       this.options.onStatus?.('open');
       for (const [conversationId, subscription] of this.subscriptions) {
         this.send('conversation.subscribe', { conversationId, afterSequence: subscription.afterSequence, limit: subscription.limit });
@@ -192,10 +195,27 @@ export class V2ConversationSocket {
     };
     socket.onmessage = (message) => this.handleMessage(typeof message.data === 'string' || message.data instanceof ArrayBuffer ? message.data : String(message.data));
     socket.onerror = () => { this.options.onStatus?.('error'); this.options.onError?.(new Error('TodeX v2 WebSocket error')); };
-    socket.onclose = () => { this.socket = null; this.options.onStatus?.('closed'); };
+    socket.onclose = () => {
+      this.socket = null;
+      this.options.onStatus?.('closed');
+      if (!this.closedExplicitly && !this.reconnectTimer) {
+        const delay = this.reconnectDelayMs;
+        this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, 30_000);
+        this.reconnectTimer = setTimeout(() => {
+          this.reconnectTimer = null;
+          this.connect();
+        }, delay);
+      }
+    };
   }
 
-  close(): void { this.closedExplicitly = true; this.socket?.close(); this.socket = null; }
+  close(): void {
+    this.closedExplicitly = true;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.socket?.close();
+    this.socket = null;
+  }
 
   subscribe(conversationId: string, afterSequence = 0, limit = 200): void {
     const current = this.subscriptions.get(conversationId);

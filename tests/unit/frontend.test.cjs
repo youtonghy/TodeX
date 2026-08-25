@@ -89,6 +89,7 @@ test('v2 socket reconnects subscriptions from the latest sequence', () => {
   sockets[1].onopen();
   assert.equal(sockets[1].sent[0].type, 'conversation.subscribe');
   assert.equal(sockets[1].sent[0].payload.afterSequence, 7);
+  client.close();
 });
 
 test('normalizes Codex reasoning effort aliases', () => {
