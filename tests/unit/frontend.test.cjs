@@ -7,6 +7,7 @@ const compiledDir = path.join(__dirname, '..', '..', 'dist', 'unit');
 const todex = require(path.join(compiledDir, 'todex.js'));
 const transport = require(path.join(compiledDir, 'transport.js'));
 const transportCrypto = require(path.join(compiledDir, 'transportCrypto.js'));
+const v2 = require(path.join(compiledDir, 'v2.js'));
 
 function baseSettings(overrides = {}) {
   return {
@@ -41,6 +42,53 @@ test('builds HTTP and WebSocket URLs from flexible server addresses', () => {
     todex.buildWebSocketUrl('ws://127.0.0.1:7345/path', '?enc=ml-kem-768'),
     'ws://127.0.0.1:7345/v1/ws?enc=ml-kem-768',
   );
+});
+
+test('builds v2 WebSocket URLs and parses protocol messages', () => {
+  assert.equal(v2.buildV2WebSocketUrl('https://agent.example.test/base'), 'wss://agent.example.test/v2/ws');
+  assert.equal(v2.buildV2WebSocketUrl('ws://127.0.0.1:7345'), 'ws://127.0.0.1:7345/v2/ws');
+  assert.deepEqual(v2.parseV2Message(JSON.stringify({ id: '1', type: 'server.result', payload: { ok: true } })), {
+    id: '1', type: 'server.result', payload: { ok: true },
+  });
+  assert.equal(v2.parseV2Message('{bad json}'), null);
+});
+
+test('v2 API client sends bearer auth and JSON requests', async () => {
+  const requests = [];
+  const client = new v2.V2ApiClient({
+    serverUrl: 'http://127.0.0.1:7345',
+    authToken: 'secret',
+    fetchImpl: async (url, init) => {
+      requests.push({ url, init });
+      return new Response(JSON.stringify({ conversationId: 'c1', turnId: 't1' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    },
+  });
+  await client.prompt('c1', 'hello');
+  assert.equal(requests[0].url, 'http://127.0.0.1:7345/v2/conversations/c1/prompt');
+  assert.equal(requests[0].init.headers.get('Authorization'), 'Bearer secret');
+  assert.equal(requests[0].init.headers.get('Content-Type'), 'application/json');
+});
+
+test('v2 socket reconnects subscriptions from the latest sequence', () => {
+  const sockets = [];
+  class FakeSocket {
+    static OPEN = 1;
+    readyState = 1;
+    sent = [];
+    constructor() { sockets.push(this); }
+    send(value) { this.sent.push(JSON.parse(value)); }
+    close() {}
+  }
+  const client = new v2.V2ConversationSocket({ serverUrl: 'http://127.0.0.1:7345', WebSocketImpl: FakeSocket });
+  client.connect();
+  sockets[0].onopen();
+  client.subscribe('c1', 0, 10);
+  sockets[0].onmessage({ data: JSON.stringify({ type: 'conversation.event', payload: { conversationId: 'c1', sequence: 7 } }) });
+  sockets[0].onclose();
+  client.connect();
+  sockets[1].onopen();
+  assert.equal(sockets[1].sent[0].type, 'conversation.subscribe');
+  assert.equal(sockets[1].sent[0].payload.afterSequence, 7);
 });
 
 test('normalizes Codex reasoning effort aliases', () => {

@@ -127,6 +127,7 @@ import {
   cursorFromEvent as transportCursorFromEvent,
   sessionIdFromEvent as transportSessionIdFromEvent,
 } from './src/lib/transport';
+import { V2ApiClient, V2ConversationSocket, type ConversationManifest, type ProviderDescriptor } from './src/lib/v2';
 
 type RootStackParamList = {
   Workspaces: undefined;
@@ -2398,6 +2399,7 @@ export default function App() {
   const pendingSocketFramesRef = useRef<PendingSocketFrame[]>([]);
   const pendingSocketFrameDrainRef = useRef<number | null>(null);
   const transportClientRef = useRef<TodeXTransportClient | null>(null);
+  const v2SocketRef = useRef<V2ConversationSocket | null>(null);
   const socketGenerationRef = useRef(0);
   const autoConnectAttemptedRef = useRef(false);
   const sessionCursorsRef = useRef(new Map<string, number>());
@@ -2455,6 +2457,39 @@ export default function App() {
   const [pluginsCatalogByConversation, setPluginsCatalogByConversation] = useState<Record<string, PluginsCatalogState>>({});
   const [memorySettingsByConversation, setMemorySettingsByConversation] = useState<Record<string, MemorySettingsState>>({});
   const [terminalById, setTerminalById] = useState<Record<string, TerminalClientState>>({});
+  const [v2Providers, setV2Providers] = useState<ProviderDescriptor[]>([]);
+  const [v2Conversations, setV2Conversations] = useState<ConversationManifest[]>([]);
+
+  useEffect(() => {
+    if (!hydrated || !settings.serverUrl.trim()) {
+      return;
+    }
+    const api = new V2ApiClient({ serverUrl: settings.serverUrl, authToken: settings.authToken });
+    let active = true;
+    void Promise.all([api.listProviders(), api.listConversations()])
+      .then(([providers, conversations]) => {
+        if (!active) return;
+        setV2Providers(providers.providers);
+        setV2Conversations(conversations.conversations);
+      })
+      .catch(() => {
+        if (!active) return;
+        setV2Providers([]);
+        setV2Conversations([]);
+      });
+    const socket = new V2ConversationSocket({
+      serverUrl: settings.serverUrl,
+      authToken: settings.authToken,
+      onError: () => { /* v1 remains the source of truth for legacy sessions. */ },
+    });
+    v2SocketRef.current = socket;
+    socket.connect();
+    return () => {
+      active = false;
+      socket.close();
+      if (v2SocketRef.current === socket) v2SocketRef.current = null;
+    };
+  }, [hydrated, settings.authToken, settings.serverUrl]);
 
   useEffect(() => {
     timelineRef.current = timeline;
@@ -7433,6 +7468,8 @@ export default function App() {
                   conversations={conversations}
                   settings={settings}
                   serverVersion={serverVersion}
+                  v2Providers={v2Providers}
+                  v2ConversationCount={v2Conversations.length}
                   connectionState={connectionState}
                   createWorkspace={createWorkspace}
                   selectWorkspace={selectWorkspace}
@@ -7639,6 +7676,7 @@ export default function App() {
                   connect={connect}
                   closeSocket={closeSocket}
                   refreshServerVersion={refreshServerVersion}
+                  v2Providers={v2Providers}
                 />
               )}
             </Stack.Screen>
@@ -7774,6 +7812,8 @@ function WorkspaceListScreen({
   conversations,
   settings,
   serverVersion,
+  v2Providers,
+  v2ConversationCount,
   connectionState,
   createWorkspace,
   selectWorkspace,
@@ -7785,6 +7825,8 @@ function WorkspaceListScreen({
   conversations: ConversationRecord[];
   settings: ConnectionSettings;
   serverVersion: ServerVersion | null;
+  v2Providers: ProviderDescriptor[];
+  v2ConversationCount: number;
   connectionState: string;
   createWorkspace: (name: string, path: string) => { workspace: WorkspaceRecord; conversation: ConversationRecord } | null;
   selectWorkspace: (workspaceId: string) => void;
@@ -7798,6 +7840,7 @@ function WorkspaceListScreen({
   const [pathPickerVisible, setPathPickerVisible] = useState(false);
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [renamingWorkspace, setRenamingWorkspace] = useState<WorkspaceRecord | null>(null);
+  const availableProviderCount = v2Providers.filter((provider) => provider.available).length;
 
   useLayoutEffect(() => {
     navigation.setOptions({
@@ -7871,7 +7914,7 @@ function WorkspaceListScreen({
         <View className="mx-4 mb-2 mt-1 flex-row items-center justify-between">
           <View>
             <HeroText className="text-2xl font-semibold text-foreground">TodeX</HeroText>
-            <HeroText className="mt-1 text-xs text-muted">移动端工作区</HeroText>
+            <HeroText className="mt-1 text-xs text-muted">移动端工作区 · v2 {availableProviderCount}/{v2Providers.length} provider · {v2ConversationCount} 个远端会话</HeroText>
           </View>
           <Chip
             color={connectionState === 'open' ? 'success' : 'default'}
@@ -10396,6 +10439,7 @@ function SettingsScreen({
   connect,
   closeSocket,
   refreshServerVersion,
+  v2Providers,
 }: NativeStackScreenProps<RootStackParamList, 'Settings'> & {
   settings: ConnectionSettings;
   setSettings: React.Dispatch<React.SetStateAction<ConnectionSettings>>;
@@ -10415,6 +10459,7 @@ function SettingsScreen({
   connect: () => void;
   closeSocket: (manual?: boolean) => void;
   refreshServerVersion: () => void;
+  v2Providers: ProviderDescriptor[];
 }) {
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [pairingScannerVisible, setPairingScannerVisible] = useState(false);
@@ -10745,6 +10790,7 @@ function SettingsScreen({
         </Card.Header>
         <Card.Body className="gap-2">
           <Diagnostic label="版本" value={serverVersion ? `${serverVersion.name} ${serverVersion.version}` : 'unknown'} />
+          <Diagnostic label="v2 Providers" value={v2Providers.filter((provider) => provider.available).map((provider) => provider.id).join(', ') || 'none'} />
           <Diagnostic label="数据目录" value={serverVersion?.data_dir ?? 'unknown'} />
           <Diagnostic label="工作区根目录" value={serverVersion?.workspace_root ?? 'unknown'} />
           <Diagnostic label="当前目录" value={activeWorkspace?.path ?? 'none'} />
