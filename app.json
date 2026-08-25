@@ -6,12 +6,8 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "splash": {
-      "image": "./assets/splash-icon.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
-    },
     "ios": {
+      "bundleIdentifier": "com.unbaked0692.todexmobile",
       "supportsTablet": true,
       "infoPlist": {
         "NSAppTransportSecurity": {
@@ -34,6 +30,15 @@
     "plugins": [
       "expo-secure-store",
       "expo-font",
+      "expo-status-bar",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#ffffff"
+        }
+      ],
       [
         "expo-build-properties",
         {

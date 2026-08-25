@@ -29,6 +29,15 @@ TodeX App is the mobile client for connecting to `todex-agentd`, managing worksp
 
 ## 快速开始 / Quick Start
 
+客户端基于 Expo SDK 57。升级或安装依赖后，使用 Expo Doctor 确认 Expo 与 React Native 依赖版本一致：
+
+The client targets Expo SDK 57. After installing or updating dependencies, use Expo Doctor to confirm that Expo and React Native package versions are aligned:
+
+```bash
+npx expo install --check
+npx expo-doctor
+```
+
 ### 1. 安装依赖 / Install
 
 ```bash
@@ -52,6 +61,10 @@ npm run android
 npm run ios
 npm run web
 ```
+
+`npm run ios` 会生成本地 iOS 工程并需要 CocoaPods CLI。仅使用 Simulator 中的 Expo Go 时，可运行 `npm run start`，再打开终端显示的 `exp://` 地址。
+
+`npm run ios` generates the local iOS project and requires the CocoaPods CLI. For Expo Go in the Simulator, run `npm run start` and open the `exp://` address printed by the command.
 
 You can also launch a target platform directly:
 
