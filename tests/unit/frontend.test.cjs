@@ -9,6 +9,8 @@ const todex = require(path.join(compiledDir, 'todex.js'));
 const transport = require(path.join(compiledDir, 'transport.js'));
 const transportCrypto = require(path.join(compiledDir, 'transportCrypto.js'));
 const v2 = require(path.join(compiledDir, 'v2.js'));
+const connectionError = require(path.join(compiledDir, 'connectionError.js'));
+const connectionProbe = require(path.join(compiledDir, 'connectionProbe.js'));
 
 function baseSettings(overrides = {}) {
   return {
@@ -903,4 +905,54 @@ test('main socket uses the single-argument WebSocket constructor', () => {
   const tryStart = appSource.indexOf('try {', connectStart);
   const headerOptions = appSource.slice(connectStart, tryStart).match(/Authorization/);
   assert.equal(headerOptions, null, 'connect() must not build header-only auth options');
+});
+
+test('normalizes loopback server URLs to origin without /v1', () => {
+  assert.equal(todex.normalizeServerUrl('http://localhost:7345/v2/ws'), 'http://127.0.0.1:7345');
+  assert.equal(todex.normalizeServerUrl('ws://127.0.0.1:7345/path'), 'http://127.0.0.1:7345');
+  assert.equal(todex.normalizeServerUrl('http://[::1]:7345'), 'http://127.0.0.1:7345');
+});
+
+test('rejects /v1 protocol and mismatched token origin', () => {
+  const inspected = connectionProbe.inspectServerUrl('http://127.0.0.1:7345/v1/ws');
+  assert.equal(inspected.error.code, 'protocol_mismatch');
+  assert.match(inspected.error.userMessage, /\/v2/);
+  assert.equal(connectionProbe.tokenMatchesOrigin('http://127.0.0.1:7345', 'http://localhost:7345'), true);
+  assert.equal(connectionProbe.tokenMatchesOrigin('http://127.0.0.1:7345', 'http://10.0.0.2:7345'), false);
+});
+
+test('reconnect delay grows from 2s to 30s', () => {
+  assert.equal(connectionProbe.nextReconnectDelayMs(0), 2000);
+  assert.equal(connectionProbe.nextReconnectDelayMs(1), 4000);
+  assert.equal(connectionProbe.nextReconnectDelayMs(8), 30000);
+  assert.equal(connectionProbe.nextReconnectDelayMs(99), 30000);
+});
+
+test('v2 prompt JSON includes skill resourceIds without file contents', async () => {
+  const bodies = [];
+  const client = new v2.V2ApiClient({
+    serverUrl: 'http://127.0.0.1:7345',
+    fetchImpl: async (_url, init) => {
+      bodies.push(JSON.parse(init.body));
+      return new Response(JSON.stringify({ conversationId: 'c1', turnId: 't1' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    },
+  });
+  await client.prompt('c1', 'use the skill', undefined, [{ resourceId: 'skill_abc', name: 'build' }]);
+  assert.deepEqual(bodies[0], {
+    text: 'use the skill',
+    skills: [{ resourceId: 'skill_abc', name: 'build' }],
+  });
+  assert.equal(JSON.stringify(bodies[0]).includes('/Users'), false);
+});
+
+test('provider display names keep Cloud Code out of conversation agents', () => {
+  assert.equal(v2.providerDisplayName('codex'), 'Codex CLI');
+  assert.equal(v2.providerDisplayName('acp'), 'ACP');
+  assert.equal(v2.providerDisplayName('claude-code'), 'Claude Code');
+  assert.equal(Object.values(v2.PROVIDER_DISPLAY_NAMES).includes('Cloud Code'), false);
+});
+
+test('connection failure labels are Chinese and classified', () => {
+  assert.equal(connectionError.connectionFailureLabel('protocol_mismatch'), '协议已废弃（/v1）');
+  assert.equal(connectionError.ConnectionError.authenticationFailed(401).retryable, false);
 });

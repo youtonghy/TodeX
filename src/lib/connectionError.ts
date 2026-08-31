@@ -8,14 +8,27 @@ export enum ConnectionErrorType {
   PROTOCOL_ERROR = 'PROTOCOL_ERROR',
   MESSAGE_TOO_LARGE = 'MESSAGE_TOO_LARGE',
   HEARTBEAT_TIMEOUT = 'HEARTBEAT_TIMEOUT',
+  INVALID_SERVER_URL = 'INVALID_SERVER_URL',
+  PROTOCOL_MISMATCH = 'PROTOCOL_MISMATCH',
+  WEBSOCKET_FAILED = 'WEBSOCKET_FAILED',
+  PROVIDER_UNAVAILABLE = 'PROVIDER_UNAVAILABLE',
 }
+
+export type ConnectionFailureCode =
+  | 'backend_unreachable'
+  | 'invalid_server_url'
+  | 'authentication_failed'
+  | 'protocol_mismatch'
+  | 'websocket_failed'
+  | 'provider_unavailable';
 
 export class ConnectionError extends Error {
   constructor(
     public type: ConnectionErrorType,
     public userMessage: string,
     public technicalDetails: string,
-    public retryable: boolean = false
+    public retryable: boolean = false,
+    public code: ConnectionFailureCode = 'backend_unreachable',
   ) {
     super(userMessage);
     this.name = 'ConnectionError';
@@ -24,36 +37,40 @@ export class ConnectionError extends Error {
   static networkOffline(details: string): ConnectionError {
     return new ConnectionError(
       ConnectionErrorType.NETWORK_OFFLINE,
-      '网络连接失败，请检查网络设置',
+      '后端未启动或地址不可达',
       details,
-      true
+      true,
+      'backend_unreachable',
     );
   }
 
   static timeout(details: string): ConnectionError {
     return new ConnectionError(
       ConnectionErrorType.TIMEOUT,
-      '连接超时，请检查网络状况',
+      '连接超时，请确认 Backend 已启动',
       details,
-      true
+      true,
+      'backend_unreachable',
     );
   }
 
   static connectionTimeout(): ConnectionError {
     return new ConnectionError(
       ConnectionErrorType.CONNECTION_TIMEOUT,
-      'WebSocket连接超时，请稍后重试',
+      'WebSocket 握手超时',
       'WebSocket connection timeout after 10s',
-      true
+      true,
+      'websocket_failed',
     );
   }
 
   static authenticationFailed(status: number): ConnectionError {
     return new ConnectionError(
       ConnectionErrorType.AUTHENTICATION_FAILED,
-      '身份验证失败，请检查连接设置',
+      'Token 缺失或无效',
       `HTTP ${status}`,
-      false
+      false,
+      'authentication_failed',
     );
   }
 
@@ -62,7 +79,8 @@ export class ConnectionError extends Error {
       ConnectionErrorType.SERVER_ERROR,
       '服务器暂时不可用，请稍后重试',
       `HTTP ${status}`,
-      true
+      true,
+      'backend_unreachable',
     );
   }
 
@@ -71,7 +89,8 @@ export class ConnectionError extends Error {
       ConnectionErrorType.PROTOCOL_ERROR,
       '请求失败，请检查网络连接',
       `HTTP ${status}`,
-      true
+      true,
+      'backend_unreachable',
     );
   }
 
@@ -80,7 +99,8 @@ export class ConnectionError extends Error {
       ConnectionErrorType.MESSAGE_TOO_LARGE,
       '消息过大，无法发送',
       `Message size ${size} exceeds limit ${max}`,
-      false
+      false,
+      'backend_unreachable',
     );
   }
 
@@ -89,7 +109,90 @@ export class ConnectionError extends Error {
       ConnectionErrorType.HEARTBEAT_TIMEOUT,
       '连接已断开，正在尝试重连',
       'Missed heartbeats',
-      true
+      true,
+      'websocket_failed',
     );
+  }
+
+  static invalidServerUrl(details: string): ConnectionError {
+    return new ConnectionError(
+      ConnectionErrorType.INVALID_SERVER_URL,
+      'Backend 地址无效',
+      details,
+      false,
+      'invalid_server_url',
+    );
+  }
+
+  static protocolMismatch(details: string): ConnectionError {
+    return new ConnectionError(
+      ConnectionErrorType.PROTOCOL_MISMATCH,
+      '协议已废弃，请使用 /v2（不要使用 /v1）',
+      details,
+      false,
+      'protocol_mismatch',
+    );
+  }
+
+  static websocketFailed(details: string): ConnectionError {
+    return new ConnectionError(
+      ConnectionErrorType.WEBSOCKET_FAILED,
+      'WebSocket 握手失败',
+      details,
+      true,
+      'websocket_failed',
+    );
+  }
+
+  static providerUnavailable(details: string): ConnectionError {
+    return new ConnectionError(
+      ConnectionErrorType.PROVIDER_UNAVAILABLE,
+      details || '当前没有可用的 Agent',
+      details,
+      false,
+      'provider_unavailable',
+    );
+  }
+
+  static unreachable(details: string): ConnectionError {
+    const lower = details.toLowerCase();
+    if (lower.includes('err_connection_refused') || lower.includes('econnrefused')) {
+      return new ConnectionError(
+        ConnectionErrorType.SERVER_UNREACHABLE,
+        'Backend 未启动或端口错误（连接被拒绝）',
+        details,
+        true,
+        'backend_unreachable',
+      );
+    }
+    if (lower.includes('failed to fetch') || lower.includes('network request failed')) {
+      return new ConnectionError(
+        ConnectionErrorType.SERVER_UNREACHABLE,
+        'Backend 未启动或地址不可达',
+        details,
+        true,
+        'backend_unreachable',
+      );
+    }
+    return ConnectionError.networkOffline(details);
+  }
+}
+
+export function connectionFailureLabel(code?: ConnectionFailureCode | ''): string {
+  switch (code) {
+    case 'backend_unreachable':
+      return 'Backend 未启动或端口错误';
+    case 'invalid_server_url':
+      return 'Backend 地址无效';
+    case 'authentication_failed':
+      return 'Token 缺失或无效';
+    case 'protocol_mismatch':
+      return '协议已废弃（/v1）';
+    case 'websocket_failed':
+      return 'WebSocket 握手失败';
+    case 'provider_unavailable':
+      return 'Agent 不可用';
+    default:
+      return '';
   }
 }

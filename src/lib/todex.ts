@@ -255,17 +255,40 @@ export function utf8ByteLength(value: string): number {
   return bytes;
 }
 
+function isLoopbackHostname(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '0:0:0:0:0:0:0:1';
+}
+
 export function normalizeServerUrl(raw: string): string {
   const value = raw.trim();
   if (!value) {
     return 'http://127.0.0.1:7345';
   }
 
-  if (/^https?:\/\//i.test(value) || /^wss?:\/\//i.test(value)) {
-    return value;
+  let candidate = value;
+  if (!/^https?:\/\//i.test(candidate) && !/^wss?:\/\//i.test(candidate)) {
+    if (candidate.startsWith('[') || candidate.includes('::')) {
+      candidate = `http://${candidate}`;
+    } else {
+      candidate = `http://${candidate}`;
+    }
   }
+  candidate = candidate.replace(/^ws:\/\//i, 'http://').replace(/^wss:\/\//i, 'https://');
 
-  return `http://${value}`;
+  try {
+    const parsed = new URL(candidate);
+    let hostname = parsed.hostname;
+    if (isLoopbackHostname(hostname)) {
+      hostname = '127.0.0.1';
+    }
+    const protocol = parsed.protocol === 'https:' ? 'https:' : 'http:';
+    const host = hostname.includes(':') ? `[${hostname}]` : hostname;
+    const origin = parsed.port ? `${protocol}//${host}:${parsed.port}` : `${protocol}//${host}`;
+    return origin.replace(/\/+$/, '');
+  } catch {
+    return candidate.replace(/\/+$/, '');
+  }
 }
 
 export function normalizeReasoningEffort(value: string | null | undefined): string | null {
@@ -1205,7 +1228,7 @@ export function eventId(event: ServerEvent): string {
 
 export function requestIdFromEvent(event: ServerEvent): string | null {
   const data = eventPayloadData(event);
-  const value = data.requestId ?? data.request_id ?? data.id;
+  const value = data.requestId ?? data.request_id ?? data.permissionId ?? data.permission_id ?? data.id;
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
@@ -1248,6 +1271,8 @@ export function inferApprovalResponseType(requestType: string): string {
       return 'codex.mcp.elicitation.respond';
     case 'codex.account.chatgptAuthTokens.refresh':
       return 'codex.account.chatgptAuthTokens.refresh.respond';
+    case 'conversation.permission.request':
+      return 'conversation.permission.respond';
     default:
       return 'codex.approval.permissions.respond';
   }
@@ -1290,6 +1315,10 @@ export function titleForRequest(type: string, data: Record<string, unknown>): st
       return `${base}tool call`;
     case 'codex.account.chatgptAuthTokens.refresh':
       return `${base}token refresh`;
+    case 'conversation.permission.request':
+      return typeof data.title === 'string' && data.title.trim()
+        ? data.title
+        : `${base}权限审批`;
     default:
       return `${base}${type}`;
   }

@@ -11,6 +11,25 @@ export const MAX_MESSAGE_SIZE = 4 * 1024 * 1024;
 
 export type ProviderKind = 'acp' | 'codex' | 'pi' | 'claude-code';
 
+export const PROVIDER_DISPLAY_NAMES: Record<ProviderKind, string> = {
+  acp: 'ACP',
+  codex: 'Codex CLI',
+  pi: 'Pi',
+  'claude-code': 'Claude Code',
+};
+
+export function providerDisplayName(provider: ProviderKind | string, fallback?: string): string {
+  if (provider in PROVIDER_DISPLAY_NAMES) {
+    return PROVIDER_DISPLAY_NAMES[provider as ProviderKind];
+  }
+  return fallback?.trim() || provider;
+}
+
+export type PromptSkillRef = {
+  resourceId: string;
+  name?: string;
+};
+
 export type ProviderDescriptor = {
   id: ProviderKind;
   displayName: string;
@@ -49,6 +68,9 @@ export type McpServerCatalogDescriptor = {
   enabled: boolean;
   active: boolean;
   shadowedBy?: string;
+  tools?: Array<{ name: string; description?: string }>;
+  authStatus?: string;
+  error?: string;
 };
 
 export type McpCatalog = {
@@ -227,9 +249,12 @@ export class V2ApiClient {
     return this.request(`/v2/conversations/${encodeURIComponent(id)}/events?${query}`);
   }
 
-  async prompt(id: string, text: string, model?: string): Promise<{ conversationId: string; turnId: string }> {
+  async prompt(id: string, text: string, model?: string, skills?: PromptSkillRef[]): Promise<{ conversationId: string; turnId: string }> {
+    const body: Record<string, unknown> = { text };
+    if (model) body.model = model;
+    if (skills?.length) body.skills = skills;
     return this.request(`/v2/conversations/${encodeURIComponent(id)}/prompt`, {
-      method: 'POST', body: JSON.stringify(model ? { text, model } : { text }),
+      method: 'POST', body: JSON.stringify(body),
     });
   }
 
@@ -434,9 +459,18 @@ export class V2ConversationSocket {
     this.send('conversation.subscribe', { conversationId, afterSequence, limit });
   }
 
-  sendPrompt(conversationId: string, text: string, model?: string): void { this.send('conversation.prompt', { conversationId, text, ...(model ? { model } : {}) }); }
+  sendPrompt(conversationId: string, text: string, model?: string, skills?: PromptSkillRef[]): void {
+    this.send('conversation.prompt', {
+      conversationId,
+      text,
+      ...(model ? { model } : {}),
+      ...(skills?.length ? { skills } : {}),
+    });
+  }
   cancel(conversationId: string): void { this.send('conversation.cancel', { conversationId }); }
-  respondPermission(conversationId: string, permissionId: string, decision: Record<string, unknown>): void { this.send('conversation.permission.respond', { conversationId, permissionId, ...decision }); }
+  respondPermission(conversationId: string, permissionId: string, decision: Record<string, unknown>): void {
+    this.send('conversation.permission.respond', { conversationId, permissionId, decision });
+  }
   ping(): void {
     const id = this.send('server.ping', {});
     if (id) this.pendingPingIds.add(id);

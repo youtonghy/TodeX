@@ -128,8 +128,9 @@ import {
   cursorFromEvent as transportCursorFromEvent,
   sessionIdFromEvent as transportSessionIdFromEvent,
 } from './src/lib/transport';
-import { ConnectionError } from './src/lib/connectionError';
-import { V2ApiClient, V2ConversationSocket, buildV2WebSocketUrlWithOptions, type ConversationEvent, type ConversationManifest, type ProviderDescriptor, type ProviderKind } from './src/lib/v2';
+import { ConnectionError, connectionFailureLabel } from './src/lib/connectionError';
+import { probeBackendConnection, nextReconnectDelayMs, inspectServerUrl, tokenMatchesOrigin } from './src/lib/connectionProbe';
+import { V2ApiClient, V2ConversationSocket, buildV2WebSocketUrlWithOptions, providerDisplayName, type ConversationEvent, type ConversationManifest, type ProviderDescriptor, type ProviderKind, type SkillCatalogDescriptor } from './src/lib/v2';
 import { CapabilitiesScreen, type CatalogState } from './src/components/CapabilitiesScreen';
 
 type RootStackParamList = {
@@ -179,6 +180,10 @@ type ConversationRecord = {
   mode?: 'plan' | 'implement';
   goalStatus?: string;
   goalObjective?: string;
+  provider?: ProviderKind | string;
+  providerProfile?: string;
+  v2ConversationId?: string;
+  lastSequence?: number;
   createdAt: number;
   updatedAt: number;
 };
@@ -447,6 +452,8 @@ type SelectedSkillAttachment = {
   name: string;
   path: string;
   displayName: string;
+  resourceId?: string;
+  provider?: ProviderKind | string;
 };
 
 type ThreadMenuAction =
@@ -487,6 +494,7 @@ type ConnectionHealth = {
   latencyMs: number | null;
   lastCheckedAt: number | null;
   error: string;
+  code?: string;
 };
 
 const CONNECTION_HEALTH_INTERVAL_MS = 5000;
@@ -1093,6 +1101,7 @@ const MENTION_HISTORY_STORAGE_KEY = 'todex.mobile.mentionHistory.v1';
 const SESSION_CURSORS_STORAGE_KEY = 'todex.mobile.sessionCursors.v1';
 const EXPERIMENTAL_FEATURES_STORAGE_KEY = 'todex.mobile.experimentalFeatures.v1';
 const TOKEN_STORAGE_KEY = 'todex.mobile.token.v1';
+const TOKEN_ORIGIN_STORAGE_KEY = 'todex.mobile.tokenOrigin.v1';
 const JSON_SAVE_DEBOUNCE_MS = 350;
 const SESSION_CURSOR_SAVE_DEBOUNCE_MS = 800;
 const WORKSPACE_SYNC_DEBOUNCE_MS = 900;
@@ -1102,7 +1111,6 @@ const SOCKET_FRAME_DECODE_BUDGET_MS = 10;
 const MAX_TRANSPORT_HELLO_SESSION_CURSORS = 12;
 const MAX_TIMELINE_ITEMS = 260;
 const MAX_EVENTS = 220;
-const RECONNECT_DELAY_MS = 2500;
 const CHAT_ATTACH_REPLAY_LIMIT = 200;
 const CHAT_BOTTOM_FOLLOW_THRESHOLD = 72;
 const TERMINAL_MAX_OUTPUT_ENTRIES = 420;
@@ -1367,6 +1375,7 @@ const defaultConnectionHealth: ConnectionHealth = {
   latencyMs: null,
   lastCheckedAt: null,
   error: '',
+  code: '',
 };
 
 function modelCommandInitialValue(workspace: WorkspaceRecord, settings: ConnectionSettings): string {
@@ -1555,6 +1564,115 @@ function healthLabelOf(health: ConnectionHealth): string {
     default:
       return '等待检测';
   }
+}
+
+function isV2Conversation(conversation: ConversationRecord | null | undefined): boolean {
+  return Boolean(conversation?.v2ConversationId || (conversation?.provider && conversation.provider !== ''));
+}
+
+function conversationFromManifest(manifest: ConversationManifest, workspaceId: string): ConversationRecord {
+  const createdAt = Date.parse(manifest.createdAt) || Date.now();
+  const updatedAt = Date.parse(manifest.updatedAt) || createdAt;
+  return {
+    id: manifest.id,
+    workspaceId,
+    title: manifest.title || providerDisplayName(manifest.provider),
+    preview: '',
+    nativeStatus: manifest.status,
+    archived: false,
+    sessionId: `v2_${manifest.id}`,
+    threadId: '',
+    localAdapterState: 'idle',
+    mode: 'implement',
+    goalStatus: '',
+    goalObjective: '',
+    provider: manifest.provider,
+    providerProfile: manifest.providerProfile,
+    v2ConversationId: manifest.id,
+    lastSequence: manifest.lastSequence,
+    createdAt,
+    updatedAt,
+  };
+}
+
+function mergeManifestConversations(
+  current: ConversationRecord[],
+  manifests: ConversationManifest[],
+  workspaces: WorkspaceRecord[],
+): ConversationRecord[] {
+  const next = [...current];
+  for (const manifest of manifests) {
+    const workspace = workspaces.find((item) => item.path === manifest.workspace)
+      ?? workspaces.find((item) => manifest.workspace.startsWith(item.path));
+    if (!workspace) {
+      continue;
+    }
+    const record = conversationFromManifest(manifest, workspace.id);
+    const existing = next.findIndex((item) => item.v2ConversationId === manifest.id || item.id === manifest.id);
+    if (existing >= 0) {
+      next[existing] = {
+        ...next[existing],
+        ...record,
+        sessionId: next[existing].sessionId || record.sessionId,
+      };
+    } else {
+      next.unshift(record);
+    }
+  }
+  return next.sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+function classifyV2ConversationEvent(event: ConversationEvent, workspaceId: string): TimelineEntry | null {
+  const payload = event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
+    ? event.payload as Record<string, unknown>
+    : {};
+  const content = typeof payload.content === 'string'
+    ? payload.content
+    : typeof payload.text === 'string'
+      ? payload.text
+      : typeof payload.message === 'string'
+        ? payload.message
+        : '';
+  const role = typeof payload.role === 'string' ? payload.role : '';
+  if (event.type === 'message.created' && (role === 'user' || role === 'human')) {
+    return {
+      id: event.eventId,
+      kind: 'outgoing',
+      title: 'You',
+      subtitle: content,
+      raw: shortJson(event),
+      at: Date.parse(event.time) || Date.now(),
+      workspaceId,
+      conversationId: event.conversationId,
+    };
+  }
+  if (event.type === 'message.created' || event.type.endsWith('.delta') || event.type.includes('agent') || event.type.includes('assistant')) {
+    if (content || event.type === 'message.created') {
+      return {
+        id: event.eventId,
+        kind: 'incoming',
+        title: 'Agent',
+        subtitle: content || event.type,
+        raw: shortJson(event),
+        at: Date.parse(event.time) || Date.now(),
+        workspaceId,
+        conversationId: event.conversationId,
+      };
+    }
+  }
+  if (event.type === 'skill.injected' || event.type === 'permission.requested' || event.type === 'turn.failed') {
+    return {
+      id: event.eventId,
+      kind: 'system',
+      title: event.type,
+      subtitle: content || shortJson(payload),
+      raw: shortJson(event),
+      at: Date.parse(event.time) || Date.now(),
+      workspaceId,
+      conversationId: event.conversationId,
+    };
+  }
+  return null;
 }
 
 function modeLabelOf(mode: ConversationRecord['mode']): string {
@@ -2408,6 +2526,8 @@ export default function App() {
   const healthProbeSeqRef = useRef(0);
   const loadedNativeThreadHistoryRef = useRef(new Map<string, number>());
   const unmaterializedNativeThreadIdsRef = useRef(new Set<string>());
+  const lastFailureRetryableRef = useRef(true);
+  const reconnectAttemptRef = useRef(0);
 
   const [hydrated, setHydrated] = useState(false);
   const [autoConnectEnabled, setAutoConnectEnabled] = useState(false);
@@ -2468,6 +2588,7 @@ export default function App() {
         if (!active) return;
         setV2Providers(providers.providers);
         setV2Conversations(conversations.conversations);
+        setConversations((current) => mergeManifestConversations(current, conversations.conversations, workspacesRef.current));
       })
       .catch(() => {
         if (!active) return;
@@ -2750,6 +2871,7 @@ export default function App() {
         storedSessionCursors,
         storedExperimentalFeatures,
         storedToken,
+        storedTokenOrigin,
       ] = await Promise.all([
         loadJson<PersistedSettings | null>(SETTINGS_STORAGE_KEY, null),
         loadJson<WorkspaceRecord[]>(WORKSPACES_STORAGE_KEY, []),
@@ -2760,13 +2882,18 @@ export default function App() {
         loadJson<Record<string, number>>(SESSION_CURSORS_STORAGE_KEY, {}),
         loadJson<Partial<ExperimentalFeatureSettings> | null>(EXPERIMENTAL_FEATURES_STORAGE_KEY, null),
         loadSecret(TOKEN_STORAGE_KEY),
+        loadSecret(TOKEN_ORIGIN_STORAGE_KEY),
       ]);
 
       if (!alive) {
         return;
       }
 
-      const nextSettings = fromPersistedSettings(storedSettings, storedToken);
+      const nextSettings = fromPersistedSettings(
+        storedSettings,
+        tokenMatchesOrigin(storedTokenOrigin, storedSettings?.serverUrl || defaultSettings.serverUrl) ? storedToken : '',
+      );
+      nextSettings.serverUrl = normalizeServerUrl(nextSettings.serverUrl);
       const normalizedWorkspaces = storedWorkspaces.map((workspace) => ({
         ...workspace,
         reasoningEffort: normalizeReasoningEffort(workspace.reasoningEffort),
@@ -2873,6 +3000,7 @@ export default function App() {
     }
     void saveJson(SETTINGS_STORAGE_KEY, toPersistedSettings(settings));
     void saveSecret(TOKEN_STORAGE_KEY, settings.authToken);
+    void saveSecret(TOKEN_ORIGIN_STORAGE_KEY, settings.authToken ? normalizeServerUrl(settings.serverUrl) : '');
   }, [hydrated, settings]);
 
   const syncWorkspacesToBackend = useCallback(
@@ -4144,15 +4272,54 @@ export default function App() {
         return;
       }
       if (messageType === 'conversation.event') {
-        // Conversation-plane events are rendered by the dedicated v2 screen,
-        // not the legacy workbench timeline.
+        const payload = parsed.payload && typeof parsed.payload === 'object'
+          ? parsed.payload as Record<string, unknown>
+          : parsed;
+        const conversationId = typeof payload.conversationId === 'string' ? payload.conversationId : '';
+        const conversation = conversationsRef.current.find((item) => item.id === conversationId || item.v2ConversationId === conversationId);
+        if (conversation && typeof payload.type === 'string') {
+          const event = payload as unknown as ConversationEvent;
+          const entry = classifyV2ConversationEvent(event, conversation.workspaceId);
+          if (entry) {
+            upsertChatTimeline(entry, event.type.includes('delta'));
+          }
+          if (event.type === 'turn.started') {
+            setConversationThinking(conversation.id, true);
+          }
+          if (event.type === 'turn.completed' || event.type === 'turn.cancelled' || event.type === 'turn.failed') {
+            setConversationThinking(conversation.id, false);
+          }
+          if (typeof event.sequence === 'number') {
+            updateConversation(conversation.id, { lastSequence: event.sequence, updatedAt: Date.now() });
+          }
+          if (event.type === 'permission.requested') {
+            const inner = event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
+              ? event.payload as Record<string, unknown>
+              : {};
+            const permissionId = typeof inner.permissionId === 'string' ? inner.permissionId : '';
+            if (permissionId) {
+              enqueueServerEvent({
+                type: 'conversation.permission.request',
+                payload: {
+                  requestId: permissionId,
+                  permissionId,
+                  conversationId,
+                  sessionId: conversation.sessionId,
+                  title: inner.title,
+                  kind: inner.kind,
+                  details: inner.details,
+                },
+              });
+            }
+          }
+        }
         return;
       }
       enqueueServerEvent(parsed as unknown as ServerEvent);
     } catch (error) {
       setLastError(error instanceof Error ? error.message : 'failed to parse websocket message');
     }
-  }, [enqueueServerEvent]);
+  }, [enqueueServerEvent, setConversationThinking, updateConversation, upsertChatTimeline]);
 
   const scheduleSocketFrameDrain = useCallback(() => {
     if (pendingSocketFrameDrainRef.current !== null) {
@@ -4318,67 +4485,153 @@ export default function App() {
     closeSocket(false);
     setLastError('');
     setConnectionState('connecting');
+    setConnectionHealth((current) => ({ ...current, status: 'checking', error: '', code: '' }));
 
-    let crypto: TransportCryptoSession | null = null;
-    try {
-      crypto = createTransportCryptoSession(settings);
-    } catch (error) {
-      setConnectionState('error');
-      setLastError(error instanceof Error ? error.message : '无法初始化加密连接');
-      return;
-    }
-
-    const wsUrl = buildV2WebSocketUrlWithOptions(settings.serverUrl, {
-      cryptoQueryString: crypto?.queryString,
-      authToken: settings.authToken,
-    });
-
-    // Single-argument constructor, matching the Desktop session: authentication
-    // rides on the URL (access_token + pairing query). The old three-argument
-    // RN form passed headers in a position Electron ignores, which only worked
-    // because the token was already in the URL.
-    try {
-      const socket = new WebSocket(wsUrl);
-      const generation = socketGenerationRef.current;
-      socketRef.current = socket;
-      socketCryptoRef.current = crypto;
-
-      socket.onopen = () => {
-        setConnectionState('open');
-        // Replaces the legacy transport hello: resume Codex sessions from the
-        // client-side cursors so events emitted while disconnected are
-        // replayed by the backend.
-        sendSessionResume(getSessionCursorSnapshot());
-        void checkConnectionHealth();
-        void refreshServerVersion();
-        void syncWorkspacesFromBackend();
-      };
-
-      socket.onmessage = (event) => {
-        enqueueSocketFrame({
-          data: String(event.data),
-          generation,
-          crypto: socketCryptoRef.current,
-        });
-      };
-
-      socket.onerror = () => {
+    void (async () => {
+      const inspected = inspectServerUrl(settings.serverUrl);
+      if (inspected.error) {
+        lastFailureRetryableRef.current = inspected.error.retryable;
         setConnectionState('error');
-        setLastError('websocket error');
-      };
+        setLastError(inspected.error.userMessage);
+        setConnectionHealth({
+          status: 'offline',
+          latencyMs: null,
+          lastCheckedAt: Date.now(),
+          error: inspected.error.userMessage,
+          code: inspected.error.code,
+        });
+        return;
+      }
 
-      socket.onclose = () => {
-        setConnectionState((current) => (current === 'open' || current === 'connecting' ? 'closed' : current));
-        if (socketRef.current === socket) {
-          socketCryptoRef.current = null;
+      const probe = await probeBackendConnection({
+        serverUrl: inspected.origin,
+        authToken: settings.authToken,
+      });
+      if (!probe.ok || probe.error) {
+        const error = probe.error ?? ConnectionError.unreachable('backend probe failed');
+        lastFailureRetryableRef.current = error.retryable;
+        setConnectionState('error');
+        setLastError(error.userMessage);
+        setConnectionHealth({
+          status: 'offline',
+          latencyMs: null,
+          lastCheckedAt: Date.now(),
+          error: error.userMessage,
+          code: error.code,
+        });
+        if (probe.version) {
+          setServerVersion({
+            name: probe.version.name,
+            version: probe.version.version,
+            data_dir: probe.version.dataDir || '',
+            workspace_root: probe.version.workspaceRoot || '',
+          });
         }
-      };
-    } catch (error) {
-      setConnectionState('error');
-      socketCryptoRef.current = null;
-      setLastError(error instanceof Error ? error.message : 'failed to connect');
-    }
-  }, [checkConnectionHealth, closeSocket, enqueueSocketFrame, getSessionCursorSnapshot, refreshServerVersion, sendSessionResume, settings, syncWorkspacesFromBackend]);
+        if (probe.providers.length) {
+          setV2Providers(probe.providers);
+        }
+        return;
+      }
+
+      setV2Providers(probe.providers);
+      if (probe.version) {
+        setServerVersion({
+          name: probe.version.name,
+          version: probe.version.version,
+          data_dir: probe.version.dataDir || '',
+          workspace_root: probe.version.workspaceRoot || '',
+        });
+      }
+      setConnectionHealth({
+        status: 'online',
+        latencyMs: null,
+        lastCheckedAt: Date.now(),
+        error: '',
+        code: '',
+      });
+
+      let crypto: TransportCryptoSession | null = null;
+      try {
+        crypto = createTransportCryptoSession({ ...settings, serverUrl: inspected.origin });
+      } catch (error) {
+        lastFailureRetryableRef.current = false;
+        setConnectionState('error');
+        setLastError(error instanceof Error ? error.message : '无法初始化加密连接');
+        return;
+      }
+
+      const wsUrl = buildV2WebSocketUrlWithOptions(inspected.origin, {
+        cryptoQueryString: crypto?.queryString,
+        authToken: settings.authToken,
+      });
+
+      try {
+        const socket = new WebSocket(wsUrl);
+        const generation = socketGenerationRef.current;
+        socketRef.current = socket;
+        socketCryptoRef.current = crypto;
+
+        socket.onopen = () => {
+          reconnectAttemptRef.current = 0;
+          lastFailureRetryableRef.current = true;
+          setConnectionState('open');
+          sendSessionResume(getSessionCursorSnapshot());
+          void checkConnectionHealth();
+          void refreshServerVersion();
+          void syncWorkspacesFromBackend();
+          for (const conversation of conversationsRef.current) {
+            if (conversation.v2ConversationId) {
+              try {
+                sendRawProtocolFrame({
+                  id: createRequestId('sub'),
+                  type: 'conversation.subscribe',
+                  payload: {
+                    conversationId: conversation.v2ConversationId,
+                    afterSequence: conversation.lastSequence ?? 0,
+                    limit: 200,
+                  },
+                });
+              } catch {
+                // subscribe is best-effort after resume
+              }
+            }
+          }
+        };
+
+        socket.onmessage = (event) => {
+          enqueueSocketFrame({
+            data: String(event.data),
+            generation,
+            crypto: socketCryptoRef.current,
+          });
+        };
+
+        socket.onerror = () => {
+          lastFailureRetryableRef.current = true;
+          setConnectionState('error');
+          setLastError(ConnectionError.websocketFailed(wsUrl).userMessage);
+          setConnectionHealth((current) => ({
+            ...current,
+            status: 'offline',
+            error: ConnectionError.websocketFailed(wsUrl).userMessage,
+            code: 'websocket_failed',
+          }));
+        };
+
+        socket.onclose = () => {
+          setConnectionState((current) => (current === 'open' || current === 'connecting' ? 'closed' : current));
+          if (socketRef.current === socket) {
+            socketCryptoRef.current = null;
+          }
+        };
+      } catch (error) {
+        lastFailureRetryableRef.current = true;
+        setConnectionState('error');
+        socketCryptoRef.current = null;
+        setLastError(error instanceof Error ? error.message : ConnectionError.websocketFailed(wsUrl).userMessage);
+      }
+    })();
+  }, [checkConnectionHealth, closeSocket, enqueueSocketFrame, getSessionCursorSnapshot, refreshServerVersion, sendRawProtocolFrame, sendSessionResume, settings, syncWorkspacesFromBackend]);
 
   useEffect(() => {
     if (!hydrated || !autoConnectEnabled || manualDisconnectRef.current) {
@@ -4387,15 +4640,20 @@ export default function App() {
     if (connectionState !== 'closed' && connectionState !== 'error') {
       return;
     }
+    if (!lastFailureRetryableRef.current) {
+      return;
+    }
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
     }
+    const delay = nextReconnectDelayMs(reconnectAttemptRef.current);
+    reconnectAttemptRef.current += 1;
     reconnectTimerRef.current = setTimeout(() => {
       reconnectTimerRef.current = null;
       if (!manualDisconnectRef.current) {
         connect();
       }
-    }, RECONNECT_DELAY_MS);
+    }, delay);
     return () => {
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
@@ -6071,33 +6329,72 @@ export default function App() {
     return true;
   }, [getConversationContext, sendNativeThreadAction]);
 
-  const createConversation = useCallback((workspaceId: string) => {
+  const createConversation = useCallback((
+    workspaceId: string,
+    options?: { provider: ProviderKind; providerProfile?: string; title?: string },
+  ) => {
     const workspace = workspacesRef.current.find((item) => item.id === workspaceId);
     if (!workspace) {
       Alert.alert('未找到工作区', '请返回后重新选择工作区。');
       return null;
     }
+    if (!options?.provider) {
+      Alert.alert('请选择 Agent', '新建对话时必须选择一个可用的 Agent。');
+      return null;
+    }
 
-    const nextConversation = createDefaultConversation(workspace);
-    setConversations((current) => [nextConversation, ...current]);
+    const placeholder = {
+      ...createDefaultConversation(workspace),
+      title: options.title?.trim() || '新对话',
+      provider: options.provider,
+      providerProfile: options.providerProfile,
+    };
+    setConversations((current) => [placeholder, ...current]);
     setActiveWorkspaceId(workspace.id);
-    setActiveConversationId(nextConversation.id);
-    appendTimeline(makeSystemEntry('New native thread', '正在通过 Codex 原生 thread/start 创建新对话。', workspace.id, nextConversation.id));
+    setActiveConversationId(placeholder.id);
+    appendTimeline(makeSystemEntry(
+      '正在创建对话',
+      `Agent：${providerDisplayName(options.provider)}`,
+      workspace.id,
+      placeholder.id,
+    ));
 
     void (async () => {
       try {
-        await startLocalAdapter(workspace, nextConversation);
-        const threadId = await ensureThreadId(workspace, nextConversation, true);
-        unmaterializedNativeThreadIdsRef.current.add(threadId);
-        void requestNativeThreadList(workspace.id).catch(() => undefined);
+        const api = new V2ApiClient({ serverUrl: settings.serverUrl, authToken: settings.authToken });
+        const created = await api.createConversation({
+          provider: options.provider,
+          workspace: workspace.path,
+          title: options.title?.trim() || undefined,
+          providerProfile: options.providerProfile,
+        });
+        const record = conversationFromManifest(created, workspace.id);
+        setConversations((current) => [
+          record,
+          ...current.filter((item) => item.id !== placeholder.id && item.id !== record.id),
+        ]);
+        setV2Conversations((current) => [created, ...current.filter((item) => item.id !== created.id)]);
+        setActiveConversationId(record.id);
+        try {
+          sendRawProtocolFrame({
+            id: createRequestId('sub'),
+            type: 'conversation.subscribe',
+            payload: { conversationId: created.id, afterSequence: 0, limit: 200 },
+          });
+        } catch {
+          // HTTP create succeeded; subscribe retries on next connect.
+        }
+        appendTimeline(makeSystemEntry('对话已创建', created.provider, workspace.id, record.id));
       } catch (error) {
-        const message = error instanceof Error ? localTurnErrorMessage(error.message) : '创建原生 thread 失败';
+        setConversations((current) => current.filter((item) => item.id !== placeholder.id));
+        const message = error instanceof Error ? error.message : '创建对话失败';
         setLastError(message);
+        Alert.alert('创建对话失败', message);
       }
     })();
 
-    return nextConversation;
-  }, [appendTimeline, ensureThreadId, requestNativeThreadList, startLocalAdapter]);
+    return placeholder;
+  }, [appendTimeline, sendRawProtocolFrame, settings.authToken, settings.serverUrl]);
 
   const renameConversation = useCallback((conversationId: string, title: string) => {
     const nextTitle = title.trim();
@@ -6210,6 +6507,55 @@ export default function App() {
     }
   }, [getConversationContext, sendNativeThreadAction, updateConversation]);
 
+  const sendV2Prompt = useCallback(
+    (
+      text: string,
+      conversationId = activeConversationRef.current,
+      skills: SelectedSkillAttachment[] = [],
+    ) => {
+      const context = getConversationContext(conversationId);
+      if (!context) {
+        Alert.alert('未选择对话', '请先选择工作区和对话。');
+        return false;
+      }
+      const { workspace, conversation } = context;
+      const v2Id = conversation.v2ConversationId || (isV2Conversation(conversation) ? conversation.id : '');
+      if (!v2Id) {
+        Alert.alert('当前不是 v2 对话', '请新建对话后再发送。');
+        return false;
+      }
+      const skillRefs = skills
+        .filter((skill) => Boolean(skill.resourceId))
+        .map((skill) => ({ resourceId: skill.resourceId as string, name: skill.name }));
+      setConversationThinking(conversation.id, true);
+      appendTimeline(makeSystemEntry(
+        '正在思考',
+        skillRefs.length ? `已附带 ${skillRefs.length} 个 Skill，由后端注入。` : '请求已发给 Backend。',
+        workspace.id,
+        conversation.id,
+      ));
+      const sent = sendRawProtocolFrame({
+        id: createRequestId('prompt'),
+        type: 'conversation.prompt',
+        payload: {
+          conversationId: v2Id,
+          text,
+          ...(skillRefs.length ? { skills: skillRefs } : {}),
+        },
+      });
+      if (!sent) {
+        setConversationThinking(conversation.id, false);
+        setLastError('请先连接 Backend。');
+        return false;
+      }
+      if (conversation.title === '新对话' && text.trim()) {
+        updateConversation(conversation.id, { title: text.slice(0, 18), updatedAt: Date.now() });
+      }
+      return true;
+    },
+    [appendTimeline, getConversationContext, sendRawProtocolFrame, setConversationThinking, updateConversation],
+  );
+
   const sendLocalTurn = useCallback(
     async (
       text: string,
@@ -6297,9 +6643,14 @@ export default function App() {
   );
 
   useEffect(() => {
-    sendQueuedChatDraftRef.current = (submission, conversationId) =>
-      sendLocalTurn(submission.text, 'implement', conversationId, submission.attachments, submission.skills);
-  }, [sendLocalTurn]);
+    sendQueuedChatDraftRef.current = async (submission, conversationId) => {
+      const conversation = conversationsRef.current.find((item) => item.id === conversationId) ?? null;
+      if (isV2Conversation(conversation)) {
+        return sendV2Prompt(submission.text, conversationId, submission.skills);
+      }
+      return sendLocalTurn(submission.text, 'implement', conversationId, submission.attachments, submission.skills);
+    };
+  }, [sendLocalTurn, sendV2Prompt]);
 
   const toggleSelectedSkill = useCallback((conversationId: string, skill: SkillListItem) => {
     if (!skill.enabled) {
@@ -6320,9 +6671,67 @@ export default function App() {
     });
   }, [setConversationSelectedSkills]);
 
+  const toggleCatalogSkill = useCallback((conversationId: string, skill: SkillCatalogDescriptor, provider: ProviderKind) => {
+    if (!skill.valid) {
+      Alert.alert('Skill 无效', skill.error || '该 Skill 当前不能添加到下一条消息。');
+      return;
+    }
+    const nextSkill: SelectedSkillAttachment = {
+      name: skill.name,
+      path: skill.source,
+      displayName: skill.name,
+      resourceId: skill.resourceId,
+      provider,
+    };
+    setConversationSelectedSkills(conversationId, (current) => {
+      const exists = current.some((item) => item.resourceId === skill.resourceId || (item.name === skill.name && item.path === skill.source));
+      if (exists) {
+        return current.filter((item) => item.resourceId !== skill.resourceId && (item.name !== skill.name || item.path !== skill.source));
+      }
+      return [...current, nextSkill];
+    });
+  }, [setConversationSelectedSkills]);
+
+  const callMcpTool = useCallback((conversationId: string, resourceId: string, toolName: string, args: Record<string, unknown> = {}) => {
+    const conversation = conversationsRef.current.find((item) => item.id === conversationId) ?? null;
+    const workspace = conversation
+      ? workspacesRef.current.find((item) => item.id === conversation.workspaceId) ?? null
+      : null;
+    const v2Id = conversation?.v2ConversationId || conversation?.id;
+    if (!conversation || !workspace || !isV2Conversation(conversation) || !v2Id) {
+      Alert.alert('需要 v2 对话', '请先新建对话后再调用 MCP。');
+      return false;
+    }
+    appendTimeline(makeSystemEntry('正在调用 MCP', toolName, workspace.id, conversation.id));
+    return Boolean(sendRawProtocolFrame({
+      id: createRequestId('mcp'),
+      type: 'mcp.call',
+      payload: { conversationId: v2Id, resourceId, toolName, arguments: args },
+    }));
+  }, [appendTimeline, sendRawProtocolFrame]);
+
   const sendApprovalResponse = useCallback(
     (accepted: boolean, request: PendingRequest) => {
       const data = eventPayloadData(request.event);
+      if (request.requestType === 'conversation.permission.request') {
+        const conversationId = typeof data.conversationId === 'string' ? data.conversationId : '';
+        const conversation = conversationsRef.current.find((item) => item.id === conversationId || item.v2ConversationId === conversationId) ?? null;
+        const v2Id = conversation?.v2ConversationId || conversation?.id || conversationId;
+        const permissionId = typeof data.permissionId === 'string' ? data.permissionId : request.requestId;
+        if (!v2Id || !permissionId) {
+          Alert.alert('权限请求无效', '找不到对应的对话。');
+          return false;
+        }
+        return Boolean(sendRawProtocolFrame({
+          id: createRequestId('perm'),
+          type: 'conversation.permission.respond',
+          payload: {
+            conversationId: v2Id,
+            permissionId,
+            decision: { outcome: accepted ? 'allow_once' : 'reject_once' },
+          },
+        }));
+      }
       const requestSessionId = sessionIdFromEvent(request.event, data);
       const conversation = requestSessionId
         ? conversationsRef.current.find((item) => item.sessionId === requestSessionId) ?? null
@@ -6346,7 +6755,7 @@ export default function App() {
         conversationId: conversation.id,
       });
     },
-    [sendProtocolMessage],
+    [sendProtocolMessage, sendRawProtocolFrame],
   );
 
   const applyPermissionPreset = useCallback(
@@ -6855,10 +7264,30 @@ export default function App() {
       }
 
       if (lower === 'clear' || lower === 'new') {
-        const nextConversation = createConversation(workspace.id);
-        if (nextConversation) {
-          selectConversation(workspace.id, nextConversation.id);
+        const available = v2Providers.filter((item) => item.available);
+        if (available.length === 1) {
+          const nextConversation = createConversation(workspace.id, { provider: available[0].id, providerProfile: available[0].profiles[0] });
+          if (nextConversation) {
+            selectConversation(workspace.id, nextConversation.id);
+          }
+          return;
         }
+        Alert.alert(
+          '选择 Agent',
+          '新建对话时必须选择 Agent。创建后不可切换。',
+          [
+            ...available.map((item) => ({
+              text: providerDisplayName(item.id, item.displayName),
+              onPress: () => {
+                const nextConversation = createConversation(workspace.id, { provider: item.id, providerProfile: item.profiles[0] });
+                if (nextConversation) {
+                  selectConversation(workspace.id, nextConversation.id);
+                }
+              },
+            })),
+            { text: '取消', style: 'cancel' as const },
+          ],
+        );
         return;
       }
 
@@ -7078,6 +7507,7 @@ export default function App() {
       turnIds,
       updateConversation,
       updateWorkspace,
+      v2Providers,
     ],
   );
 
@@ -7215,6 +7645,19 @@ export default function App() {
       Alert.alert('未选择工作区', '请先选择一个工作区。');
       return;
     }
+    if (isV2Conversation(conversation)) {
+      const v2Id = conversation.v2ConversationId || conversation.id;
+      if (sendRawProtocolFrame({
+        id: createRequestId('cancel'),
+        type: 'conversation.cancel',
+        payload: { conversationId: v2Id },
+      })) {
+        appendTimeline(makeSystemEntry('已发送停止', '正在请求 Backend 取消当前回合。', workspace.id, conversation.id));
+      } else {
+        setLastError('请先连接 Backend。');
+      }
+      return;
+    }
     const threadId = normalizeThreadId(conversation.threadId);
     if (!threadId) {
       setLastError('当前还没有可中断的 thread。');
@@ -7223,7 +7666,7 @@ export default function App() {
     if (sendWorkspaceCommand(workspace, 'codex.local.interrupt', { threadId, turnId: turnIds[conversationId] || '' }, conversation)) {
       appendTimeline(makeSystemEntry('已发送停止', '正在请求 Codex 中断当前思考。', workspace.id, conversation.id));
     }
-  }, [appendTimeline, sendWorkspaceCommand, turnIds]);
+  }, [appendTimeline, sendRawProtocolFrame, sendWorkspaceCommand, turnIds]);
 
   const submitChat = useCallback((conversationId: string) => {
     const text = (chatDrafts[conversationId] ?? '').trim();
@@ -7237,7 +7680,7 @@ export default function App() {
       Alert.alert('未选择工作区', '请先选择一个工作区。');
       return;
     }
-    const { workspace } = context;
+    const { workspace, conversation } = context;
     const isThinking = thinkingConversations[conversationId] === true;
     const mentionReferences = parseMentionReferences(text);
     if (mentionReferences.length > 0) {
@@ -7273,12 +7716,19 @@ export default function App() {
       appendTimeline(makeSystemEntry('消息已加入候选', '当前任务完成后会自动继续发送。', workspace.id, conversationId));
       return;
     }
+    if (isV2Conversation(conversation)) {
+      if (attachments.length > 0) {
+        appendTimeline(makeSystemEntry('v2 对话暂不发送本地附件', '附件仅保留在时间线记录中。', workspace.id, conversationId));
+      }
+      sendV2Prompt(text, conversationId, skills);
+      return;
+    }
     if (attachments.length > 0 || skills.length > 0) {
       void sendLocalTurn(text, 'implement', conversationId, attachments, skills);
       return;
     }
     sendSlashCommand(text, conversationId);
-  }, [appendTimeline, chatDrafts, composerAttachments, getConversationContext, rememberMentionReferences, selectedSkills, sendLocalTurn, sendSlashCommand, setConversationAttachments, setConversationChatDraft, setConversationComposerSelection, setConversationSelectedSkills, thinkingConversations]);
+  }, [appendTimeline, chatDrafts, composerAttachments, getConversationContext, rememberMentionReferences, selectedSkills, sendLocalTurn, sendSlashCommand, sendV2Prompt, setConversationAttachments, setConversationChatDraft, setConversationComposerSelection, setConversationSelectedSkills, thinkingConversations]);
 
   const runWorkspaceCommand = useCallback((workspace: WorkspaceRecord, conversation: ConversationRecord, command: 'start' | 'status' | 'attach' | 'stop' | 'interrupt') => {
     if (command === 'start') {
@@ -7577,6 +8027,7 @@ export default function App() {
                   threadListStatus={threadListStatusByWorkspace[props.route.params.workspaceId] ?? 'idle'}
                   threadListError={threadListErrorByWorkspace[props.route.params.workspaceId] ?? ''}
                   createConversation={createConversation}
+                  v2Providers={v2Providers}
                   refreshNativeThreads={requestNativeThreadList}
                   selectWorkspace={selectWorkspace}
                   selectConversation={selectConversation}
@@ -7743,6 +8194,19 @@ export default function App() {
                   providers={v2Providers}
                   catalogs={capabilityCatalogs}
                   onRefresh={refreshCapabilityCatalog}
+                  conversationId={activeConversationId}
+                  selectedSkills={activeConversationId ? selectedSkills[activeConversationId] ?? [] : []}
+                  canInvoke={Boolean(conversations.find((item) => item.id === activeConversationId && (item.v2ConversationId || item.provider)))}
+                  onToggleSkill={(skill, provider) => {
+                    if (activeConversationId) {
+                      toggleCatalogSkill(activeConversationId, skill, provider);
+                    }
+                  }}
+                  onCallMcp={(resourceId, toolName) => {
+                    if (activeConversationId) {
+                      callMcpTool(activeConversationId, resourceId, toolName);
+                    }
+                  }}
                 />
               )}
             </Stack.Screen>
@@ -8257,6 +8721,7 @@ function ConversationListScreen({
   threadListStatus,
   threadListError,
   createConversation,
+  v2Providers,
   refreshNativeThreads,
   selectWorkspace,
   selectConversation,
@@ -8271,7 +8736,8 @@ function ConversationListScreen({
   connectionState: ConnectionState;
   threadListStatus: 'idle' | 'loading' | 'ready' | 'error';
   threadListError: string;
-  createConversation: (workspaceId: string) => ConversationRecord | null;
+  createConversation: (workspaceId: string, options?: { provider: ProviderKind; providerProfile?: string; title?: string }) => ConversationRecord | null;
+  v2Providers: ProviderDescriptor[];
   refreshNativeThreads: (workspaceId: string, includeArchived?: boolean) => Promise<boolean>;
   selectWorkspace: (workspaceId: string) => void;
   selectConversation: (workspaceId: string, conversationId: string) => void;
@@ -8280,8 +8746,13 @@ function ConversationListScreen({
   removeConversation: (conversationId: string) => void;
 }) {
   const [renamingConversation, setRenamingConversation] = useState<ConversationRecord | null>(null);
+  const [createVisible, setCreateVisible] = useState(false);
+  const [createProvider, setCreateProvider] = useState<ProviderKind | ''>('');
+  const [createProfile, setCreateProfile] = useState('');
   const workspace = workspaces.find((item) => item.id === route.params.workspaceId) ?? null;
   const workspaceConversations = conversations.filter((conversation) => conversation.workspaceId === route.params.workspaceId && conversation.archived !== true);
+  const selectedProvider = v2Providers.find((item) => item.id === createProvider) ?? null;
+  const needsProfile = Boolean(selectedProvider && (selectedProvider.id === 'acp' || selectedProvider.profiles.length > 1));
 
   useEffect(() => {
     selectWorkspace(route.params.workspaceId);
@@ -8313,16 +8784,16 @@ function ConversationListScreen({
           <HeaderIconButton
             label="+"
             onPress={() => {
-              const next = createConversation(route.params.workspaceId);
-              if (next) {
-                navigation.navigate('Chat', { workspaceId: route.params.workspaceId, conversationId: next.id });
-              }
+              const first = v2Providers.find((item) => item.available);
+              setCreateProvider(first?.id ?? '');
+              setCreateProfile(first?.profiles[0] ?? '');
+              setCreateVisible(true);
             }}
           />
         </View>
       ),
     });
-  }, [createConversation, navigation, route.params.workspaceId, workspace?.name]);
+  }, [createConversation, navigation, route.params.workspaceId, v2Providers, workspace?.name]);
 
   const conversationTitle = (conversation: ConversationRecord) => {
     return conversation.title || conversation.preview || 'Untitled thread';
@@ -8381,7 +8852,7 @@ function ConversationListScreen({
         </Card>
 
       {workspaceConversations.length === 0 ? (
-        <EmptyState text="还没有对话。点右上角 + 创建一个纯粹的新对话。" />
+        <EmptyState text="还没有对话。点右上角 + 选择 Agent 后创建。" />
       ) : (
         workspaceConversations.map((conversation) => {
           const preview = conversation.title || conversation.preview || 'Untitled thread';
@@ -8414,7 +8885,7 @@ function ConversationListScreen({
                   </Chip>
                 </View>
                 <HeroText className="mt-1 text-xs text-muted" numberOfLines={1}>
-                  {running ? '正在处理当前对话' : nowLabel(conversation.updatedAt)}
+                  {conversation.provider ? providerDisplayName(conversation.provider) : '历史 Codex'} · {running ? '正在处理当前对话' : nowLabel(conversation.updatedAt)}
                 </HeroText>
               </View>
             </Button>
@@ -8434,6 +8905,58 @@ function ConversationListScreen({
           setRenamingConversation(null);
         }}
       />
+      <Modal visible={createVisible} transparent animationType="fade" onRequestClose={() => setCreateVisible(false)}>
+        <Pressable style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'center', padding: 24 }} onPress={() => setCreateVisible(false)}>
+          <Pressable onPress={() => undefined} className="rounded-2xl bg-background p-4">
+            <HeroText className="text-lg font-semibold text-foreground">新建对话</HeroText>
+            <HeroText className="mt-1 text-xs text-muted">Agent 只在创建时选择，创建后不可切换。</HeroText>
+            <View className="mt-3 flex-row flex-wrap gap-2">
+              {v2Providers.map((item) => (
+                <Button
+                  key={item.id}
+                  size="sm"
+                  variant={createProvider === item.id ? 'primary' : 'secondary'}
+                  isDisabled={!item.available}
+                  onPress={() => {
+                    setCreateProvider(item.id);
+                    setCreateProfile(item.profiles[0] ?? '');
+                  }}
+                >
+                  <Button.Label>{providerDisplayName(item.id, item.displayName)}{item.available ? '' : ' · 不可用'}</Button.Label>
+                </Button>
+              ))}
+            </View>
+            {needsProfile ? (
+              <View className="mt-3 flex-row flex-wrap gap-2">
+                {selectedProvider?.profiles.map((item) => (
+                  <Button key={item} size="sm" variant={createProfile === item ? 'primary' : 'secondary'} onPress={() => setCreateProfile(item)}>
+                    <Button.Label>{item}</Button.Label>
+                  </Button>
+                ))}
+              </View>
+            ) : null}
+            <View className="mt-4 flex-row justify-end gap-2">
+              <Button variant="ghost" onPress={() => setCreateVisible(false)}><Button.Label>取消</Button.Label></Button>
+              <Button
+                isDisabled={!selectedProvider?.available || (needsProfile && !createProfile)}
+                onPress={() => {
+                  if (!selectedProvider?.available) return;
+                  const next = createConversation(route.params.workspaceId, {
+                    provider: selectedProvider.id,
+                    providerProfile: needsProfile ? createProfile || undefined : selectedProvider.profiles[0],
+                  });
+                  setCreateVisible(false);
+                  if (next) {
+                    navigation.navigate('Chat', { workspaceId: route.params.workspaceId, conversationId: next.id });
+                  }
+                }}
+              >
+                <Button.Label>创建</Button.Label>
+              </Button>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
       </ScrollView>
     </Surface>
   );
@@ -9079,6 +9602,7 @@ function ChatScreen({
           mode={conversation?.mode ?? 'implement'}
           goalLabel={conversation ? compactGoalLabel(conversation) : 'No goal'}
           localState={conversation?.localAdapterState ?? 'idle'}
+          agentLabel={conversation?.provider ? providerDisplayName(conversation.provider) : conversation ? '历史 Codex' : undefined}
         />
       ),
       headerRight: () => <HeaderIconButton label="..." onPress={() => setMenuVisible(true)} />,
@@ -9088,6 +9612,7 @@ function ChatScreen({
     conversation?.goalStatus,
     conversation?.localAdapterState,
     conversation?.mode,
+    conversation?.provider,
     chatHeaderTitle,
     navigation,
   ]);
@@ -10746,7 +11271,8 @@ function SettingsScreen({
   const pairingScannerLastRawRef = useRef<string | null>(null);
   const isConnected = connectionState === 'open';
   const isConnecting = connectionState === 'connecting';
-  const connectionActionTitle = isConnected || isConnecting ? '中断' : '连接';
+  const connectionActionTitle = isConnected || isConnecting ? '中断' : connectionState === 'error' ? '重试' : '连接';
+  const classifiedError = connectionFailureLabel(connectionHealth.code as import('./src/lib/connectionError').ConnectionFailureCode | '');
   const connectionAction = isConnected || isConnecting ? () => closeSocket(true) : connect;
   const dotStyle =
     connectionState === 'open'
@@ -10916,7 +11442,11 @@ function SettingsScreen({
             </View>
           </Surface>
             {runtimeStatus.daemon === 'offline' && connectionHealth.error ? (
-              <Text style={styles.connectionErrorText} numberOfLines={2}>{connectionHealth.error}</Text>
+              <Text style={styles.connectionErrorText} numberOfLines={3}>{classifiedError ? `${classifiedError}\n${connectionHealth.error}` : connectionHealth.error}</Text>
+            ) : lastError ? (
+              <Text style={styles.connectionErrorText} numberOfLines={3}>{classifiedError ? `${classifiedError}\n${lastError}` : lastError}</Text>
+            ) : classifiedError ? (
+              <Text style={styles.connectionErrorText} numberOfLines={2}>{classifiedError}</Text>
             ) : null}
           <Field
             label="Server URL"
@@ -11276,11 +11806,13 @@ function ConversationHeaderTitle({
   mode,
   goalLabel,
   localState,
+  agentLabel,
 }: {
   title: string;
   mode: ConversationRecord['mode'];
   goalLabel: string;
   localState: LocalAdapterState;
+  agentLabel?: string;
 }) {
   const { theme } = useUniwind();
   const navTheme = theme === 'dark' ? DARK_NAV_THEME : LIGHT_NAV_THEME;
@@ -11297,6 +11829,11 @@ function ConversationHeaderTitle({
         >
           <Text style={[styles.headerStatusText, { color: navTheme.chipText }]} numberOfLines={1}>{modeLabelOf(mode)}</Text>
         </View>
+        {agentLabel ? (
+          <View style={[styles.headerStatusChip, { backgroundColor: navTheme.chipAccent }]}>
+            <Text style={[styles.headerStatusText, { color: navTheme.chipText }]} numberOfLines={1}>{agentLabel}</Text>
+          </View>
+        ) : null}
         <View style={[styles.headerStatusChip, { backgroundColor: navTheme.chip }]}>
           <Text style={[styles.headerStatusText, { color: navTheme.chipText }]} numberOfLines={1}>{goalLabel}</Text>
         </View>

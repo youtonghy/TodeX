@@ -7,11 +7,12 @@ TodeX App is the mobile client for connecting to `todex-agentd`, managing worksp
 ## 功能 / Features
 
 - 工作区管理：新增、重命名、Fork、删除目录
-- 对话管理：每个工作区下可创建多个对话
-- 聊天界面：支持消息输入、历史时间线、跳到最新消息
+- 对话管理：每个工作区下可创建多个对话；新建时选择 Agent（Codex CLI / ACP / Pi / Claude Code），创建后锁定
+- 聊天界面：支持消息输入、历史时间线、跳到最新消息；主聊天走 Backend v2 conversation
+- Skills 和 MCPs：从能力页把 Skill 附加到下一条消息（Backend 按 resourceId 注入）；MCP 工具通过 Backend 调用并走权限审批
 - `@` 文件引用：从后端工作区目录中检索文件和目录建议
 - `/` 命令：内置命令补全和命令路由，不是 shell 执行
-- Skills 和 MCPs：从对话菜单查看通用及各 Agent 的只读启用状态；输入 `#` 可匹配当前 Codex Agent 的启用 Skill 和 MCP Server，并插入能力引用
+- Skills 和 MCPs：从能力页把 Skill 附加到下一条消息（Backend 按 resourceId 注入）；MCP 工具通过 Backend 调用并走权限审批；输入 `#` 可匹配 Skill 和 MCP
 - 审批处理：支持命令执行、权限、工具请求等审批卡片
 - 运行控制：启动、状态、附加、中断、停止本地 Codex 会话
 - 设置保存：连接地址、token、tenant、可选传输加密、默认目录、默认模型、权限和沙盒模式

@@ -16,6 +16,11 @@ type Props = {
   providers: ProviderDescriptor[];
   catalogs: Partial<Record<ProviderKind, CatalogState>>;
   onRefresh: (provider: ProviderKind) => void;
+  conversationId?: string;
+  selectedSkills?: Array<{ name: string; resourceId?: string }>;
+  canInvoke?: boolean;
+  onToggleSkill?: (skill: SkillCatalogDescriptor, provider: ProviderKind) => void;
+  onCallMcp?: (resourceId: string, toolName: string) => void;
 };
 
 type ViewMode = 'skills' | 'mcp';
@@ -23,7 +28,7 @@ type ProviderChoice = ProviderKind | 'common';
 
 const PROVIDER_LABELS: Record<ProviderKind, string> = {
   acp: 'ACP',
-  codex: 'Codex',
+  codex: 'Codex CLI',
   pi: 'Pi',
   'claude-code': 'Claude Code',
 };
@@ -39,8 +44,18 @@ function providerStatus(provider: ProviderDescriptor | undefined): { label: stri
     : { label: provider.unavailableReason || '不可用', color: '#b04a4a' };
 }
 
-function SkillRow({ item }: { item: SkillCatalogDescriptor }) {
-  const status = item.active && item.valid ? '当前启用' : item.shadowedBy ? '被覆盖' : item.valid ? '未启用' : '无效';
+function SkillRow({
+  item,
+  selected,
+  canSelect,
+  onToggle,
+}: {
+  item: SkillCatalogDescriptor;
+  selected: boolean;
+  canSelect: boolean;
+  onToggle?: () => void;
+}) {
+  const status = selected ? '已附加' : item.active && item.valid ? '当前启用' : item.shadowedBy ? '被覆盖' : item.valid ? '未启用' : '无效';
   return (
     <Card variant="transparent" className="mb-2 border border-separator bg-surface-secondary px-3 py-3">
       <View className="flex-row items-start gap-3">
@@ -50,18 +65,31 @@ function SkillRow({ item }: { item: SkillCatalogDescriptor }) {
         <View className="min-w-0 flex-1">
           <View className="flex-row items-center justify-between gap-2">
             <HeroText className="flex-1 font-semibold text-foreground" numberOfLines={1}>{item.name}</HeroText>
-            <HeroText style={{ color: item.active && item.valid ? '#1e8e62' : '#7a8391' }} className="text-xs font-semibold">{status}</HeroText>
+            <HeroText style={{ color: selected || (item.active && item.valid) ? '#1e8e62' : '#7a8391' }} className="text-xs font-semibold">{status}</HeroText>
           </View>
           {item.description ? <HeroText className="mt-1 text-xs text-muted" numberOfLines={3}>{item.description}</HeroText> : null}
           <HeroText className="mt-2 text-[11px] text-muted">{item.scope} · {item.source}</HeroText>
           {item.error ? <HeroText className="mt-1 text-xs text-danger" numberOfLines={2}>{item.error}</HeroText> : null}
+          {canSelect ? (
+            <Button size="sm" variant={selected ? 'secondary' : 'primary'} className="mt-2 self-start" onPress={onToggle}>
+              <Button.Label>{selected ? '取消附加' : '附加到下一条消息'}</Button.Label>
+            </Button>
+          ) : null}
         </View>
       </View>
     </Card>
   );
 }
 
-function McpRow({ item }: { item: McpServerCatalogDescriptor }) {
+function McpRow({
+  item,
+  canInvoke,
+  onCall,
+}: {
+  item: McpServerCatalogDescriptor;
+  canInvoke: boolean;
+  onCall?: (toolName: string) => void;
+}) {
   const status = item.enabled && item.active ? '当前启用' : item.shadowedBy ? '被覆盖' : item.enabled ? '可用' : '已禁用';
   return (
     <Card variant="transparent" className="mb-2 border border-separator bg-surface-secondary px-3 py-3">
@@ -75,13 +103,27 @@ function McpRow({ item }: { item: McpServerCatalogDescriptor }) {
             <HeroText style={{ color: item.enabled && item.active ? '#1e8e62' : '#7a8391' }} className="text-xs font-semibold">{status}</HeroText>
           </View>
           <HeroText className="mt-2 text-[11px] text-muted">{item.transport} · {item.scope} · {item.source}</HeroText>
+          {item.tools?.length && canInvoke ? item.tools.map((tool) => (
+            <Button key={tool.name} size="sm" variant="secondary" className="mt-2 self-start" onPress={() => onCall?.(tool.name)}>
+              <Button.Label>调用 {tool.name}</Button.Label>
+            </Button>
+          )) : null}
         </View>
       </View>
     </Card>
   );
 }
 
-export function CapabilitiesScreen({ workspacePath, providers, catalogs, onRefresh }: Props) {
+export function CapabilitiesScreen({
+  workspacePath,
+  providers,
+  catalogs,
+  onRefresh,
+  selectedSkills = [],
+  canInvoke = false,
+  onToggleSkill,
+  onCallMcp,
+}: Props) {
   const [viewMode, setViewMode] = useState<ViewMode>('skills');
   const [providerChoice, setProviderChoice] = useState<ProviderChoice>('common');
   const provider = providerChoice === 'common' ? undefined : providers.find((item) => item.id === providerChoice);
@@ -91,11 +133,14 @@ export function CapabilitiesScreen({ workspacePath, providers, catalogs, onRefre
     : catalogs[providerChoice] ? [catalogs[providerChoice] as CatalogState] : [];
   const state = selectedCatalogs.find((item) => item.status === 'loading') ?? selectedCatalogs[0];
   const skills = useMemo(() => {
-    const items = selectedCatalogs.flatMap((item) => item.skills?.skills ?? []);
+    const items = selectedCatalogs.flatMap((item) => (item.skills?.skills ?? []).map((skill) => ({
+      skill,
+      provider: (item.skills?.provider ?? providerChoice) as ProviderKind,
+    })));
     return items.filter((item, index, list) => {
-      const key = `${item.name}:${item.scope}:${item.source}`;
-      return list.findIndex((candidate) => `${candidate.name}:${candidate.scope}:${candidate.source}` === key) === index;
-    }).filter((item) => providerChoice !== 'common' || isCommonSource(item.source));
+      const key = `${item.skill.resourceId}:${item.skill.name}`;
+      return list.findIndex((candidate) => `${candidate.skill.resourceId}:${candidate.skill.name}` === key) === index;
+    }).filter((item) => providerChoice !== 'common' || isCommonSource(item.skill.source));
   }, [providerChoice, selectedCatalogs]);
   const mcpServers = useMemo(() => {
     const items = selectedCatalogs.flatMap((item) => item.mcp?.servers ?? []);
@@ -148,10 +193,19 @@ export function CapabilitiesScreen({ workspacePath, providers, catalogs, onRefre
       {isLoading ? <View className="items-center py-10"><ActivityIndicator /><HeroText className="mt-2 text-xs text-muted">正在读取目录…</HeroText></View> : null}
       {error ? <View className="mx-4 rounded-lg border border-danger-soft bg-danger-soft px-3 py-3"><HeroText className="text-sm text-danger">{error}</HeroText></View> : null}
       {!isLoading && !error && viewMode === 'skills' ? (
-        <FlatList data={skills} keyExtractor={(item) => `${item.resourceId}:${item.name}`} renderItem={({ item }) => <SkillRow item={item} />} contentContainerStyle={styles.list} refreshControl={<RefreshControl refreshing={false} onRefresh={() => providerChoice !== 'common' && onRefresh(providerChoice)} />} ListEmptyComponent={<HeroText className="px-4 py-10 text-center text-sm text-muted">没有找到 Skill。</HeroText>} />
+        <FlatList data={skills} keyExtractor={(item) => `${item.skill.resourceId}:${item.skill.name}`} renderItem={({ item }) => (
+          <SkillRow
+            item={item.skill}
+            selected={selectedSkills.some((skill) => skill.resourceId === item.skill.resourceId || skill.name === item.skill.name)}
+            canSelect={Boolean(canInvoke && onToggleSkill)}
+            onToggle={() => onToggleSkill?.(item.skill, item.provider)}
+          />
+        )} contentContainerStyle={styles.list} refreshControl={<RefreshControl refreshing={false} onRefresh={() => providerChoice !== 'common' && onRefresh(providerChoice)} />} ListEmptyComponent={<HeroText className="px-4 py-10 text-center text-sm text-muted">没有找到 Skill。</HeroText>} />
       ) : null}
       {!isLoading && !error && viewMode === 'mcp' ? (
-        <FlatList data={mcpServers} keyExtractor={(item) => `${item.resourceId}:${item.name}`} renderItem={({ item }) => <McpRow item={item} />} contentContainerStyle={styles.list} refreshControl={<RefreshControl refreshing={false} onRefresh={() => providerChoice !== 'common' && onRefresh(providerChoice)} />} ListEmptyComponent={<HeroText className="px-4 py-10 text-center text-sm text-muted">没有找到 MCP Server。</HeroText>} />
+        <FlatList data={mcpServers} keyExtractor={(item) => `${item.resourceId}:${item.name}`} renderItem={({ item }) => (
+          <McpRow item={item} canInvoke={canInvoke} onCall={(toolName) => onCallMcp?.(item.resourceId, toolName)} />
+        )} contentContainerStyle={styles.list} refreshControl={<RefreshControl refreshing={false} onRefresh={() => providerChoice !== 'common' && onRefresh(providerChoice)} />} ListEmptyComponent={<HeroText className="px-4 py-10 text-center text-sm text-muted">没有找到 MCP Server。</HeroText>} />
       ) : null}
     </Surface>
   );
