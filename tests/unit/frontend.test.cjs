@@ -25,22 +25,14 @@ function baseSettings(overrides = {}) {
   };
 }
 
-test('builds HTTP and WebSocket URLs from flexible server addresses', () => {
+test('builds HTTP URLs from flexible server addresses', () => {
   assert.equal(
-    todex.buildHttpUrl('127.0.0.1:7345', '/v1/version'),
-    'http://127.0.0.1:7345/v1/version',
+    todex.buildHttpUrl('127.0.0.1:7345', '/v2/version'),
+    'http://127.0.0.1:7345/v2/version',
   );
   assert.equal(
     todex.buildHttpUrl('wss://agent.example.test/base', '/health'),
     'https://agent.example.test/health',
-  );
-  assert.equal(
-    todex.buildWebSocketUrl('https://agent.example.test', 'enc=x25519&client_key=abc'),
-    'wss://agent.example.test/v1/ws?enc=x25519&client_key=abc',
-  );
-  assert.equal(
-    todex.buildWebSocketUrl('ws://127.0.0.1:7345/path', '?enc=ml-kem-768'),
-    'ws://127.0.0.1:7345/v1/ws?enc=ml-kem-768',
   );
 });
 
@@ -58,6 +50,32 @@ test('builds v2 WebSocket URLs and parses protocol messages', () => {
     id: '1', type: 'server.result', payload: { ok: true },
   });
   assert.equal(v2.parseV2Message('{bad json}'), null);
+});
+
+test('builds v2 WebSocket URLs with pairing query and encoded access token', () => {
+  assert.equal(
+    v2.buildV2WebSocketUrlWithOptions('https://agent.example.test', {
+      cryptoQueryString: 'enc=x25519&client_key=abc',
+    }),
+    'wss://agent.example.test/v2/ws?enc=x25519&client_key=abc',
+  );
+  assert.equal(
+    v2.buildV2WebSocketUrlWithOptions('ws://127.0.0.1:7345/path', {
+      cryptoQueryString: '?enc=ml-kem-768',
+    }),
+    'ws://127.0.0.1:7345/v2/ws?enc=ml-kem-768',
+  );
+  assert.equal(
+    v2.buildV2WebSocketUrlWithOptions('http://127.0.0.1:7345', {
+      cryptoQueryString: 'enc=none',
+      authToken: 'tok&x',
+    }),
+    'ws://127.0.0.1:7345/v2/ws?enc=none&access_token=tok%26x',
+  );
+  assert.equal(
+    v2.buildV2WebSocketUrlWithToken('http://127.0.0.1:7345', 'tok&x'),
+    'ws://127.0.0.1:7345/v2/ws?access_token=tok%26x',
+  );
 });
 
 test('v2 API client sends bearer auth and JSON requests', async () => {
@@ -407,180 +425,24 @@ test('extracts thread ids from nested server event payloads', () => {
   );
 });
 
-test('transport client unwraps enveloped server events', () => {
-  const client = new transport.TodeXTransportClient({ loadSessionCursors: () => ({}) });
-  const events = client.decode(JSON.stringify({
-    type: 'transport.event',
-    payload: {
-      streamId: 'stream-1',
-      seqId: 1,
-      sessionId: 'session-1',
-      cursor: 4,
-      payload: {
-        type: 'codex.item.completed',
-        payload: { data: { text: 'done' } },
-      },
-    },
-  }));
-
-  assert.equal(events.length, 1);
-  assert.equal(events[0].type, 'codex.item.completed');
-  assert.equal(events[0].codex_session_id, 'session-1');
-  assert.equal(events[0].cursor, 4);
-});
-
-test('transport client reassembles chunked frames before decoding events', () => {
-  const client = new transport.TodeXTransportClient({ loadSessionCursors: () => ({}) });
-  const payload = JSON.stringify({
-    type: 'transport.event',
-    payload: {
-      streamId: 'stream-1',
-      seqId: 2,
-      sessionId: 'session-1',
-      cursor: 5,
-      payload: {
-        type: 'codex.item.completed',
-        payload: { data: { text: 'chunked' } },
-      },
-    },
-  });
-  const first = Buffer.from(payload.slice(0, 30)).toString('base64');
-  const second = Buffer.from(payload.slice(30)).toString('base64');
-
-  assert.deepEqual(client.decode(JSON.stringify({
-    type: 'transport.chunk',
-    payload: {
-      chunkId: 'chunk-1',
-      index: 1,
-      total: 2,
-      encoding: 'base64',
-      totalBytes: Buffer.byteLength(payload),
-      data: second,
-    },
-  })), []);
-
-  const events = client.decode(JSON.stringify({
-    type: 'transport.chunk',
-    payload: {
-      chunkId: 'chunk-1',
-      index: 0,
-      total: 2,
-      encoding: 'base64',
-      totalBytes: Buffer.byteLength(payload),
-      data: first,
-    },
-  }));
-
-  assert.equal(events.length, 1);
-  assert.equal(events[0].type, 'codex.item.completed');
-  assert.equal(events[0].cursor, 5);
-});
-
-test('transport client sends hello, enveloped events, and cursor acks', () => {
-  const sent = [];
-  const socket = {
-    readyState: 1,
-    send: (value) => sent.push(JSON.parse(value)),
-  };
-  global.WebSocket = { OPEN: 1 };
-  const client = new transport.TodeXTransportClient({
-    loadSessionCursors: () => ({ 'session-1': 3 }),
-  });
-
-  client.attach(socket, (text) => text);
-  const message = client.send('codex.local.approval.respond', {
-    codexSessionId: 'session-1',
-    tenantId: 'local',
-  }, 'approval-1');
-  client.ack({
+test('extracts session ids and cursors from plain server events', () => {
+  assert.equal(transport.sessionIdFromEvent({
     type: 'codex.item.completed',
-    codex_session_id: 'session-1',
-    cursor: 6,
+    codex_session_id: 'session-direct',
     payload: {},
-  });
-  client.flushAcks();
-
-  assert.equal(sent[0].type, 'transport.hello');
-  assert.deepEqual(sent[0].payload.sessionCursors, { 'session-1': 3 });
-  assert.equal(sent[1].type, 'transport.event');
-  assert.equal(sent[1].payload.payload.id, 'approval-1');
-  assert.equal(message.id, 'approval-1');
-  assert.equal(sent[2].type, 'transport.ack');
-  assert.equal(sent[2].payload.cursor, 6);
+  }), 'session-direct');
+  assert.equal(transport.sessionIdFromEvent({
+    type: 'codex.item.completed',
+    payload: { data: { codexSessionId: 'session-nested' } },
+  }), 'session-nested');
+  assert.equal(transport.sessionIdFromEvent({ type: 'terminal.output', payload: {} }), '');
+  assert.equal(transport.cursorFromEvent({ type: 'codex.item.completed', cursor: 4, payload: {} }), 4);
+  assert.equal(transport.cursorFromEvent({ type: 'codex.item.completed', cursor: '7', payload: {} }), 7);
+  assert.equal(transport.cursorFromEvent({ type: 'codex.item.completed', payload: {} }), null);
 });
 
-test('transport client batches cursor acks by session', () => {
-  const sent = [];
-  const originalSetTimeout = global.setTimeout;
-  const originalClearTimeout = global.clearTimeout;
-  const originalWebSocket = global.WebSocket;
-  try {
-    const timers = [];
-    global.setTimeout = (fn) => {
-      timers.push(fn);
-      return timers.length;
-    };
-    global.clearTimeout = () => {};
-    global.WebSocket = { OPEN: 1 };
-    const client = new transport.TodeXTransportClient({
-      loadSessionCursors: () => ({}),
-    });
-    client.attach({ readyState: 1, send: (value) => sent.push(JSON.parse(value)) }, (text) => text);
-
-    client.ack({ type: 'codex.item.completed', codex_session_id: 'session-1', cursor: 4, payload: {} });
-    client.ack({ type: 'codex.item.completed', codex_session_id: 'session-1', cursor: 7, payload: {} });
-    assert.equal(sent.filter((item) => item.type === 'transport.ack').length, 0);
-    timers.splice(0).forEach((timer) => timer());
-
-    assert.equal(sent.filter((item) => item.type === 'transport.ack').length, 1);
-    assert.equal(sent[1].payload.cursor, 7);
-  } finally {
-    global.setTimeout = originalSetTimeout;
-    global.clearTimeout = originalClearTimeout;
-    global.WebSocket = originalWebSocket;
-  }
-});
-
-test('transport chunk reassembly decodes directly into a single byte buffer', () => {
-  const client = new transport.TodeXTransportClient({ loadSessionCursors: () => ({}) });
-  const payload = JSON.stringify({
-    type: 'transport.event',
-    payload: {
-      sessionId: 'session-1',
-      cursor: 9,
-      payload: { type: 'codex.item.completed', payload: { data: { text: 'abc' } } },
-    },
-  });
-  const encoded = Buffer.from(payload, 'utf8').toString('base64');
-  const first = encoded.slice(0, Math.ceil(encoded.length / 2));
-  const second = encoded.slice(Math.ceil(encoded.length / 2));
-
-  assert.deepEqual(client.decode(JSON.stringify({
-    type: 'transport.chunk',
-    payload: {
-      chunkId: 'chunk-2',
-      index: 0,
-      total: 2,
-      encoding: 'base64',
-      totalBytes: Buffer.byteLength(payload),
-      data: first,
-    },
-  })), []);
-
-  const events = client.decode(JSON.stringify({
-    type: 'transport.chunk',
-    payload: {
-      chunkId: 'chunk-2',
-      index: 1,
-      total: 2,
-      encoding: 'base64',
-      totalBytes: Buffer.byteLength(payload),
-      data: second,
-    },
-  }));
-
-  assert.equal(events.length, 1);
-  assert.equal(events[0].cursor, 9);
+test('legacy message guard matches the unified backend socket limit', () => {
+  assert.equal(transport.MAX_LEGACY_MESSAGE_BYTES, 8 * 1024 * 1024);
 });
 
 test('parses native Codex thread list responses', () => {
@@ -879,4 +741,141 @@ test('assembles segmented pairing qr payloads through the optimized base64url pa
     transportCrypto.assemblePairingQrChunkPayload(chunks),
     raw,
   );
+});
+
+test('counts utf8 bytes the way the backend measures frames', () => {
+  const cases = [
+    '',
+    'plain ascii',
+    'café',
+    '中文消息',
+    '😀🎉',
+    '\ud83d',
+    '\udc00',
+    'trailing\ud83d',
+    JSON.stringify({ type: '中文', payload: { emoji: '😀' } }),
+    'YWJjZA=='.repeat(32),
+  ];
+  for (const value of cases) {
+    assert.equal(
+      todex.utf8ByteLength(value),
+      Buffer.byteLength(value, 'utf8'),
+      `byte length mismatch for ${JSON.stringify(value)}`,
+    );
+  }
+
+  // String.length would undercount every one of these.
+  assert.equal(todex.utf8ByteLength('中文消息'), 12);
+  assert.equal(todex.utf8ByteLength('😀'), 4);
+  assert.equal('😀'.length, 2);
+});
+
+test('v2 socket reports oversized frames instead of throwing', () => {
+  const errors = [];
+  const sockets = [];
+  class FakeSocket {
+    static OPEN = 1;
+    readyState = 1;
+    sent = [];
+    constructor() { sockets.push(this); }
+    send(value) { this.sent.push(value); }
+    close() {}
+  }
+  const client = new v2.V2ConversationSocket({
+    serverUrl: 'http://127.0.0.1:7345',
+    WebSocketImpl: FakeSocket,
+    onError: (error) => errors.push(error),
+  });
+  client.connect();
+  sockets[0].onopen();
+  const sentAfterOpen = sockets[0].sent.length;
+
+  const oversized = '中'.repeat(v2.MAX_MESSAGE_SIZE / 3);
+  assert.ok(oversized.length < v2.MAX_MESSAGE_SIZE);
+  // v2 has no outbound throw contract; it reports through onError.
+  assert.doesNotThrow(() => client.sendPrompt('c1', oversized));
+
+  assert.equal(sockets[0].sent.length, sentAfterOpen, 'oversized frame must not reach the socket');
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].type, 'MESSAGE_TOO_LARGE');
+  client.close();
+});
+
+test('v2 heartbeat is not fooled by streamed events on a dead uplink', (t) => {
+  t.mock.timers.enable({ apis: ['setInterval', 'setTimeout'] });
+  const errors = [];
+  const sockets = [];
+  class FakeSocket {
+    static OPEN = 1;
+    readyState = 1;
+    sent = [];
+    closed = false;
+    constructor() { sockets.push(this); }
+    send(value) { this.sent.push(value); }
+    close() { this.closed = true; }
+  }
+  const client = new v2.V2ConversationSocket({
+    serverUrl: 'http://127.0.0.1:7345',
+    WebSocketImpl: FakeSocket,
+    heartbeatInterval: 1000,
+    maxMissedHeartbeats: 3,
+    onError: (error) => errors.push(error),
+  });
+  client.connect();
+  const socket = sockets[0];
+  socket.onopen();
+
+  // The server keeps streaming conversation events, but never answers a ping —
+  // the shape of a dead uplink under an alive downlink. Before the fix, every
+  // inbound message reset the missed counter and this went undetected forever.
+  for (let round = 0; round < 5; round++) {
+    t.mock.timers.tick(1000);
+    socket.onmessage({
+      data: JSON.stringify({
+        type: 'conversation.event',
+        payload: { conversationId: 'c1', sequence: round + 1, eventId: `e${round}`, type: 'message.delta', time: '', payload: {} },
+      }),
+    });
+  }
+
+  assert.ok(socket.closed, 'socket must be closed after maxMissedHeartbeats unanswered pings');
+  assert.equal(errors.filter((e) => e.type === 'HEARTBEAT_TIMEOUT').length, 1);
+  client.close();
+});
+
+test('v2 heartbeat stays quiet while pings are answered', (t) => {
+  t.mock.timers.enable({ apis: ['setInterval', 'setTimeout'] });
+  const errors = [];
+  const sockets = [];
+  class FakeSocket {
+    static OPEN = 1;
+    readyState = 1;
+    sent = [];
+    closed = false;
+    constructor() { sockets.push(this); }
+    send(value) { this.sent.push(value); }
+    close() { this.closed = true; }
+  }
+  const client = new v2.V2ConversationSocket({
+    serverUrl: 'http://127.0.0.1:7345',
+    WebSocketImpl: FakeSocket,
+    heartbeatInterval: 1000,
+    maxMissedHeartbeats: 3,
+    onError: (error) => errors.push(error),
+  });
+  client.connect();
+  const socket = sockets[0];
+  socket.onopen();
+
+  for (let round = 0; round < 6; round++) {
+    t.mock.timers.tick(1000);
+    const last = JSON.parse(socket.sent[socket.sent.length - 1]);
+    assert.equal(last.type, 'server.ping');
+    // Answer the way the backend does: a server.result echoing the request id.
+    socket.onmessage({ data: JSON.stringify({ id: last.id, type: 'server.result', payload: { pong: true } }) });
+  }
+
+  assert.equal(socket.closed, false);
+  assert.equal(errors.length, 0);
+  client.close();
 });

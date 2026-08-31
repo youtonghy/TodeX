@@ -82,12 +82,12 @@ import {
   WorkspaceRecord,
   approvalResponsePayload,
   buildHttpUrl,
-  buildWebSocketUrl,
   classifyPendingRequest,
   createRequestId,
   displayNameFromPath,
   eventId,
   eventPayloadData,
+  utf8ByteLength,
   extractThreadIdFromEvent,
   inferApprovalResponseType,
   isThreadNotMaterializedHistoryError,
@@ -124,12 +124,12 @@ import {
   type TransportCryptoSession,
 } from './src/lib/transportCrypto';
 import {
-  TodeXTransportClient,
-  type TransportStatusSnapshot,
+  MAX_LEGACY_MESSAGE_BYTES,
   cursorFromEvent as transportCursorFromEvent,
   sessionIdFromEvent as transportSessionIdFromEvent,
 } from './src/lib/transport';
-import { V2ApiClient, V2ConversationSocket, type ConversationEvent, type ConversationManifest, type ProviderDescriptor, type ProviderKind } from './src/lib/v2';
+import { ConnectionError } from './src/lib/connectionError';
+import { V2ApiClient, V2ConversationSocket, buildV2WebSocketUrlWithOptions, type ConversationEvent, type ConversationManifest, type ProviderDescriptor, type ProviderKind } from './src/lib/v2';
 import { CapabilitiesScreen, type CatalogState } from './src/components/CapabilitiesScreen';
 
 type RootStackParamList = {
@@ -330,11 +330,6 @@ type PendingThreadAction = {
 type ComposerSelection = TextInputSelectionChangeEventData['selection'];
 
 const DEFAULT_COMPOSER_SELECTION: ComposerSelection = { start: 0, end: 0 };
-const DEFAULT_TRANSPORT_STATUS: TransportStatusSnapshot = {
-  status: 'disabled',
-  clientId: '',
-  error: '',
-};
 
 type PairingChunkCollector = {
   checksum: string;
@@ -401,7 +396,6 @@ type PendingSocketFrame = {
   data: string;
   generation: number;
   crypto: TransportCryptoSession | null;
-  transport: TodeXTransportClient | null;
 };
 
 type ConversationContext = {
@@ -483,7 +477,6 @@ type ConnectionState = 'idle' | 'connecting' | 'open' | 'closed' | 'error';
 
 type RuntimeStatusState = {
   socket: ConnectionState;
-  transport: TransportStatusSnapshot;
   daemon: ConnectionHealth['status'];
   codexAdapter: LocalAdapterState | 'unknown';
   turn: 'idle' | 'running';
@@ -1961,7 +1954,7 @@ async function fetchWorkspaceDirectorySnapshot(
   settings: ConnectionSettings,
   path?: string,
 ): Promise<WorkspaceDirectorySnapshot> {
-  const url = new URL(buildHttpUrl(settings.serverUrl, '/v1/workspace/directories'));
+  const url = new URL(buildHttpUrl(settings.serverUrl, '/v2/workspace/directories'));
   if (path) {
     url.searchParams.set('path', path);
   }
@@ -2403,8 +2396,6 @@ export default function App() {
   const pendingServerEventFrameRef = useRef<number | null>(null);
   const pendingSocketFramesRef = useRef<PendingSocketFrame[]>([]);
   const pendingSocketFrameDrainRef = useRef<number | null>(null);
-  const transportClientRef = useRef<TodeXTransportClient | null>(null);
-  const v2SocketRef = useRef<V2ConversationSocket | null>(null);
   const capabilityWorkspaceRef = useRef('');
   const socketGenerationRef = useRef(0);
   const autoConnectAttemptedRef = useRef(false);
@@ -2427,7 +2418,6 @@ export default function App() {
   const [activeConversationId, setActiveConversationId] = useState('');
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
   const [connectionHealth, setConnectionHealth] = useState<ConnectionHealth>(defaultConnectionHealth);
-  const [transportStatus, setTransportStatus] = useState<TransportStatusSnapshot>(DEFAULT_TRANSPORT_STATUS);
   const [remoteModelCatalog, setRemoteModelCatalog] = useState<CodexModelCatalogItem[]>([]);
   const [modelCatalogStatus, setModelCatalogStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [modelCatalogError, setModelCatalogError] = useState('');
@@ -2484,17 +2474,10 @@ export default function App() {
         setV2Providers([]);
         setV2Conversations([]);
       });
-    const socket = new V2ConversationSocket({
-      serverUrl: settings.serverUrl,
-      authToken: settings.authToken,
-      onError: () => { /* v1 remains the source of truth for legacy sessions. */ },
-    });
-    v2SocketRef.current = socket;
-    socket.connect();
+    // The main connection below is the single `/v2/ws` socket; providers and
+    // conversations lists are plain HTTP refreshes, no side channel needed.
     return () => {
       active = false;
-      socket.close();
-      if (v2SocketRef.current === socket) v2SocketRef.current = null;
     };
   }, [hydrated, settings.authToken, settings.serverUrl]);
 
@@ -2709,7 +2692,6 @@ export default function App() {
     }
     workspaceBackendReadyRef.current = false;
     if (socketRef.current) {
-      transportClientRef.current?.flushAcks?.();
       try {
         socketRef.current.close();
       } catch {
@@ -2718,7 +2700,6 @@ export default function App() {
       socketRef.current = null;
     }
     socketCryptoRef.current = null;
-    transportClientRef.current?.detach();
     pendingServerEventsRef.current = [];
     if (pendingServerEventFrameRef.current !== null) {
       cancelAnimationFrame(pendingServerEventFrameRef.current);
@@ -2897,7 +2878,7 @@ export default function App() {
   const syncWorkspacesToBackend = useCallback(
     async (snapshot: WorkspaceRecord[] = workspacesRef.current) => {
       try {
-        const response = await fetch(buildHttpUrl(settings.serverUrl, '/v1/workspaces'), {
+        const response = await fetch(buildHttpUrl(settings.serverUrl, '/v2/workspaces'), {
           method: 'PUT',
           headers: authHeaders(settings, { 'Content-Type': 'application/json' }),
           body: JSON.stringify({ workspaces: prepareWorkspaceSyncPayload(snapshot) }),
@@ -2931,7 +2912,7 @@ export default function App() {
   const syncWorkspacesFromBackend = useCallback(async () => {
     workspaceBackendReadyRef.current = false;
     try {
-      const response = await fetch(buildHttpUrl(settings.serverUrl, '/v1/workspaces'), {
+      const response = await fetch(buildHttpUrl(settings.serverUrl, '/v2/workspaces'), {
         headers: authHeaders(settings),
       });
       if (!response.ok) {
@@ -3071,11 +3052,10 @@ export default function App() {
 
   const runtimeStatus = useMemo<RuntimeStatusState>(() => ({
     socket: connectionState,
-    transport: transportStatus,
     daemon: connectionHealth.status,
     codexAdapter: activeConversation?.localAdapterState ?? activeWorkspace?.localAdapterState ?? 'unknown',
     turn: activeTurnId ? 'running' : 'idle',
-  }), [activeConversation?.localAdapterState, activeTurnId, activeWorkspace?.localAdapterState, connectionHealth.status, connectionState, transportStatus]);
+  }), [activeConversation?.localAdapterState, activeTurnId, activeWorkspace?.localAdapterState, connectionHealth.status, connectionState]);
 
   const getConversationContext = useCallback((conversationId = activeConversationRef.current): ConversationContext | null => {
     const conversation = conversationsRef.current.find((item) => item.id === conversationId) ?? null;
@@ -3672,7 +3652,6 @@ export default function App() {
           return;
         }
         sessionCursorsRef.current.set(sessionId, cursor);
-        transportClientRef.current?.ack(event);
         persistSessionCursors();
       }
       setEvents((current) => [event, ...current].slice(0, MAX_EVENTS));
@@ -4149,10 +4128,27 @@ export default function App() {
 
     try {
       const text = frame.crypto?.decryptServerText(frame.data) ?? frame.data;
-      const events = frame.transport
-        ? frame.transport.decode(text)
-        : [JSON.parse(text) as ServerEvent];
-      events.forEach(enqueueServerEvent);
+      const parsed = JSON.parse(text) as Record<string, unknown>;
+      const messageType = typeof parsed.type === 'string' ? parsed.type : '';
+      if (messageType === 'server.result') {
+        // v2 command acknowledgements (session.resume, conversation.*). The
+        // legacy plane answers through ServerEvents, nothing to enqueue.
+        return;
+      }
+      if (messageType === 'server.error' && parsed.id !== undefined) {
+        // v2 command error envelope; surface the structured message.
+        const payload = parsed.payload as { code?: unknown; message?: unknown } | undefined;
+        const code = typeof payload?.code === 'string' ? payload.code : '';
+        const detail = typeof payload?.message === 'string' ? payload.message : 'v2 命令失败';
+        setLastError(code ? `[${code}] ${detail}` : detail);
+        return;
+      }
+      if (messageType === 'conversation.event') {
+        // Conversation-plane events are rendered by the dedicated v2 screen,
+        // not the legacy workbench timeline.
+        return;
+      }
+      enqueueServerEvent(parsed as unknown as ServerEvent);
     } catch (error) {
       setLastError(error instanceof Error ? error.message : 'failed to parse websocket message');
     }
@@ -4194,6 +4190,42 @@ export default function App() {
     scheduleSocketFrameDrain();
   }, [scheduleSocketFrameDrain]);
 
+  /** Raw `{id, type, payload}` frame on the unified /v2/ws socket: encrypt,
+   * guard the 8 MiB backend limit, send. Returns null when the frame never
+   * left (socket closed) and throws ConnectionError on oversize payloads. */
+  const sendRawProtocolFrame = useCallback((message: { id: string; type: string; payload: Record<string, unknown> }) => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return null;
+    }
+    let frame: string;
+    try {
+      frame = JSON.stringify(message);
+    } catch (error) {
+      setLastError(error instanceof Error ? error.message : '消息序列化失败。');
+      return null;
+    }
+    frame = socketCryptoRef.current?.encryptClientText(frame) ?? frame;
+    const size = utf8ByteLength(frame);
+    if (size > MAX_LEGACY_MESSAGE_BYTES) {
+      throw ConnectionError.messageTooLarge(size, MAX_LEGACY_MESSAGE_BYTES);
+    }
+    socket.send(frame);
+    return message;
+  }, []);
+
+  const sendSessionResume = useCallback((sessionCursors: Record<string, number>) => {
+    try {
+      sendRawProtocolFrame({
+        id: createRequestId('resume'),
+        type: 'session.resume',
+        payload: { sessionCursors },
+      });
+    } catch (error: unknown) {
+      setLastError(error instanceof ConnectionError ? error.userMessage : '会话恢复失败，请稍后重试。');
+    }
+  }, [sendRawProtocolFrame]);
+
   const pushSystem = useCallback(
     (title: string, subtitle = '') => {
       appendTimeline(makeSystemEntry(title, subtitle, activeWorkspaceRef.current, activeConversationRef.current));
@@ -4203,7 +4235,7 @@ export default function App() {
 
   const refreshServerVersion = useCallback(async () => {
     try {
-      const response = await fetch(buildHttpUrl(settings.serverUrl, '/v1/version'));
+      const response = await fetch(buildHttpUrl(settings.serverUrl, '/v2/version'));
       if (!response.ok) {
         throw new Error(`version endpoint returned ${response.status}`);
       }
@@ -4211,7 +4243,7 @@ export default function App() {
       setServerVersion(json);
     } catch (error) {
       setServerVersion(null);
-      setLastError(error instanceof Error ? error.message : 'failed to fetch /v1/version');
+      setLastError(error instanceof Error ? error.message : 'failed to fetch /v2/version');
     }
   }, [settings.serverUrl]);
 
@@ -4296,7 +4328,10 @@ export default function App() {
       return;
     }
 
-    const wsUrl = buildWebSocketUrl(settings.serverUrl, crypto?.queryString);
+    const wsUrl = buildV2WebSocketUrlWithOptions(settings.serverUrl, {
+      cryptoQueryString: crypto?.queryString,
+      authToken: settings.authToken,
+    });
     const options = settings.authToken
       ? { headers: { Authorization: `Bearer ${settings.authToken}` } }
       : undefined;
@@ -4310,13 +4345,11 @@ export default function App() {
       socketCryptoRef.current = crypto;
 
       socket.onopen = () => {
-        const transport = new TodeXTransportClient({
-          loadSessionCursors: getSessionCursorSnapshot,
-          onStatus: setTransportStatus,
-        });
-        transportClientRef.current = transport;
-        transport.attach(socket, (text) => socketCryptoRef.current?.encryptClientText(text) ?? text);
         setConnectionState('open');
+        // Replaces the legacy transport hello: resume Codex sessions from the
+        // client-side cursors so events emitted while disconnected are
+        // replayed by the backend.
+        sendSessionResume(getSessionCursorSnapshot());
         void checkConnectionHealth();
         void refreshServerVersion();
         void syncWorkspacesFromBackend();
@@ -4327,7 +4360,6 @@ export default function App() {
           data: String(event.data),
           generation,
           crypto: socketCryptoRef.current,
-          transport: transportClientRef.current,
         });
       };
 
@@ -4340,7 +4372,6 @@ export default function App() {
         setConnectionState((current) => (current === 'open' || current === 'connecting' ? 'closed' : current));
         if (socketRef.current === socket) {
           socketCryptoRef.current = null;
-          transportClientRef.current?.detach();
         }
       };
     } catch (error) {
@@ -4348,7 +4379,7 @@ export default function App() {
       socketCryptoRef.current = null;
       setLastError(error instanceof Error ? error.message : 'failed to connect');
     }
-  }, [checkConnectionHealth, closeSocket, enqueueSocketFrame, getSessionCursorSnapshot, refreshServerVersion, settings, syncWorkspacesFromBackend]);
+  }, [checkConnectionHealth, closeSocket, enqueueSocketFrame, getSessionCursorSnapshot, refreshServerVersion, sendSessionResume, settings, syncWorkspacesFromBackend]);
 
   useEffect(() => {
     if (!hydrated || !autoConnectEnabled || manualDisconnectRef.current) {
@@ -4396,7 +4427,15 @@ export default function App() {
         return false;
       }
 
-      const message = transportClientRef.current?.send(type, payload, requestId);
+      let message: { id: string; type: string; payload: Record<string, unknown> } | null;
+      try {
+        message = sendRawProtocolFrame({ id: requestId, type, payload });
+      } catch (error: unknown) {
+        setLastError(
+          error instanceof ConnectionError ? error.userMessage : '消息发送失败，请稍后重试。',
+        );
+        return false;
+      }
       if (!message) {
         setLastError('请先在设置里连接后端。');
         return false;
@@ -4410,7 +4449,7 @@ export default function App() {
       }
       return true;
     },
-    [appendTimeline],
+    [appendTimeline, sendRawProtocolFrame],
   );
 
   const seedTerminalState = useCallback((workspace: WorkspaceRecord, conversation: ConversationRecord, patch: Partial<TerminalClientState> = {}) => {
@@ -8621,7 +8660,7 @@ function ChatScreen({
     }
 
     const controller = new AbortController();
-    const url = new URL(buildHttpUrl(settings.serverUrl, '/v1/workspace/entries'));
+    const url = new URL(buildHttpUrl(settings.serverUrl, '/v2/workspace/entries'));
     url.searchParams.set('cwd', workspace.path);
     url.searchParams.set('query', mentionTrigger.query);
     url.searchParams.set('limit', '40');
@@ -10864,7 +10903,6 @@ function SettingsScreen({
             <View className="mt-3 gap-1">
               <View className="flex-row justify-between gap-3">
                 <HeroText className="text-xs text-muted">WebSocket: {runtimeStatus.socket}</HeroText>
-                <HeroText className="text-xs text-muted">Transport: {runtimeStatus.transport.status}</HeroText>
               </View>
               <View className="flex-row justify-between gap-3">
                 <HeroText className="text-xs text-muted">Daemon: {runtimeStatus.daemon}</HeroText>
@@ -10878,8 +10916,8 @@ function SettingsScreen({
               </View>
             </View>
           </Surface>
-            {runtimeStatus.transport.error ? (
-              <Text style={styles.connectionErrorText} numberOfLines={2}>{runtimeStatus.transport.error}</Text>
+            {runtimeStatus.daemon === 'offline' && connectionHealth.error ? (
+              <Text style={styles.connectionErrorText} numberOfLines={2}>{connectionHealth.error}</Text>
             ) : null}
           <Field
             label="Server URL"

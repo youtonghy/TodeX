@@ -3,9 +3,9 @@ import { ConnectionError } from './connectionError';
 import { MetricsCollector, type ConnectionMetrics } from './connectionMetrics';
 
 /**
- * Matches MAX_WS_MESSAGE_BYTES in the backend's server/v2.rs. The legacy `/v1/ws`
- * plane uses a separate, larger limit (MAX_LEGACY_MESSAGE_BYTES in transport.ts)
- * because it has no outbound chunking; the two converge once chunking lands.
+ * Client-side guard for `conversation.*` commands sent over /v2/ws. The
+ * backend socket accepts up to 8 MiB (legacy chat attachments travel as
+ * base64 data URLs without chunking); conversation payloads stay tighter.
  */
 export const MAX_MESSAGE_SIZE = 4 * 1024 * 1024;
 
@@ -137,10 +137,32 @@ export function buildV2WebSocketUrl(serverUrl: string): string {
   return url.toString();
 }
 
-export function buildV2WebSocketUrlWithToken(serverUrl: string, authToken?: string): string {
+export type V2WebSocketUrlOptions = {
+  /** Raw pairing-crypto query string (e.g. `enc=x25519&client_key=...`). */
+  cryptoQueryString?: string;
+  /** Bearer token; browsers cannot set WebSocket headers, so it rides as `access_token`. */
+  authToken?: string;
+};
+
+export function buildV2WebSocketUrlWithOptions(
+  serverUrl: string,
+  options: V2WebSocketUrlOptions = {},
+): string {
   const url = new URL(buildV2WebSocketUrl(serverUrl));
-  if (authToken) url.searchParams.set('access_token', authToken);
+  if (options.cryptoQueryString) {
+    const query = options.cryptoQueryString.replace(/^\?/, '');
+    for (const [key, value] of new URLSearchParams(query)) {
+      url.searchParams.set(key, value);
+    }
+  }
+  if (options.authToken) {
+    url.searchParams.set('access_token', options.authToken);
+  }
   return url.toString();
+}
+
+export function buildV2WebSocketUrlWithToken(serverUrl: string, authToken?: string): string {
+  return buildV2WebSocketUrlWithOptions(serverUrl, { authToken });
 }
 
 export class V2ApiClient {
@@ -177,15 +199,15 @@ export class V2ApiClient {
 
   async listWorkspaceDirectories(path?: string): Promise<{ root: string; current: string; parent: string | null; entries: Array<{ name: string; path: string; kind: 'directory' }> }> {
     const query = path ? `?path=${encodeURIComponent(path)}` : '';
-    return this.request(`/v1/workspace/directories${query}`);
+    return this.request(`/v2/workspace/directories${query}`);
   }
 
   async readWorkspaceFile(path: string): Promise<{ name: string; path: string; mimeType: string; sizeBytes: number; text?: string }> {
-    return this.request(`/v1/workspace/file?path=${encodeURIComponent(path)}`);
+    return this.request(`/v2/workspace/file?path=${encodeURIComponent(path)}`);
   }
 
   async fetchBrowser(url: string): Promise<{ url: string; status: number; contentType: string; body: string }> {
-    return this.request('/v1/browser/fetch', { method: 'POST', body: JSON.stringify({ url }) });
+    return this.request('/v2/browser/fetch', { method: 'POST', body: JSON.stringify({ url }) });
   }
 
   async listConversations(): Promise<{ conversations: ConversationManifest[] }> {

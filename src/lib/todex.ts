@@ -224,6 +224,37 @@ export function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+/**
+ * UTF-8 byte length of a string. String.length counts UTF-16 code units, which
+ * undercounts non-ASCII text, while the backend message limits are in bytes.
+ * Counted in place rather than via TextEncoder.encode().length so multi-megabyte
+ * frames are not copied on every send.
+ */
+export function utf8ByteLength(value: string): number {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 0x80) {
+      bytes += 1;
+    } else if (code < 0x800) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff && index + 1 < value.length) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        // Well-formed surrogate pair: one code point, four bytes.
+        bytes += 4;
+        index += 1;
+        continue;
+      }
+      // Lone surrogate; encoders emit U+FFFD, which is three bytes.
+      bytes += 3;
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
+
 export function normalizeServerUrl(raw: string): string {
   const value = raw.trim();
   if (!value) {
@@ -551,23 +582,6 @@ export function buildHttpUrl(serverUrl: string, pathname: string): string {
       ? url.replace(/^wss:\/\//i, 'https://')
       : url;
   return new URL(pathname, normalized).toString();
-}
-
-export function buildWebSocketUrl(serverUrl: string, queryString = ''): string {
-  const url = normalizeServerUrl(serverUrl);
-  const wsUrl =
-    url.startsWith('ws://') || url.startsWith('wss://')
-      ? new URL('/v1/ws', url)
-      : new URL(
-          '/v1/ws',
-          url.startsWith('https://')
-            ? url.replace(/^https:\/\//i, 'wss://')
-            : url.replace(/^http:\/\//i, 'ws://'),
-        );
-  if (queryString) {
-    wsUrl.search = queryString.startsWith('?') ? queryString.slice(1) : queryString;
-  }
-  return wsUrl.toString();
 }
 
 export function displayNameFromPath(path: string): string {
