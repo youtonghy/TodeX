@@ -137,6 +137,12 @@ export function buildV2WebSocketUrl(serverUrl: string): string {
   return url.toString();
 }
 
+export function buildV2WebSocketUrlWithToken(serverUrl: string, authToken?: string): string {
+  const url = new URL(buildV2WebSocketUrl(serverUrl));
+  if (authToken) url.searchParams.set('access_token', authToken);
+  return url.toString();
+}
+
 export class V2ApiClient {
   private readonly serverUrl: string;
   private readonly authToken: string;
@@ -318,11 +324,11 @@ export class V2ConversationSocket {
     const WebSocketImpl = this.options.WebSocketImpl ?? WebSocket;
     let socket: WebSocket;
     try {
-      socket = new WebSocketImpl(buildV2WebSocketUrl(this.options.serverUrl), this.options.authToken
+      socket = new WebSocketImpl(buildV2WebSocketUrlWithToken(this.options.serverUrl, this.options.authToken), this.options.authToken
         ? { headers: { Authorization: `Bearer ${this.options.authToken}` } } as never : undefined);
     } catch {
       // Browser WebSocket implementations reject React Native's header options.
-      socket = new WebSocketImpl(buildV2WebSocketUrl(this.options.serverUrl));
+      socket = new WebSocketImpl(buildV2WebSocketUrlWithToken(this.options.serverUrl, this.options.authToken));
     }
     this.socket = socket;
 
