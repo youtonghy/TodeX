@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const fs = require('node:fs');
 const { test } = require('node:test');
 const path = require('node:path');
 
@@ -878,4 +879,28 @@ test('v2 heartbeat stays quiet while pings are answered', (t) => {
   assert.equal(socket.closed, false);
   assert.equal(errors.length, 0);
   client.close();
+});
+
+test('main socket uses the single-argument WebSocket constructor', () => {
+  // Regression guard for the retired RN-style three-argument form: the third
+  // argument (header options) is ignored by Electron's WebSocket, so a header
+  // -only auth future would silently break. Authentication must ride on the
+  // URL built by buildV2WebSocketUrlWithOptions.
+  const appSource = fs.readFileSync(path.join(__dirname, '..', '..', 'App.tsx'), 'utf8');
+  assert.ok(
+    appSource.includes('const socket = new WebSocket(wsUrl);'),
+    'connect() must construct the socket with new WebSocket(wsUrl)',
+  );
+  assert.ok(
+    !appSource.includes('undefined, options)'),
+    'connect() must not pass a third WebSocket constructor argument',
+  );
+  assert.ok(
+    !/new \(WebSocket as typeof WebSocket/.test(appSource),
+    'connect() must not use the RN WebSocket constructor cast',
+  );
+  const connectStart = appSource.indexOf('const wsUrl = buildV2WebSocketUrlWithOptions');
+  const tryStart = appSource.indexOf('try {', connectStart);
+  const headerOptions = appSource.slice(connectStart, tryStart).match(/Authorization/);
+  assert.equal(headerOptions, null, 'connect() must not build header-only auth options');
 });

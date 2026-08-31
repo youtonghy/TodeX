@@ -4332,14 +4332,13 @@ export default function App() {
       cryptoQueryString: crypto?.queryString,
       authToken: settings.authToken,
     });
-    const options = settings.authToken
-      ? { headers: { Authorization: `Bearer ${settings.authToken}` } }
-      : undefined;
 
+    // Single-argument constructor, matching the Desktop session: authentication
+    // rides on the URL (access_token + pairing query). The old three-argument
+    // RN form passed headers in a position Electron ignores, which only worked
+    // because the token was already in the URL.
     try {
-      const socket = new (WebSocket as typeof WebSocket & {
-        new (uri: string, protocols?: string | string[] | null, options?: { headers?: Record<string, string> }): WebSocket;
-      })(wsUrl, undefined, options);
+      const socket = new WebSocket(wsUrl);
       const generation = socketGenerationRef.current;
       socketRef.current = socket;
       socketCryptoRef.current = crypto;
