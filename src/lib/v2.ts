@@ -287,13 +287,20 @@ export class V2ApiClient {
       clearTimeout(timeoutId);
 
       if (!response.ok) {
-        if (response.status === 401 || response.status === 403) {
+        const backendError = await response.json().catch(() => null) as {
+          code?: unknown;
+          message?: unknown;
+        } | null;
+        const backendCode = typeof backendError?.code === 'string' ? backendError.code : undefined;
+        const backendMessage = typeof backendError?.message === 'string' ? backendError.message : undefined;
+        if (response.status === 401 || backendCode === 'UNAUTHENTICATED' || backendCode === 'UNAUTHORIZED') {
           throw ConnectionError.authenticationFailed(response.status);
         }
-        if (response.status >= 500) {
-          throw ConnectionError.serverError(response.status);
-        }
-        throw ConnectionError.protocolError(response.status);
+        throw ConnectionError.apiRequestFailed(
+          response.status,
+          backendCode,
+          backendMessage,
+        );
       }
 
       return await response.json() as T;

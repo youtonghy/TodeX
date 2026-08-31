@@ -97,6 +97,44 @@ test('v2 API client sends bearer auth and JSON requests', async () => {
   assert.equal(requests[0].init.headers.get('Content-Type'), 'application/json');
 });
 
+test('v2 API client preserves structured backend request errors', async () => {
+  const client = new v2.V2ApiClient({
+    serverUrl: 'http://127.0.0.1:7345',
+    fetchImpl: async () => new Response(JSON.stringify({
+      code: 'WORKSPACE_PATH_OUTSIDE_ROOT',
+      message: 'workspace path escapes configured workspace root',
+    }), { status: 403, headers: { 'Content-Type': 'application/json' } }),
+  });
+  await assert.rejects(
+    () => client.createConversation({ provider: 'codex', workspace: '/outside' }),
+    (error) => {
+      assert.equal(error.code, 'request_failed');
+      assert.equal(error.retryable, false);
+      assert.match(error.userMessage, /Backend/);
+      assert.match(error.technicalDetails, /WORKSPACE_PATH_OUTSIDE_ROOT/);
+      return true;
+    },
+  );
+});
+
+test('v2 API client still classifies explicit auth failures', async () => {
+  const client = new v2.V2ApiClient({
+    serverUrl: 'http://127.0.0.1:7345',
+    fetchImpl: async () => new Response(JSON.stringify({
+      code: 'UNAUTHENTICATED',
+      message: 'authentication required',
+    }), { status: 401, headers: { 'Content-Type': 'application/json' } }),
+  });
+  await assert.rejects(
+    () => client.listConversations(),
+    (error) => {
+      assert.equal(error.code, 'authentication_failed');
+      assert.equal(error.retryable, false);
+      return true;
+    },
+  );
+});
+
 test('v2 API client builds read-only capability catalog requests', async () => {
   const requests = [];
   const client = new v2.V2ApiClient({

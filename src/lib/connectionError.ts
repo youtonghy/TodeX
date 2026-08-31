@@ -20,7 +20,8 @@ export type ConnectionFailureCode =
   | 'authentication_failed'
   | 'protocol_mismatch'
   | 'websocket_failed'
-  | 'provider_unavailable';
+  | 'provider_unavailable'
+  | 'request_failed';
 
 export class ConnectionError extends Error {
   constructor(
@@ -154,6 +155,41 @@ export class ConnectionError extends Error {
     );
   }
 
+  static apiRequestFailed(status: number, backendCode?: string, backendMessage?: string): ConnectionError {
+    const details = [
+      `HTTP ${status}`,
+      backendCode?.trim(),
+      backendMessage?.trim(),
+    ].filter(Boolean).join(' · ');
+    let userMessage = backendMessage?.trim() || `请求失败（HTTP ${status}）`;
+    switch (backendCode) {
+      case 'WORKSPACE_PATH_NOT_FOUND':
+        userMessage = '工作区目录不存在，请重新选择 Backend 上的目录';
+        break;
+      case 'WORKSPACE_PATH_OUTSIDE_ROOT':
+        userMessage = '工作区目录不在 Backend 允许的根目录内';
+        break;
+      case 'PROVIDER_UNAVAILABLE':
+        return ConnectionError.providerUnavailable(backendMessage?.trim() || '该 Agent 当前不可用');
+    }
+    if (status >= 500) {
+      return new ConnectionError(
+        ConnectionErrorType.SERVER_ERROR,
+        '服务器暂时不可用，请稍后重试',
+        details,
+        true,
+        'request_failed',
+      );
+    }
+    return new ConnectionError(
+      ConnectionErrorType.PROTOCOL_ERROR,
+      userMessage,
+      details,
+      status >= 500,
+      'request_failed',
+    );
+  }
+
   static unreachable(details: string): ConnectionError {
     const lower = details.toLowerCase();
     if (lower.includes('err_connection_refused') || lower.includes('econnrefused')) {
@@ -192,6 +228,8 @@ export function connectionFailureLabel(code?: ConnectionFailureCode | ''): strin
       return 'WebSocket 握手失败';
     case 'provider_unavailable':
       return 'Agent 不可用';
+    case 'request_failed':
+      return '请求失败';
     default:
       return '';
   }
