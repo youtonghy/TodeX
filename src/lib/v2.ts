@@ -37,6 +37,38 @@ export type ProviderDescriptor = {
   unavailableReason?: string;
   profiles: string[];
   capabilities: Record<string, boolean>;
+  models: ProviderModelDescriptor[];
+};
+
+export type ProviderModelDescriptor = {
+  id: string;
+  displayName: string;
+  description: string;
+  isDefault: boolean;
+  supportedReasoningEfforts: string[];
+  contextWindow?: number;
+};
+
+export type ProviderModelsResponse = {
+  provider: ProviderKind;
+  models: ProviderModelDescriptor[];
+  source: string;
+  fetchedAt: string;
+};
+
+export type ProviderCommandDescriptor = {
+  name: string;
+  description: string;
+  source: string;
+  invocation: string;
+  argumentHint?: string;
+};
+
+export type ProviderCommandsResponse = {
+  provider: ProviderKind;
+  commands: ProviderCommandDescriptor[];
+  source: string;
+  fetchedAt: string;
 };
 
 export type CatalogScope = 'user' | 'project';
@@ -196,12 +228,23 @@ export class V2ApiClient {
   constructor(options: V2ApiOptions) {
     this.serverUrl = options.serverUrl;
     this.authToken = options.authToken ?? '';
-    this.fetchImpl = options.fetchImpl ?? fetch;
+    // Browser fetch requires its Window receiver when called outside `window`.
+    this.fetchImpl = options.fetchImpl ?? (typeof window !== 'undefined' ? fetch.bind(window) : fetch);
     this.timeout = options.timeout ?? 30000;
   }
 
   async listProviders(): Promise<{ providers: ProviderDescriptor[] }> {
     return this.request('/v2/providers');
+  }
+
+  async listProviderModels(provider: ProviderKind, workspace: string): Promise<ProviderModelsResponse> {
+    const query = new URLSearchParams({ provider, workspace });
+    return this.request(`/v2/providers/models?${query}`);
+  }
+
+  async listProviderCommands(provider: ProviderKind, workspace: string): Promise<ProviderCommandsResponse> {
+    const query = new URLSearchParams({ provider, workspace });
+    return this.request(`/v2/providers/commands?${query}`);
   }
 
   async listSkillCatalog(provider: ProviderKind, workspace: string): Promise<SkillCatalog> {
@@ -222,6 +265,11 @@ export class V2ApiClient {
   async listWorkspaceDirectories(path?: string): Promise<{ root: string; current: string; parent: string | null; entries: Array<{ name: string; path: string; kind: 'directory' }> }> {
     const query = path ? `?path=${encodeURIComponent(path)}` : '';
     return this.request(`/v2/workspace/directories${query}`);
+  }
+
+  async listWorkspaceEntries(cwd: string, query = '', limit = 40): Promise<{ entries: Array<{ name: string; path: string; kind: 'directory' | 'file' }> }> {
+    const params = new URLSearchParams({ cwd, query, limit: String(limit) });
+    return this.request(`/v2/workspace/entries?${params}`);
   }
 
   async readWorkspaceFile(path: string): Promise<{ name: string; path: string; mimeType: string; sizeBytes: number; text?: string }> {
@@ -466,11 +514,12 @@ export class V2ConversationSocket {
     this.send('conversation.subscribe', { conversationId, afterSequence, limit });
   }
 
-  sendPrompt(conversationId: string, text: string, model?: string, skills?: PromptSkillRef[]): void {
+  sendPrompt(conversationId: string, text: string, model?: string, skills?: PromptSkillRef[], reasoningEffort?: string): void {
     this.send('conversation.prompt', {
       conversationId,
       text,
       ...(model ? { model } : {}),
+      ...(reasoningEffort ? { reasoningEffort } : {}),
       ...(skills?.length ? { skills } : {}),
     });
   }
