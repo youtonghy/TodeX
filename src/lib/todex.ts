@@ -14,6 +14,18 @@ export type ConnectionSettings = {
   sandboxMode: string;
 };
 
+export type BackendConnectionProfile = {
+  id: string;
+  name: string;
+  serverUrl: string;
+  authToken: string;
+  tenantId: string;
+  encryptionProtocol: ConnectionSettings['encryptionProtocol'];
+  encryptionPublicKey: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
 export type CodexModelCatalogItem = {
   id: string;
   model: string;
@@ -109,6 +121,7 @@ export type WorkspaceRecord = {
   id: string;
   name: string;
   path: string;
+  backendConnectionId?: string | null;
   sessionId: string;
   tenantId: string;
   threadId: string;
@@ -637,6 +650,7 @@ export function normalizeWorkspaceRecord(value: unknown): WorkspaceRecord | null
     id,
     name,
     path,
+    backendConnectionId: stringField(value, ['backendConnectionId', 'backend_connection_id']) || null,
     sessionId: stringField(value, ['sessionId', 'session_id']) || `cdxs_${id}`,
     tenantId: stringField(value, ['tenantId', 'tenant_id']) || 'local',
     threadId: stringField(value, ['threadId', 'thread_id']),
@@ -671,6 +685,7 @@ export function prepareWorkspaceSyncPayload(workspaces: WorkspaceRecord[]): Work
     .filter((workspace): workspace is WorkspaceRecord => Boolean(workspace))
     .map((workspace) => ({
       ...workspace,
+      backendConnectionId: undefined,
       threadId: '',
       localAdapterState: 'idle' as LocalAdapterState,
       reasoningEffort: normalizeReasoningEffort(workspace.reasoningEffort) ?? null,
