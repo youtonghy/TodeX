@@ -713,6 +713,7 @@ export function mergeWorkspaceRecords(local: WorkspaceRecord[], remote: Workspac
     if (candidateUpdatedAt > existingUpdatedAt || (preferCandidateOnTie && candidateUpdatedAt === existingUpdatedAt)) {
       merged[existingIndex] = {
         ...normalized,
+        backendConnectionId: normalized.backendConnectionId ?? existing.backendConnectionId ?? null,
         localAdapterState: preserveRuntimeAdapterState(existing.localAdapterState, normalized.localAdapterState),
       };
     }
