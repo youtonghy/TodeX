@@ -116,12 +116,14 @@ export type ConversationManifest = {
   provider: ProviderKind;
   ownerId: string;
   workspace: string;
+  workspaceId?: string;
   title?: string;
   providerProfile?: string;
   status: string;
   lastSequence: number;
   createdAt: string;
   updatedAt: string;
+  archivedAt?: string;
 };
 
 export type ConversationEvent = {
@@ -160,6 +162,44 @@ export type CreateConversationInput = {
   workspace: string;
   title?: string;
   providerProfile?: string;
+};
+
+export type GitAction = 'initial' | 'commit' | 'commit-push' | 'push';
+
+export type GitFileChange = {
+  path: string;
+  status: string;
+  additions?: number;
+  deletions?: number;
+};
+
+export type GitRepositorySummary = {
+  path: string;
+  name: string;
+  branch: string;
+  files: GitFileChange[];
+  additions: number;
+  deletions: number;
+  initialEligible: boolean;
+  error?: string;
+  filesTruncated?: boolean;
+};
+
+export type GitScanResponse = {
+  repositories: GitRepositorySummary[];
+};
+
+export type GitRunRequest = {
+  workspacePath: string;
+  action: GitAction;
+  message?: string;
+  includeUnstaged?: boolean;
+};
+
+export type GitRunResponse = {
+  repositoryPath: string;
+  action: GitAction;
+  output: string;
 };
 
 function jsonObject(value: unknown): Record<string, unknown> {
@@ -280,8 +320,27 @@ export class V2ApiClient {
     return this.request('/v2/browser/fetch', { method: 'POST', body: JSON.stringify({ url }) });
   }
 
+  async scanGit(workspacePath: string): Promise<GitScanResponse> {
+    const query = new URLSearchParams({ workspacePath });
+    return this.request(`/v2/git/scan?${query}`);
+  }
+
+  async runGit(request: GitRunRequest): Promise<GitRunResponse> {
+    return this.request('/v2/git/run', { method: 'POST', body: JSON.stringify(request) });
+  }
+
   async listConversations(): Promise<{ conversations: ConversationManifest[] }> {
     return this.request('/v2/conversations');
+  }
+
+  async updateConversation(id: string, input: { title?: string; archived?: boolean }): Promise<ConversationManifest> {
+    return this.request(`/v2/conversations/${encodeURIComponent(id)}`, {
+      method: 'PATCH', body: JSON.stringify(input),
+    });
+  }
+
+  async deleteConversation(id: string): Promise<void> {
+    await this.request(`/v2/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
 
   async createConversation(input: CreateConversationInput): Promise<ConversationManifest> {
@@ -297,10 +356,17 @@ export class V2ApiClient {
     return this.request(`/v2/conversations/${encodeURIComponent(id)}/events?${query}`);
   }
 
-  async prompt(id: string, text: string, model?: string, skills?: PromptSkillRef[]): Promise<{ conversationId: string; turnId: string }> {
+  async prompt(
+    id: string,
+    text: string,
+    model?: string,
+    skills?: PromptSkillRef[],
+    reasoningEffort?: string,
+  ): Promise<{ conversationId: string; turnId: string }> {
     const body: Record<string, unknown> = { text };
     if (model) body.model = model;
     if (skills?.length) body.skills = skills;
+    if (reasoningEffort?.trim()) body.reasoningEffort = reasoningEffort.trim();
     return this.request(`/v2/conversations/${encodeURIComponent(id)}/prompt`, {
       method: 'POST', body: JSON.stringify(body),
     });

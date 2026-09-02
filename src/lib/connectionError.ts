@@ -171,6 +171,14 @@ export class ConnectionError extends Error {
         break;
       case 'PROVIDER_UNAVAILABLE':
         return ConnectionError.providerUnavailable(backendMessage?.trim() || '该 Agent 当前不可用');
+      case 'GIT_PARTIAL_SUCCESS':
+        return new ConnectionError(
+          ConnectionErrorType.PROTOCOL_ERROR,
+          '本地提交已创建，但推送失败；已刷新仓库状态，请检查远端后单独推送',
+          details,
+          false,
+          'request_failed',
+        );
     }
     if (status >= 500) {
       return new ConnectionError(

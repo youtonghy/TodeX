@@ -2052,3 +2052,53 @@ export function parseSlashCommand(input: string): {
 
   return null;
 }
+
+// Keep mobile parity helpers available through the existing protocol barrel.
+export {
+  buildConversationRenderItems,
+  classifyV2ConversationEvent,
+  contextUsageFromV2Event,
+  conversationFromManifest,
+  conversationPreviewText,
+  executionGroupId,
+  isChatReminderEntry,
+  isCollapsibleProgressEntry,
+  isLifecycleProgressText,
+  isLoopbackHostname,
+  isLoopbackUrl,
+  isStepProgressEntry,
+  isThinkingProgressEntry,
+  isVisibleConversationEntry,
+  normalizeBackendConnectionProfile,
+  normalizeBackendConnectionProfiles,
+  normalizeConversationReasoningEffort,
+  normalizeConversationRecord,
+  normalizeUsageRecords,
+  profileFromSettings,
+  providerIconFor,
+  providerIconMetadata,
+  settingsFromProfile,
+  usageNumber,
+  usageRecordFromEvent,
+  usageRecordFromV2Event,
+  validateLoopbackUrl,
+  workspaceLinkTarget,
+  PROVIDER_ICON_METADATA,
+  MAX_USAGE_RECORDS,
+} from './mobileParity';
+export type {
+  BackendProfileNormalizeOptions,
+  ConversationContextUsage,
+  ConversationManifestNormalizeOptions,
+  ConversationNormalizeOptions,
+  ConversationRecord,
+  ConversationRenderItem,
+  LoopbackUrlValidation,
+  ProviderIconMetadata,
+  TimelineEntry,
+  UsageNormalizeOptions,
+  UsageRecord,
+  UsageRecordContext,
+  WorkspaceLinkOptions,
+  WorkspaceLinkTarget,
+} from './mobileParity';

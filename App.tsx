@@ -33,6 +33,7 @@ import {
   View,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { WebView } from 'react-native-webview';
 import * as Clipboard from 'expo-clipboard';
 import { CameraView, useCameraPermissions, type BarcodeScanningResult } from 'expo-camera';
 import * as DocumentPicker from 'expo-document-picker';
@@ -64,6 +65,7 @@ import {
 import { useUniwind, withUniwind } from 'uniwind';
 
 import {
+  BackendConnectionProfile,
   ConnectionSettings,
   CodexNativeThread,
   CodexModelCatalogItem,
@@ -130,8 +132,30 @@ import {
 } from './src/lib/transport';
 import { ConnectionError, connectionFailureLabel } from './src/lib/connectionError';
 import { probeBackendConnection, nextReconnectDelayMs, inspectServerUrl, tokenMatchesOrigin } from './src/lib/connectionProbe';
-import { V2ApiClient, V2ConversationSocket, buildV2WebSocketUrlWithOptions, providerDisplayName, type ConversationEvent, type ConversationManifest, type ProviderDescriptor, type ProviderKind, type SkillCatalogDescriptor } from './src/lib/v2';
+import { V2ApiClient, V2ConversationSocket, buildV2WebSocketUrlWithOptions, providerDisplayName, type ConversationEvent, type ConversationManifest, type GitAction, type GitRepositorySummary as V2GitRepositorySummary, type ProviderCommandDescriptor, type ProviderDescriptor, type ProviderKind, type ProviderModelDescriptor, type SkillCatalogDescriptor } from './src/lib/v2';
 import { CapabilitiesScreen, type CatalogState } from './src/components/CapabilitiesScreen';
+import { ProviderIcon } from './src/components/ProviderIcon';
+import { UsageScreen } from './src/screens/UsageScreen';
+import { AboutScreen } from './src/screens/AboutScreen';
+import { KanbanScreen } from './src/screens/KanbanScreen';
+import { FilesScreen } from './src/screens/FilesScreen';
+import { BrowserScreen, type BrowserFetchResult } from './src/screens/BrowserScreen';
+import { WorkbenchScreen, type WorkbenchTab } from './src/screens/WorkbenchScreen';
+import { GitScreen } from './src/screens/GitScreen';
+import {
+  contextUsageFromV2Event as sharedContextUsageFromV2Event,
+  classifyV2ConversationEvent as sharedClassifyV2ConversationEvent,
+  normalizeBackendConnectionProfile as sharedNormalizeBackendConnectionProfile,
+  normalizeBackendConnectionProfiles as sharedNormalizeBackendConnectionProfiles,
+  normalizeUsageRecords as sharedNormalizeUsageRecords,
+  profileFromSettings as sharedProfileFromSettings,
+  settingsFromProfile as sharedSettingsFromProfile,
+  usageRecordFromV2Event as sharedUsageRecordFromV2Event,
+  validateLoopbackUrl,
+  workspaceLinkTarget as sharedWorkspaceLinkTarget,
+  type UsageRecord as SharedUsageRecord,
+  type WorkspaceLinkTarget,
+} from './src/lib/mobileParity';
 
 type RootStackParamList = {
   Workspaces: undefined;
@@ -145,6 +169,13 @@ type RootStackParamList = {
   Terminal: { workspaceId: string; conversationId: string };
   Settings: undefined;
   Capabilities: undefined;
+  Browser: { workspaceId: string; conversationId: string; url?: string; filePath?: string };
+  Files: { workspaceId: string; conversationId: string; filePath?: string };
+  Usage: undefined;
+  About: undefined;
+  Kanban: undefined;
+  Workbench: { workspaceId: string; conversationId: string; tab?: WorkbenchTab };
+  Git: { workspaceId: string; conversationId: string };
 };
 
 type ServerVersion = {
@@ -170,6 +201,7 @@ type WorkspaceDirectorySnapshot = {
 type ConversationRecord = {
   id: string;
   workspaceId: string;
+  backendConnectionId?: string | null;
   title: string;
   preview?: string;
   nativeStatus?: string;
@@ -182,10 +214,56 @@ type ConversationRecord = {
   goalObjective?: string;
   provider?: ProviderKind | string;
   providerProfile?: string;
+  model?: string;
+  reasoningEffort?: string | null;
   v2ConversationId?: string;
   lastSequence?: number;
   createdAt: number;
   updatedAt: number;
+};
+
+type MobileUsageRecord = {
+  id: string;
+  workspaceId: string;
+  conversationId: string;
+  provider: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  cacheWriteTokens: number;
+  contextWindow?: number;
+  updatedAt: number;
+};
+
+type MobileContextUsage = {
+  usedTokens: number;
+  contextWindow?: number;
+  model?: string;
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  cacheWriteTokens: number;
+  updatedAt: number;
+};
+
+type MobileWorkbenchState = {
+  tabs: Array<'terminal' | 'browser' | 'files' | 'git-diff'>;
+  activeTab: 'terminal' | 'browser' | 'files' | 'git-diff';
+  browserUrl: string;
+  browserFilePath: string;
+  inspectedElement: { selector: string; tagName: string; text: string } | null;
+};
+
+type GitRepositorySummary = {
+  path: string;
+  name: string;
+  branch: string;
+  initialEligible: boolean;
+  files: Array<{ path: string; status: string; additions: number; deletions: number }>;
+  additions: number;
+  deletions: number;
+  error?: string;
 };
 
 type PendingThreadList = {
@@ -947,6 +1025,25 @@ function reasoningEffortLabel(value: string | null | undefined): string {
   return normalized ? REASONING_EFFORT_LABELS[normalized] ?? normalized : 'Default';
 }
 
+function compactTokenCount(value: number | null | undefined): string {
+  const numeric = typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0;
+  if (numeric >= 1_000_000) return `${(numeric / 1_000_000).toFixed(1)}M`;
+  if (numeric >= 10_000) return `${Math.round(numeric / 1_000)}K`;
+  if (numeric >= 1_000) return `${(numeric / 1_000).toFixed(1)}K`;
+  return String(Math.round(numeric));
+}
+
+function extractMessageLinks(value: string): string[] {
+  const markdownTargets = [...value.matchAll(/\[[^\]]*\]\(\s*<?([^\s)>]+)>?(?:\s+["'][^"']*["'])?\s*\)/g)]
+    .map((match) => match[1]);
+  const bareTargets = value.match(
+    /https?:\/\/[^\s<>"']+|(?:\.\.?\/|\/)?(?:[\w@+.-]+\/)+[\w@+.-]+(?:#[^\s<>()"']*)?|(?:\.\.?\/|\/)[^\s<>()"'`]+|\b(?:Makefile|Dockerfile|Containerfile|Gemfile|Rakefile|Podfile)\b|\b[\w@+.-]+\.(?:mdx?|txt|json|jsonc|ya?ml|toml|ini|env|css|scss|sass|less|js|jsx|mjs|cjs|ts|tsx|rs|py|rb|php|sh|bash|zsh|fish|swift|go|java|kt|kts|c|cc|cpp|h|hpp|cs|html?|xhtml|svg|xml|sql|graphql|gql)(?:#[^\s<>()"']*)?/gi,
+  ) ?? [];
+  return [...new Set([...markdownTargets, ...bareTargets]
+    .map((item) => item.replace(/^[`<]+|[`>),.;!?]+$/g, ''))
+    .filter(Boolean))].slice(0, 8);
+}
+
 function modelDisplayLabel(model: string | null | undefined, catalog: CodexModelCatalogItem[]): string {
   const normalized = model?.trim() ?? '';
   if (!normalized) {
@@ -1067,6 +1164,19 @@ function textFromItem(item: Record<string, unknown>): string {
 }
 
 type PersistedSettings = Omit<ConnectionSettings, 'authToken'>;
+type PersistedBackendConnectionProfile = Omit<BackendConnectionProfile, 'authToken'>;
+
+function profileSettings(profile: BackendConnectionProfile, base: ConnectionSettings = defaultSettings): ConnectionSettings {
+  return sharedSettingsFromProfile(profile, base);
+}
+
+function profileFromSettings(settings: ConnectionSettings, id: string, name?: string): BackendConnectionProfile {
+  return sharedProfileFromSettings(settings, name?.trim() || '当前后端', id);
+}
+
+function normalizeBackendProfile(value: unknown): BackendConnectionProfile | null {
+  return sharedNormalizeBackendConnectionProfile(value);
+}
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 const navigationRef = createNavigationContainerRef<RootStackParamList>();
@@ -1102,6 +1212,10 @@ const SESSION_CURSORS_STORAGE_KEY = 'todex.mobile.sessionCursors.v1';
 const EXPERIMENTAL_FEATURES_STORAGE_KEY = 'todex.mobile.experimentalFeatures.v1';
 const TOKEN_STORAGE_KEY = 'todex.mobile.token.v1';
 const TOKEN_ORIGIN_STORAGE_KEY = 'todex.mobile.tokenOrigin.v1';
+const BACKEND_PROFILES_STORAGE_KEY = 'todex.mobile.backendConnections.v1';
+const BACKEND_PROFILE_ACTIVE_STORAGE_KEY = 'todex.mobile.activeBackendConnection.v1';
+const USAGE_RECORDS_STORAGE_KEY = 'todex.mobile.usageRecords.v1';
+const WORKBENCH_STATE_STORAGE_KEY = 'todex.mobile.workbench.v1';
 const JSON_SAVE_DEBOUNCE_MS = 350;
 const SESSION_CURSOR_SAVE_DEBOUNCE_MS = 800;
 const WORKSPACE_SYNC_DEBOUNCE_MS = 900;
@@ -1111,6 +1225,11 @@ const SOCKET_FRAME_DECODE_BUDGET_MS = 10;
 const MAX_TRANSPORT_HELLO_SESSION_CURSORS = 12;
 const MAX_TIMELINE_ITEMS = 260;
 const MAX_EVENTS = 220;
+const MAX_USAGE_RECORDS = 2000;
+
+function backendProfileTokenKey(profileId: string): string {
+  return `todex.mobile.backend.${encodeURIComponent(profileId)}.token.v1`;
+}
 const CHAT_ATTACH_REPLAY_LIMIT = 200;
 const CHAT_BOTTOM_FOLLOW_THRESHOLD = 72;
 const TERMINAL_MAX_OUTPUT_ENTRIES = 420;
@@ -1378,6 +1497,54 @@ const defaultConnectionHealth: ConnectionHealth = {
   code: '',
 };
 
+const DEFAULT_WORKBENCH_STATE: MobileWorkbenchState = {
+  tabs: ['terminal', 'browser', 'files', 'git-diff'],
+  activeTab: 'terminal',
+  browserUrl: '',
+  browserFilePath: '',
+  inspectedElement: null,
+};
+
+const WORKBENCH_TABS: readonly WorkbenchTab[] = ['terminal', 'browser', 'files', 'git-diff'];
+
+function normalizeWorkbenchState(value: unknown): MobileWorkbenchState {
+  const raw = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const tabs = Array.isArray(raw.tabs)
+    ? raw.tabs.filter((tab): tab is WorkbenchTab => typeof tab === 'string' && WORKBENCH_TABS.includes(tab as WorkbenchTab))
+    : [];
+  const normalizedTabs = tabs.length ? [...new Set(tabs)] : [...WORKBENCH_TABS];
+  const activeTab = typeof raw.activeTab === 'string' && normalizedTabs.includes(raw.activeTab as WorkbenchTab)
+    ? raw.activeTab as WorkbenchTab
+    : normalizedTabs[0] as WorkbenchTab;
+  const inspected = raw.inspectedElement && typeof raw.inspectedElement === 'object' && !Array.isArray(raw.inspectedElement)
+    ? raw.inspectedElement as Record<string, unknown>
+    : null;
+  return {
+    tabs: normalizedTabs,
+    activeTab,
+    browserUrl: typeof raw.browserUrl === 'string' ? raw.browserUrl : '',
+    browserFilePath: typeof raw.browserFilePath === 'string' ? raw.browserFilePath : '',
+    inspectedElement: inspected && typeof inspected.selector === 'string'
+      ? {
+          selector: inspected.selector.slice(0, 200),
+          tagName: typeof inspected.tagName === 'string' ? inspected.tagName.slice(0, 40) : '',
+          text: typeof inspected.text === 'string' ? inspected.text.slice(0, 500) : '',
+        }
+      : null,
+  };
+}
+
+function normalizeWorkbenchMap(value: unknown): Record<string, MobileWorkbenchState> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const result: Record<string, MobileWorkbenchState> = {};
+  for (const [conversationId, state] of Object.entries(value as Record<string, unknown>)) {
+    if (conversationId.trim()) result[conversationId] = normalizeWorkbenchState(state);
+  }
+  return result;
+}
+
 function modelCommandInitialValue(workspace: WorkspaceRecord, settings: ConnectionSettings): string {
   return [workspace.model || settings.defaultModel, normalizeReasoningEffort(workspace.reasoningEffort)]
     .filter(Boolean)
@@ -1476,6 +1643,23 @@ function authHeaders(settings: ConnectionSettings, extra: Record<string, string>
   };
 }
 
+const apiClientCache = new Map<string, V2ApiClient>();
+
+function apiClientForConnection(settings: ConnectionSettings, profile?: BackendConnectionProfile | null): V2ApiClient {
+  const serverUrl = profile ? profile.serverUrl : settings.serverUrl;
+  const authToken = profile ? profile.authToken : settings.authToken;
+  const key = `${serverUrl}\n${authToken}`;
+  const cached = apiClientCache.get(key);
+  if (cached) return cached;
+  const client = new V2ApiClient({ serverUrl, authToken });
+  apiClientCache.set(key, client);
+  if (apiClientCache.size > 12) {
+    const oldest = apiClientCache.keys().next().value;
+    if (typeof oldest === 'string') apiClientCache.delete(oldest);
+  }
+  return client;
+}
+
 function workspaceSyncPayloadEquals(left: WorkspaceRecord[], right: WorkspaceRecord[]): boolean {
   return JSON.stringify(prepareWorkspaceSyncPayload(left)) === JSON.stringify(prepareWorkspaceSyncPayload(right));
 }
@@ -1570,6 +1754,169 @@ function isV2Conversation(conversation: ConversationRecord | null | undefined): 
   return Boolean(conversation?.v2ConversationId || (conversation?.provider && conversation.provider !== ''));
 }
 
+function resolveCreateAgent(
+  requestedProvider: ProviderKind | undefined,
+  requestedProfile: string | undefined,
+  providers: ProviderDescriptor[],
+  conversations: ConversationRecord[],
+  activeConversationId: string,
+  workspaceId: string,
+): { provider: ProviderKind; providerProfile?: string } | null {
+  const available = providers.filter((provider) => provider.available);
+  const requested = requestedProvider ? available.find((provider) => provider.id === requestedProvider) : undefined;
+  const active = conversations.find((conversation) => conversation.id === activeConversationId && conversation.workspaceId === workspaceId);
+  const preferred = active?.provider ? available.find((provider) => provider.id === active.provider) : undefined;
+  const last = conversations
+    .filter((conversation) => conversation.workspaceId === workspaceId && conversation.provider)
+    .sort((left, right) => right.updatedAt - left.updatedAt)
+    .map((conversation) => available.find((provider) => provider.id === conversation.provider))
+    .find((provider): provider is ProviderDescriptor => Boolean(provider));
+  const descriptor = requested || preferred || last || available[0];
+  if (!descriptor) return null;
+  return {
+    provider: descriptor.id,
+    providerProfile: requestedProfile || descriptor.profiles[0],
+  };
+}
+
+function canSwitchConversationAgent(
+  conversation: ConversationRecord,
+  timeline: TimelineEntry[],
+  thinking: boolean,
+): boolean {
+  if (thinking) return false;
+  if (timeline.some((entry) => entry.conversationId === conversation.id && (entry.kind === 'incoming' || entry.kind === 'outgoing'))) {
+    return false;
+  }
+  return !conversation.v2ConversationId || conversation.provider !== undefined;
+}
+
+function browserHtmlForWebView(body: string, baseUrl: string, inspectMode: boolean): string {
+  const withoutScripts = body
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+  const base = baseUrl
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+  const baseTag = validateLoopbackUrl(baseUrl).ok ? `<base href="${base}">` : '';
+  const inspector = inspectMode ? `
+    <script>
+      (function () {
+        document.addEventListener('click', function (event) {
+          var target = event.target;
+          if (!target || !target.closest) return;
+          event.preventDefault();
+          var node = target.closest('*');
+          var selector = node && node.tagName ? node.tagName.toLowerCase() : '';
+          if (node && node.id) selector += '#' + node.id;
+          window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'inspect', selector: selector, tagName: node && node.tagName || '', text: (node && node.textContent || '').trim().slice(0, 500)
+          }));
+        }, true);
+      }());
+    </script>` : '';
+  return `<!doctype html><html><head><meta charset="utf-8">${baseTag}<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; form-action 'none'; base-uri 'self' http://127.0.0.1:* http://localhost:* http://[::1]:*;"></head><body>${withoutScripts}${inspector}</body></html>`;
+}
+
+function browserLivePreviewUrl(resultUrl: string, backendUrl: string): string | null {
+  if (!validateLoopbackUrl(resultUrl).ok) return null;
+  try {
+    const target = new URL(resultUrl);
+    const backend = new URL(normalizeServerUrl(backendUrl));
+    target.hostname = backend.hostname;
+    return target.toString();
+  } catch {
+    return null;
+  }
+}
+
+function browserPreviewNavigationAllowed(url: string, livePreviewUrl: string | null): boolean {
+  if (url === 'about:blank' || url.startsWith('data:text/html')) return true;
+  if (!livePreviewUrl) return validateLoopbackUrl(url).ok;
+  try {
+    return new URL(url).origin === new URL(livePreviewUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+function BrowserPreviewWebView({
+  result,
+  backendUrl,
+  onInspect,
+}: {
+  result: BrowserFetchResult;
+  backendUrl: string;
+  onInspect: (element: NonNullable<MobileWorkbenchState['inspectedElement']>) => void;
+}) {
+  const [inspectMode, setInspectMode] = useState(false);
+  const [livePreviewFailed, setLivePreviewFailed] = useState(false);
+  const livePreviewUrl = browserLivePreviewUrl(result.url, backendUrl);
+  const livePreview = !inspectMode && Boolean(livePreviewUrl) && !livePreviewFailed;
+  useEffect(() => {
+    setLivePreviewFailed(false);
+  }, [backendUrl, result.url]);
+  return (
+    <View className="flex-1">
+      <View className="mb-2 flex-row items-center justify-end gap-2">
+        <Button
+          size="sm"
+          variant={inspectMode ? 'secondary' : 'primary'}
+          onPress={() => {
+            setInspectMode(false);
+            setLivePreviewFailed(false);
+          }}
+          className="min-h-11 rounded-lg"
+        >
+          <StyledIonicons name="navigate-outline" size={15} className={inspectMode ? 'text-foreground' : 'text-accent-foreground'} />
+          <Button.Label>预览</Button.Label>
+        </Button>
+        <Button size="sm" variant={inspectMode ? 'primary' : 'secondary'} onPress={() => setInspectMode(true)} className="min-h-11 rounded-lg">
+          <StyledIonicons name="scan-outline" size={15} className={inspectMode ? 'text-accent-foreground' : 'text-foreground'} />
+          <Button.Label>检查</Button.Label>
+        </Button>
+      </View>
+      <WebView
+        key={inspectMode ? 'inspect' : livePreview ? 'live-preview' : 'static-preview'}
+        style={{ flex: 1, minHeight: 240 }}
+        originWhitelist={['*']}
+        source={livePreview
+          ? { uri: livePreviewUrl! }
+          : { html: browserHtmlForWebView(result.body, result.url, inspectMode) }}
+        javaScriptEnabled
+        domStorageEnabled={livePreview}
+        setSupportMultipleWindows={false}
+        onShouldStartLoadWithRequest={(request) => (
+          browserPreviewNavigationAllowed(request.url, livePreviewUrl)
+        )}
+        onError={() => {
+          if (livePreview) setLivePreviewFailed(true);
+        }}
+        onHttpError={() => {
+          if (livePreview) setLivePreviewFailed(true);
+        }}
+        onMessage={(event) => {
+          try {
+            const value = JSON.parse(event.nativeEvent.data) as { type?: string; selector?: string; tagName?: string; text?: string };
+            if (value.type === 'inspect') {
+              onInspect({
+                selector: value.selector || '',
+                tagName: value.tagName || '',
+                text: value.text || '',
+              });
+            }
+          } catch {
+            // Inspector messages are untrusted preview input and may not be JSON.
+          }
+        }}
+      />
+    </View>
+  );
+}
+
 function conversationFromManifest(manifest: ConversationManifest, workspaceId: string): ConversationRecord {
   const createdAt = Date.parse(manifest.createdAt) || Date.now();
   const updatedAt = Date.parse(manifest.updatedAt) || createdAt;
@@ -1579,7 +1926,7 @@ function conversationFromManifest(manifest: ConversationManifest, workspaceId: s
     title: manifest.title || providerDisplayName(manifest.provider),
     preview: '',
     nativeStatus: manifest.status,
-    archived: false,
+    archived: Boolean(manifest.archivedAt),
     sessionId: `v2_${manifest.id}`,
     threadId: '',
     localAdapterState: 'idle',
@@ -1602,8 +1949,9 @@ function mergeManifestConversations(
 ): ConversationRecord[] {
   const next = [...current];
   for (const manifest of manifests) {
-    const workspace = workspaces.find((item) => item.path === manifest.workspace)
-      ?? workspaces.find((item) => manifest.workspace.startsWith(item.path));
+    const workspace = manifest.workspaceId
+      ? workspaces.find((item) => item.id === manifest.workspaceId)
+      : workspaces.find((item) => item.path === manifest.workspace);
     if (!workspace) {
       continue;
     }
@@ -1622,57 +1970,8 @@ function mergeManifestConversations(
   return next.sort((left, right) => right.updatedAt - left.updatedAt);
 }
 
-function classifyV2ConversationEvent(event: ConversationEvent, workspaceId: string): TimelineEntry | null {
-  const payload = event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
-    ? event.payload as Record<string, unknown>
-    : {};
-  const content = typeof payload.content === 'string'
-    ? payload.content
-    : typeof payload.text === 'string'
-      ? payload.text
-      : typeof payload.message === 'string'
-        ? payload.message
-        : '';
-  const role = typeof payload.role === 'string' ? payload.role : '';
-  if (event.type === 'message.created' && (role === 'user' || role === 'human')) {
-    return {
-      id: event.eventId,
-      kind: 'outgoing',
-      title: 'You',
-      subtitle: content,
-      raw: shortJson(event),
-      at: Date.parse(event.time) || Date.now(),
-      workspaceId,
-      conversationId: event.conversationId,
-    };
-  }
-  if (event.type === 'message.created' || event.type.endsWith('.delta') || event.type.includes('agent') || event.type.includes('assistant')) {
-    if (content || event.type === 'message.created') {
-      return {
-        id: event.eventId,
-        kind: 'incoming',
-        title: 'Agent',
-        subtitle: content || event.type,
-        raw: shortJson(event),
-        at: Date.parse(event.time) || Date.now(),
-        workspaceId,
-        conversationId: event.conversationId,
-      };
-    }
-  }
-  if (event.type === 'skill.injected' || event.type === 'permission.requested' || event.type === 'turn.failed') {
-    return {
-      id: event.eventId,
-      kind: 'system',
-      title: event.type,
-      subtitle: content || shortJson(payload),
-      raw: shortJson(event),
-      at: Date.parse(event.time) || Date.now(),
-      workspaceId,
-      conversationId: event.conversationId,
-    };
-  }
-  return null;
+function classifyV2ConversationEvent(event: ConversationEvent, workspaceId: string, activeTurnId = ''): TimelineEntry | null {
+  return sharedClassifyV2ConversationEvent(event, workspaceId, activeTurnId) as TimelineEntry | null;
 }
 
 function modeLabelOf(mode: ConversationRecord['mode']): string {
@@ -2440,6 +2739,7 @@ function createDefaultConversation(workspace: WorkspaceRecord): ConversationReco
   return {
     id: createRequestId('conversation'),
     workspaceId: workspace.id,
+    backendConnectionId: workspace.backendConnectionId ?? null,
     title: '默认对话',
     preview: '',
     nativeStatus: '',
@@ -2528,10 +2828,22 @@ export default function App() {
   const unmaterializedNativeThreadIdsRef = useRef(new Set<string>());
   const lastFailureRetryableRef = useRef(true);
   const reconnectAttemptRef = useRef(0);
+  const backendProfilesRef = useRef<BackendConnectionProfile[]>([]);
+  const activeBackendConnectionIdRef = useRef('');
+  const gitRepositoryRequestSeqRef = useRef(0);
+  const gitRepositoryTargetRef = useRef('');
+  const gitRepositoryActionSeqRef = useRef(0);
+  const gitRepositoryActionInFlightRef = useRef(false);
+  const usageRecordsRef = useRef<MobileUsageRecord[]>([]);
+  const v2ProvidersRef = useRef<ProviderDescriptor[]>([]);
+  const contextUsageRef = useRef<Record<string, MobileContextUsage>>({});
 
   const [hydrated, setHydrated] = useState(false);
+  const [backendSecretsHydrated, setBackendSecretsHydrated] = useState(false);
   const [autoConnectEnabled, setAutoConnectEnabled] = useState(false);
   const [settings, setSettings] = useState<ConnectionSettings>(defaultSettings);
+  const [backendProfiles, setBackendProfiles] = useState<BackendConnectionProfile[]>([]);
+  const [activeBackendConnectionId, setActiveBackendConnectionId] = useState('');
   const [workspaces, setWorkspaces] = useState<WorkspaceRecord[]>([]);
   const [conversations, setConversations] = useState<ConversationRecord[]>([]);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState('');
@@ -2576,6 +2888,19 @@ export default function App() {
   const [v2Providers, setV2Providers] = useState<ProviderDescriptor[]>([]);
   const [v2Conversations, setV2Conversations] = useState<ConversationManifest[]>([]);
   const [capabilityCatalogs, setCapabilityCatalogs] = useState<Partial<Record<ProviderKind, CatalogState>>>({});
+  const [providerModels, setProviderModels] = useState<Partial<Record<ProviderKind, ProviderModelDescriptor[]>>>({});
+  const [providerCommands, setProviderCommands] = useState<Partial<Record<ProviderKind, ProviderCommandDescriptor[]>>>({});
+  const [providerCatalogStatus, setProviderCatalogStatus] = useState<Partial<Record<ProviderKind, 'idle' | 'loading' | 'ready' | 'error'>>>({});
+  const [contextUsageByConversation, setContextUsageByConversation] = useState<Record<string, MobileContextUsage>>({});
+  const [usageRecords, setUsageRecords] = useState<MobileUsageRecord[]>([]);
+  const [workbenchByConversation, setWorkbenchByConversation] = useState<Record<string, MobileWorkbenchState>>({});
+  const [gitRepositories, setGitRepositories] = useState<GitRepositorySummary[]>([]);
+  const [gitRepositoryTarget, setGitRepositoryTarget] = useState('');
+  const [gitRepositoryStatus, setGitRepositoryStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [gitRepositoryError, setGitRepositoryError] = useState('');
+  const [gitRepositoryOutput, setGitRepositoryOutput] = useState('');
+  const [gitRepositoryOutputTarget, setGitRepositoryOutputTarget] = useState('');
+  const [gitRepositoryActionTarget, setGitRepositoryActionTarget] = useState('');
 
   useEffect(() => {
     if (!hydrated || !settings.serverUrl.trim()) {
@@ -2595,10 +2920,19 @@ export default function App() {
         setV2Providers([]);
         setV2Conversations([]);
       });
+    const refreshConversations = () => {
+      void api.listConversations().then((response) => {
+        if (!active) return;
+        setV2Conversations(response.conversations);
+        setConversations((current) => mergeManifestConversations(current, response.conversations, workspacesRef.current));
+      }).catch(() => undefined);
+    };
+    const refreshTimer = setInterval(refreshConversations, 15000);
     // The main connection below is the single `/v2/ws` socket; providers and
     // conversations lists are plain HTTP refreshes, no side channel needed.
     return () => {
       active = false;
+      clearInterval(refreshTimer);
     };
   }, [hydrated, settings.authToken, settings.serverUrl]);
 
@@ -2687,6 +3021,22 @@ export default function App() {
       }
       return { ...current, [conversationId]: next };
     });
+  }, []);
+
+  const rekeyConversationComposer = useCallback((fromId: string, toId: string) => {
+    if (!fromId || !toId || fromId === toId) return;
+    const move = <T,>(setter: Dispatch<SetStateAction<Record<string, T>>>) => {
+      setter((current) => {
+        if (!Object.prototype.hasOwnProperty.call(current, fromId)) return current;
+        const { [fromId]: value, ...rest } = current;
+        return { ...rest, [toId]: value as T };
+      });
+    };
+    move(setChatDrafts);
+    move(setQueuedChatDrafts);
+    move(setComposerSelections);
+    move(setComposerAttachments);
+    move(setSelectedSkills);
   }, []);
 
   const setConversationTurnId = useCallback((conversationId: string, value: string) => {
@@ -2870,6 +3220,10 @@ export default function App() {
         storedMentionHistory,
         storedSessionCursors,
         storedExperimentalFeatures,
+        storedBackendProfiles,
+        storedActiveBackendConnectionId,
+        storedUsageRecords,
+        storedWorkbenchState,
         storedToken,
         storedTokenOrigin,
       ] = await Promise.all([
@@ -2881,19 +3235,34 @@ export default function App() {
         loadJson<WorkspaceMentionHistory[]>(MENTION_HISTORY_STORAGE_KEY, []),
         loadJson<Record<string, number>>(SESSION_CURSORS_STORAGE_KEY, {}),
         loadJson<Partial<ExperimentalFeatureSettings> | null>(EXPERIMENTAL_FEATURES_STORAGE_KEY, null),
+        loadJson<unknown>(BACKEND_PROFILES_STORAGE_KEY, []),
+        loadJson<string>(BACKEND_PROFILE_ACTIVE_STORAGE_KEY, ''),
+        loadJson<MobileUsageRecord[]>(USAGE_RECORDS_STORAGE_KEY, []),
+        loadJson<unknown>(WORKBENCH_STATE_STORAGE_KEY, null),
         loadSecret(TOKEN_STORAGE_KEY),
         loadSecret(TOKEN_ORIGIN_STORAGE_KEY),
       ]);
-
-      if (!alive) {
-        return;
-      }
 
       const nextSettings = fromPersistedSettings(
         storedSettings,
         tokenMatchesOrigin(storedTokenOrigin, storedSettings?.serverUrl || defaultSettings.serverUrl) ? storedToken : '',
       );
       nextSettings.serverUrl = normalizeServerUrl(nextSettings.serverUrl);
+      const parsedProfiles = sharedNormalizeBackendConnectionProfiles(storedBackendProfiles);
+      const profilesWithTokens = await Promise.all(parsedProfiles.map(async (profile) => ({
+        ...profile,
+        authToken: (await loadSecret(backendProfileTokenKey(profile.id))) || profile.authToken || '',
+      })));
+      if (!alive) {
+        return;
+      }
+      const legacyProfile = profileFromSettings(nextSettings, 'legacy-default', '当前后端');
+      const nextProfiles = profilesWithTokens.length > 0 ? profilesWithTokens : (nextSettings.serverUrl ? [legacyProfile] : []);
+      const nextActiveProfileId = nextProfiles.some((profile) => profile.id === storedActiveBackendConnectionId)
+        ? storedActiveBackendConnectionId
+        : nextProfiles[0]?.id ?? '';
+      const activeProfile = nextProfiles.find((profile) => profile.id === nextActiveProfileId);
+      const effectiveSettings = activeProfile ? profileSettings(activeProfile, nextSettings) : nextSettings;
       const normalizedWorkspaces = storedWorkspaces.map((workspace) => ({
         ...workspace,
         reasoningEffort: normalizeReasoningEffort(workspace.reasoningEffort),
@@ -2926,6 +3295,7 @@ export default function App() {
 
                 return {
                   ...conversation,
+                  backendConnectionId: conversation.backendConnectionId || workspace?.backendConnectionId || nextActiveProfileId || null,
                   sessionId,
                   threadId,
                   preview: conversation.preview || '',
@@ -2948,7 +3318,14 @@ export default function App() {
           .filter((entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1]) && entry[1] > 0),
       );
 
-      setSettings(nextSettings);
+      setSettings(effectiveSettings);
+      setBackendProfiles(nextProfiles);
+      setActiveBackendConnectionId(nextActiveProfileId);
+      setUsageRecords(sharedNormalizeUsageRecords(storedUsageRecords).map((record) => ({
+        ...record,
+        workspaceId: normalizedConversations.find((conversation) => conversation.id === record.conversationId)?.workspaceId || '',
+      })).slice(0, MAX_USAGE_RECORDS));
+      setWorkbenchByConversation(normalizeWorkbenchMap(storedWorkbenchState));
       setWorkspaces(normalizedWorkspaces);
       setConversations(normalizedConversations);
       setTimeline(storedTimeline.slice(0, MAX_TIMELINE_ITEMS));
@@ -2956,7 +3333,8 @@ export default function App() {
       setExperimentalFeatures(normalizeExperimentalFeatures(storedExperimentalFeatures));
       setActiveWorkspaceId(firstWorkspaceId);
       setActiveConversationId(firstConversationId);
-      setAutoConnectEnabled(Boolean(storedSettings?.serverUrl?.trim()));
+      setAutoConnectEnabled(Boolean(effectiveSettings.serverUrl.trim()));
+      setBackendSecretsHydrated(true);
       setHydrated(true);
     })();
 
@@ -2995,6 +3373,26 @@ export default function App() {
   }, [terminalById]);
 
   useEffect(() => {
+    backendProfilesRef.current = backendProfiles;
+  }, [backendProfiles]);
+
+  useEffect(() => {
+    activeBackendConnectionIdRef.current = activeBackendConnectionId;
+  }, [activeBackendConnectionId]);
+
+  useEffect(() => {
+    usageRecordsRef.current = usageRecords;
+  }, [usageRecords]);
+
+  useEffect(() => {
+    v2ProvidersRef.current = v2Providers;
+  }, [v2Providers]);
+
+  useEffect(() => {
+    contextUsageRef.current = contextUsageByConversation;
+  }, [contextUsageByConversation]);
+
+  useEffect(() => {
     if (!hydrated) {
       return;
     }
@@ -3002,6 +3400,145 @@ export default function App() {
     void saveSecret(TOKEN_STORAGE_KEY, settings.authToken);
     void saveSecret(TOKEN_ORIGIN_STORAGE_KEY, settings.authToken ? normalizeServerUrl(settings.serverUrl) : '');
   }, [hydrated, settings]);
+
+  useEffect(() => {
+    if (!hydrated || !backendSecretsHydrated) return;
+    const persisted = backendProfiles.map(({ authToken: _authToken, ...profile }) => profile);
+    void saveJson(BACKEND_PROFILES_STORAGE_KEY, persisted);
+    void saveJson(BACKEND_PROFILE_ACTIVE_STORAGE_KEY, activeBackendConnectionId);
+    void Promise.all(backendProfiles.map(async (profile) => {
+      await saveSecret(backendProfileTokenKey(profile.id), profile.authToken || '');
+    }));
+  }, [activeBackendConnectionId, backendProfiles, backendSecretsHydrated, hydrated]);
+
+  const activeBackendProfile = useMemo(
+    () => backendProfiles.find((profile) => profile.id === activeBackendConnectionId) ?? null,
+    [activeBackendConnectionId, backendProfiles],
+  );
+
+  const updateBackendProfile = useCallback((id: string, patch: Partial<BackendConnectionProfile>) => {
+    setBackendProfiles((current) => current.map((profile) => (
+      profile.id === id
+        ? { ...profile, ...patch, id: profile.id, updatedAt: Date.now() }
+        : profile
+    )));
+    if (id === activeBackendConnectionIdRef.current) {
+      setSettings((current) => {
+        const next = { ...current };
+        if (typeof patch.serverUrl === 'string') next.serverUrl = normalizeServerUrl(patch.serverUrl);
+        if (typeof patch.authToken === 'string') next.authToken = patch.authToken;
+        if (typeof patch.tenantId === 'string') next.tenantId = patch.tenantId;
+        if (patch.encryptionProtocol) next.encryptionProtocol = patch.encryptionProtocol;
+        if (typeof patch.encryptionPublicKey === 'string') next.encryptionPublicKey = patch.encryptionPublicKey;
+        return next;
+      });
+    }
+  }, []);
+
+  const selectBackendProfile = useCallback((id: string) => {
+    const profile = backendProfilesRef.current.find((item) => item.id === id);
+    if (!profile) return false;
+    activeBackendConnectionIdRef.current = profile.id;
+    setActiveBackendConnectionId(profile.id);
+    setSettings((current) => sharedSettingsFromProfile(profile, current));
+    setV2Providers([]);
+    setV2Conversations([]);
+    setProviderModels({});
+    setProviderCommands({});
+    setProviderCatalogStatus({});
+    setCapabilityCatalogs({});
+    setConnectionHealth(defaultConnectionHealth);
+    setModelCatalogStatus('idle');
+    setModelCatalogError('');
+    manualDisconnectRef.current = false;
+    closeSocket(false);
+    setAutoConnectEnabled(true);
+    setConnectionState('closed');
+    return true;
+  }, [closeSocket]);
+
+  const addBackendProfile = useCallback((draft?: Partial<BackendConnectionProfile>) => {
+    const id = createRequestId('backend');
+    const now = Date.now();
+    const base = sharedProfileFromSettings(settings, draft?.name?.trim() || '新后端', id, now);
+    const profile: BackendConnectionProfile = {
+      ...base,
+      ...draft,
+      id,
+      serverUrl: normalizeServerUrl(draft?.serverUrl || base.serverUrl),
+      authToken: draft?.authToken ?? base.authToken,
+      tenantId: draft?.tenantId || base.tenantId,
+      encryptionProtocol: draft?.encryptionProtocol || base.encryptionProtocol,
+      encryptionPublicKey: draft?.encryptionPublicKey ?? base.encryptionPublicKey,
+      createdAt: now,
+      updatedAt: now,
+    };
+    setBackendProfiles((current) => [...current, profile]);
+    activeBackendConnectionIdRef.current = profile.id;
+    setActiveBackendConnectionId(profile.id);
+    setSettings((current) => sharedSettingsFromProfile(profile, current));
+    closeSocket(false);
+    setAutoConnectEnabled(true);
+    setConnectionState('closed');
+    return profile;
+  }, [closeSocket, settings]);
+
+  const removeBackendProfile = useCallback((id: string) => {
+    const profiles = backendProfilesRef.current;
+    if (profiles.length <= 1) return false;
+    const next = profiles.filter((profile) => profile.id !== id);
+    const fallback = next[0];
+    setBackendProfiles(next);
+    if (fallback) {
+      setWorkspaces((current) => current.map((workspace) => (
+        workspace.backendConnectionId === id
+          ? { ...workspace, backendConnectionId: fallback.id, updatedAt: Date.now() }
+          : workspace
+      )));
+      setConversations((current) => current.map((conversation) => (
+        conversation.backendConnectionId === id
+          ? { ...conversation, backendConnectionId: fallback.id, updatedAt: Date.now() }
+          : conversation
+      )));
+    }
+    if (id === activeBackendConnectionIdRef.current) {
+      if (fallback) {
+        activeBackendConnectionIdRef.current = fallback.id;
+        setActiveBackendConnectionId(fallback.id);
+        setSettings((current) => sharedSettingsFromProfile(fallback, current));
+        closeSocket(false);
+        setAutoConnectEnabled(true);
+        setConnectionState('closed');
+      }
+    }
+    return true;
+  }, [closeSocket]);
+
+  useEffect(() => {
+    if (!hydrated || !activeBackendConnectionId) return;
+    setBackendProfiles((current) => current.map((profile) => {
+      if (profile.id !== activeBackendConnectionId) return profile;
+      const next = {
+        ...profile,
+        serverUrl: normalizeServerUrl(settings.serverUrl),
+        authToken: settings.authToken,
+        tenantId: settings.tenantId,
+        encryptionProtocol: settings.encryptionProtocol,
+        encryptionPublicKey: settings.encryptionPublicKey,
+      };
+      return JSON.stringify(next) === JSON.stringify(profile) ? profile : { ...next, updatedAt: Date.now() };
+    }));
+  }, [activeBackendConnectionId, hydrated, settings.authToken, settings.encryptionProtocol, settings.encryptionPublicKey, settings.serverUrl, settings.tenantId]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    scheduleJsonSave(USAGE_RECORDS_STORAGE_KEY, usageRecords.slice(0, MAX_USAGE_RECORDS));
+  }, [hydrated, scheduleJsonSave, usageRecords]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    scheduleJsonSave(WORKBENCH_STATE_STORAGE_KEY, workbenchByConversation);
+  }, [hydrated, scheduleJsonSave, workbenchByConversation]);
 
   const syncWorkspacesToBackend = useCallback(
     async (snapshot: WorkspaceRecord[] = workspacesRef.current) => {
@@ -3074,6 +3611,15 @@ export default function App() {
       }
 
       workspaceBackendReadyRef.current = true;
+      // Workspace IDs and paths become available only after this hydration.
+      // Refresh manifests now so a fresh device can bind remote conversations.
+      try {
+        const conversationResponse = await apiClientForConnection(settings).listConversations();
+        setV2Conversations(conversationResponse.conversations);
+        setConversations((current) => mergeManifestConversations(current, conversationResponse.conversations, nextWorkspaces));
+      } catch (error) {
+        setLastError(error instanceof Error ? error.message : '对话目录同步失败');
+      }
       if (!workspaceSyncPayloadEquals(remoteWorkspaces, nextWorkspaces)) {
         void syncWorkspacesToBackend(nextWorkspaces);
       }
@@ -3142,6 +3688,23 @@ export default function App() {
     [activeWorkspaceId, workspaces],
   );
 
+  const backendProfileForContext = useCallback((workspaceId?: string, conversationId?: string) => {
+    const conversation = conversationId
+      ? conversations.find((item) => item.id === conversationId)
+      : undefined;
+    const workspace = workspaceId
+      ? workspaces.find((item) => item.id === workspaceId)
+      : conversation
+        ? workspaces.find((item) => item.id === conversation.workspaceId)
+        : undefined;
+    const profileId = conversation?.backendConnectionId
+      || workspace?.backendConnectionId
+      || activeBackendConnectionId;
+    return backendProfiles.find((profile) => profile.id === profileId)
+      ?? backendProfiles.find((profile) => profile.id === activeBackendConnectionId)
+      ?? null;
+  }, [activeBackendConnectionId, backendProfiles, conversations, workspaces]);
+
   const refreshCapabilityCatalog = useCallback(async (provider: ProviderKind) => {
     const workspacePath = activeWorkspace?.path || settings.defaultWorkspacePath;
     if (!workspacePath) return;
@@ -3161,6 +3724,33 @@ export default function App() {
     }
   }, [activeWorkspace?.path, settings.authToken, settings.defaultWorkspacePath, settings.serverUrl]);
 
+  const refreshProviderCatalog = useCallback(async (
+    provider: ProviderKind,
+    workspacePath = activeWorkspace?.path || settings.defaultWorkspacePath,
+  ) => {
+    if (!workspacePath) return false;
+    setProviderCatalogStatus((current) => ({ ...current, [provider]: 'loading' }));
+    const profile = backendProfilesRef.current.find((item) => item.id === activeBackendConnectionIdRef.current);
+    const api = apiClientForConnection(settings, profile);
+    try {
+      const [models, commands] = await Promise.all([
+        api.listProviderModels(provider, workspacePath),
+        api.listProviderCommands(provider, workspacePath),
+      ]);
+      setProviderModels((current) => ({ ...current, [provider]: models.models }));
+      setProviderCommands((current) => ({ ...current, [provider]: commands.commands }));
+      setProviderCatalogStatus((current) => ({ ...current, [provider]: 'ready' }));
+      setV2Providers((current) => current.map((descriptor) => descriptor.id === provider
+        ? { ...descriptor, models: models.models }
+        : descriptor));
+      return true;
+    } catch (error) {
+      setProviderCatalogStatus((current) => ({ ...current, [provider]: 'error' }));
+      setLastError(error instanceof Error ? error.message : 'Agent 能力目录读取失败');
+      return false;
+    }
+  }, [activeWorkspace?.path, settings]);
+
   useEffect(() => {
     if (!hydrated || !activeWorkspace?.path || v2Providers.length === 0) return;
     if (capabilityWorkspaceRef.current !== activeWorkspace.path) {
@@ -3177,6 +3767,15 @@ export default function App() {
     () => conversations.find((item) => item.id === activeConversationId) ?? null,
     [activeConversationId, conversations],
   );
+
+  useEffect(() => {
+    if (!hydrated || !activeConversation?.provider || !activeWorkspace?.path) return;
+    const provider = activeConversation.provider as ProviderKind;
+    if (!v2Providers.some((descriptor) => descriptor.id === provider)) return;
+    if (providerCatalogStatus[provider] !== 'ready' && providerCatalogStatus[provider] !== 'loading') {
+      void refreshProviderCatalog(provider, activeWorkspace.path);
+    }
+  }, [activeConversation?.provider, activeWorkspace?.path, hydrated, providerCatalogStatus, refreshProviderCatalog, v2Providers]);
 
   const runtimeStatus = useMemo<RuntimeStatusState>(() => ({
     socket: connectionState,
@@ -4279,7 +4878,49 @@ export default function App() {
         const conversation = conversationsRef.current.find((item) => item.id === conversationId || item.v2ConversationId === conversationId);
         if (conversation && typeof payload.type === 'string') {
           const event = payload as unknown as ConversationEvent;
-          const entry = classifyV2ConversationEvent(event, conversation.workspaceId);
+          const contextUsage = sharedContextUsageFromV2Event(event);
+          if (contextUsage) {
+            const nextUsage: MobileContextUsage = {
+              usedTokens: contextUsage.usedTokens,
+              contextWindow: contextUsage.contextWindow,
+              inputTokens: contextUsage.inputTokens,
+              outputTokens: contextUsage.outputTokens,
+              cachedInputTokens: contextUsage.cachedInputTokens,
+              cacheWriteTokens: contextUsage.cacheWriteTokens,
+              updatedAt: contextUsage.updatedAt,
+            };
+            setContextUsageByConversation((current) => ({ ...current, [conversation.id]: nextUsage }));
+            const usage = sharedUsageRecordFromV2Event(event, {
+              conversationId: conversation.id,
+              provider: conversation.provider,
+              model: conversation.model,
+            });
+            if (usage) {
+              const record: MobileUsageRecord = {
+                ...usage,
+                workspaceId: conversation.workspaceId,
+                contextWindow: contextUsage.contextWindow,
+              };
+              setUsageRecords((current) => {
+                if (current.some((item) => item.id === record.id)) return current;
+                return [record, ...current].slice(0, MAX_USAGE_RECORDS);
+              });
+            }
+          }
+          const eventPayload = event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
+            ? event.payload as Record<string, unknown>
+            : {};
+          const payloadTurnId = typeof eventPayload.turnId === 'string'
+            ? eventPayload.turnId
+            : typeof eventPayload.turn_id === 'string' ? eventPayload.turn_id : '';
+          if (event.type === 'turn.started' && payloadTurnId) {
+            setConversationTurnId(conversation.id, payloadTurnId);
+          }
+          const entry = classifyV2ConversationEvent(
+            event,
+            conversation.workspaceId,
+            payloadTurnId || turnIdsRef.current[conversation.id] || '',
+          );
           if (entry) {
             upsertChatTimeline(entry, event.type.includes('delta'));
           }
@@ -4288,6 +4929,7 @@ export default function App() {
           }
           if (event.type === 'turn.completed' || event.type === 'turn.cancelled' || event.type === 'turn.failed') {
             setConversationThinking(conversation.id, false);
+            setConversationTurnId(conversation.id, '');
           }
           if (typeof event.sequence === 'number') {
             updateConversation(conversation.id, { lastSequence: event.sequence, updatedAt: Date.now() });
@@ -4319,7 +4961,7 @@ export default function App() {
     } catch (error) {
       setLastError(error instanceof Error ? error.message : 'failed to parse websocket message');
     }
-  }, [enqueueServerEvent, setConversationThinking, updateConversation, upsertChatTimeline]);
+  }, [enqueueServerEvent, setConversationThinking, setConversationTurnId, updateConversation, upsertChatTimeline]);
 
   const scheduleSocketFrameDrain = useCallback(() => {
     if (pendingSocketFrameDrainRef.current !== null) {
@@ -4587,7 +5229,10 @@ export default function App() {
                   type: 'conversation.subscribe',
                   payload: {
                     conversationId: conversation.v2ConversationId,
-                    afterSequence: conversation.lastSequence ?? 0,
+                    // The manifest high-water mark is server state, not this device's
+                    // applied cursor. Replaying from zero lets a fresh device hydrate
+                    // the complete history; timeline upserts deduplicate events.
+                    afterSequence: 0,
                     limit: 200,
                   },
                 });
@@ -4931,7 +5576,7 @@ export default function App() {
   }, [sendProtocolMessage, settings.tenantId]);
 
   const createWorkspace = useCallback(
-    (nameDraft: string, pathDraft: string) => {
+    (nameDraft: string, pathDraft: string, backendConnectionId?: string) => {
       const path = pathDraft.trim();
       if (!path) {
         Alert.alert('缺少目录', '请输入要管理的目录路径。');
@@ -4939,6 +5584,10 @@ export default function App() {
       }
 
       const name = nameDraft.trim() || displayNameFromPath(path);
+      const profile = backendProfilesRef.current.find((item) => item.id === backendConnectionId)
+        ?? backendProfilesRef.current.find((item) => item.id === activeBackendConnectionIdRef.current)
+        ?? null;
+      const workspaceSettings = profile ? profileSettings(profile, settings) : settings;
       const id = createRequestId('workspace');
       const sessionId = createSessionId(name);
       const threadId = '';
@@ -4946,14 +5595,15 @@ export default function App() {
         id,
         name,
         path,
+        backendConnectionId: profile?.id || backendConnectionId || activeBackendConnectionIdRef.current || null,
         sessionId,
-        tenantId: settings.tenantId,
+        tenantId: workspaceSettings.tenantId,
         threadId,
-        model: settings.defaultModel,
-        reasoningEffort: null,
-        approvalPolicy: settings.approvalPolicy,
+        model: workspaceSettings.defaultModel,
+        reasoningEffort: workspaceSettings.defaultReasoningEffort ?? null,
+        approvalPolicy: workspaceSettings.approvalPolicy,
         approvalsReviewer: null,
-        sandboxMode: settings.sandboxMode,
+        sandboxMode: workspaceSettings.sandboxMode,
         serviceTier: null,
         permissionProfile: null,
         personality: null,
@@ -4977,21 +5627,34 @@ export default function App() {
       settings.defaultReasoningEffort,
       settings.sandboxMode,
       settings.tenantId,
+      activeBackendConnectionId,
     ],
   );
 
   const selectWorkspace = useCallback((workspaceId: string) => {
+    const workspace = workspacesRef.current.find((item) => item.id === workspaceId);
+    if (!workspace) return;
+    const profileId = workspace.backendConnectionId;
+    if (profileId && profileId !== activeBackendConnectionIdRef.current) {
+      selectBackendProfile(profileId);
+    }
     setActiveWorkspaceId(workspaceId);
-    const conversation = conversations.find((item) => item.workspaceId === workspaceId);
+    const conversation = conversationsRef.current.find((item) => item.workspaceId === workspaceId && item.archived !== true);
     setActiveConversationId(conversation?.id ?? '');
     setLastError('');
-  }, [conversations]);
+  }, [selectBackendProfile]);
 
   const selectConversation = useCallback((workspaceId: string, conversationId: string) => {
+    const conversation = conversationsRef.current.find((item) => item.id === conversationId);
+    const workspace = workspacesRef.current.find((item) => item.id === workspaceId);
+    const profileId = conversation?.backendConnectionId || workspace?.backendConnectionId;
+    if (profileId && profileId !== activeBackendConnectionIdRef.current) {
+      selectBackendProfile(profileId);
+    }
     setActiveWorkspaceId(workspaceId);
     setActiveConversationId(conversationId);
     setLastError('');
-  }, []);
+  }, [selectBackendProfile]);
 
   const removeWorkspace = useCallback(
     (workspaceId: string) => {
@@ -5015,6 +5678,9 @@ export default function App() {
       setSelectedSkills(pruneConversationState);
       setTurnIds(pruneConversationState);
       setThinkingConversations(pruneConversationState);
+      setContextUsageByConversation(pruneConversationState);
+      setWorkbenchByConversation(pruneConversationState);
+      setUsageRecords((current) => current.filter((record) => !removedConversationIds.includes(record.conversationId)));
       setTerminalById((current) => {
         const next = { ...current };
         Object.entries(next).forEach(([terminalId, terminal]) => {
@@ -6244,6 +6910,211 @@ export default function App() {
     }
   }, [connectionState, getConversationContext, requestTerminalStatus, seedTerminalState]);
 
+  const requestGitRepositories = useCallback(async (workspacePath?: string, backendConnectionId?: string | null) => {
+    const path = workspacePath?.trim() || activeWorkspace?.path || settings.defaultWorkspacePath;
+    if (!path) {
+      gitRepositoryRequestSeqRef.current += 1;
+      gitRepositoryTargetRef.current = '';
+      setGitRepositoryTarget('');
+      setGitRepositoryStatus('error');
+      setGitRepositoryError('请先选择工作区');
+      return false;
+    }
+    const profileId = backendConnectionId || activeBackendConnectionIdRef.current;
+    const target = `${profileId || 'default'}\n${path}`;
+    const requestSeq = ++gitRepositoryRequestSeqRef.current;
+    gitRepositoryTargetRef.current = target;
+    setGitRepositoryTarget(target);
+    setGitRepositories([]);
+    setGitRepositoryStatus('loading');
+    setGitRepositoryError('');
+    const profile = backendProfilesRef.current.find((item) => item.id === profileId);
+    if (profileId && !profile) {
+      setGitRepositoryStatus('error');
+      setGitRepositoryError('工作区绑定的后端配置不存在');
+      return false;
+    }
+    try {
+      const response = await apiClientForConnection(settings, profile).scanGit(path);
+      const repositories: GitRepositorySummary[] = (response.repositories || []).map((repository: V2GitRepositorySummary) => ({
+        path: repository.path,
+        name: repository.name,
+        branch: repository.branch,
+        initialEligible: repository.initialEligible,
+        additions: repository.additions || 0,
+        deletions: repository.deletions || 0,
+        error: repository.error,
+        files: (repository.files || []).map((file) => ({
+          path: file.path,
+          status: file.status,
+          additions: file.additions || 0,
+          deletions: file.deletions || 0,
+        })),
+      }));
+      if (gitRepositoryRequestSeqRef.current !== requestSeq) return false;
+      setGitRepositories(repositories);
+      setGitRepositoryStatus('ready');
+      return true;
+    } catch (error) {
+      if (gitRepositoryRequestSeqRef.current !== requestSeq) return false;
+      setGitRepositories([]);
+      setGitRepositoryStatus('error');
+      setGitRepositoryError(error instanceof Error ? error.message : 'Git 状态读取失败');
+      return false;
+    }
+  }, [activeWorkspace?.path, settings]);
+
+  const runGitAction = useCallback(async (
+    workspacePath: string,
+    action: GitAction,
+    message?: string,
+    includeUnstaged = true,
+    backendConnectionId?: string | null,
+  ) => {
+    const path = workspacePath.trim();
+    if (!path) return false;
+    const profileId = backendConnectionId || activeBackendConnectionIdRef.current;
+    const target = `${profileId || 'default'}\n${path}`;
+    const profile = backendProfilesRef.current.find((item) => item.id === profileId);
+    if (profileId && !profile) {
+      if (gitRepositoryTargetRef.current === target) {
+        setGitRepositoryError('工作区绑定的后端配置不存在');
+        setGitRepositoryStatus('error');
+      }
+      return false;
+    }
+    if (gitRepositoryActionInFlightRef.current) return false;
+    gitRepositoryActionInFlightRef.current = true;
+    const actionSeq = ++gitRepositoryActionSeqRef.current;
+    setGitRepositoryActionTarget(target);
+    const actionWorkspace = activeWorkspaceRef.current;
+    const actionConversation = activeConversationRef.current;
+    try {
+      const response = await apiClientForConnection(settings, profile).runGit({
+        workspacePath: path,
+        action,
+        ...(message?.trim() ? { message: message.trim() } : {}),
+        includeUnstaged,
+      });
+      if (
+        gitRepositoryActionSeqRef.current === actionSeq
+        && gitRepositoryTargetRef.current === target
+      ) {
+        setGitRepositoryOutput(response.output || '');
+        setGitRepositoryOutputTarget(target);
+        await requestGitRepositories(path, profileId || null);
+      }
+      appendTimeline(makeSystemEntry('Git 操作完成', action, actionWorkspace, actionConversation));
+      return true;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Git 操作失败';
+      if (
+        gitRepositoryActionSeqRef.current === actionSeq
+        && gitRepositoryTargetRef.current === target
+      ) {
+        if (error instanceof ConnectionError && error.technicalDetails.includes('GIT_PARTIAL_SUCCESS')) {
+          await requestGitRepositories(path, profileId || null);
+        }
+        if (
+          gitRepositoryActionSeqRef.current === actionSeq
+          && gitRepositoryTargetRef.current === target
+        ) {
+          setGitRepositoryError(detail);
+          setGitRepositoryStatus('error');
+          setLastError(detail);
+        }
+      }
+      return false;
+    } finally {
+      if (gitRepositoryActionSeqRef.current === actionSeq) {
+        gitRepositoryActionInFlightRef.current = false;
+        setGitRepositoryActionTarget('');
+      }
+    }
+  }, [appendTimeline, requestGitRepositories, settings]);
+
+  const openGit = useCallback((conversationId = activeConversationRef.current) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择工作区和对话。');
+      return;
+    }
+    navigationRef.current?.navigate('Git', {
+      workspaceId: context.workspace.id,
+      conversationId: context.conversation.id,
+    });
+    void requestGitRepositories(
+      context.workspace.path,
+      context.conversation.backendConnectionId || context.workspace.backendConnectionId,
+    );
+  }, [getConversationContext, requestGitRepositories]);
+
+  const openBrowser = useCallback((conversationId = activeConversationRef.current, target?: { url?: string; filePath?: string }) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择工作区和对话。');
+      return;
+    }
+    navigationRef.current?.navigate('Browser', {
+      workspaceId: context.workspace.id,
+      conversationId: context.conversation.id,
+      url: target?.url,
+      filePath: target?.filePath,
+    });
+  }, [getConversationContext]);
+
+  const openFiles = useCallback((conversationId = activeConversationRef.current, filePath?: string) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择工作区和对话。');
+      return;
+    }
+    navigationRef.current?.navigate('Files', {
+      workspaceId: context.workspace.id,
+      conversationId: context.conversation.id,
+      filePath,
+    });
+  }, [getConversationContext]);
+
+  const openWorkbench = useCallback((conversationId = activeConversationRef.current, tab?: WorkbenchTab) => {
+    const context = getConversationContext(conversationId);
+    if (!context) {
+      Alert.alert('未选择对话', '请先选择工作区和对话。');
+      return;
+    }
+    navigationRef.current?.navigate('Workbench', {
+      workspaceId: context.workspace.id,
+      conversationId: context.conversation.id,
+      tab,
+    });
+  }, [getConversationContext]);
+
+  const updateWorkbenchState = useCallback((conversationId: string, patch: Partial<MobileWorkbenchState>) => {
+    if (!conversationId) return;
+    setWorkbenchByConversation((current) => {
+      const previous = current[conversationId] || DEFAULT_WORKBENCH_STATE;
+      const next = normalizeWorkbenchState({ ...previous, ...patch });
+      if (
+        previous.activeTab === next.activeTab
+        && previous.browserUrl === next.browserUrl
+        && previous.browserFilePath === next.browserFilePath
+        && JSON.stringify(previous.tabs) === JSON.stringify(next.tabs)
+        && JSON.stringify(previous.inspectedElement) === JSON.stringify(next.inspectedElement)
+      ) {
+        return current;
+      }
+      return { ...current, [conversationId]: next };
+    });
+  }, []);
+
+  const workbenchStateFor = useCallback((conversationId: string) => (
+    workbenchByConversation[conversationId] || DEFAULT_WORKBENCH_STATE
+  ), [workbenchByConversation]);
+
+  const openUsage = useCallback(() => navigationRef.current?.navigate('Usage'), []);
+  const openAbout = useCallback(() => navigationRef.current?.navigate('About'), []);
+  const openKanban = useCallback(() => navigationRef.current?.navigate('Kanban'), []);
+
   const requestSkillList = useCallback(async (conversationId = activeConversationRef.current, forceReload = false) => {
     const context = getConversationContext(conversationId);
     if (!context) {
@@ -6331,50 +7202,75 @@ export default function App() {
 
   const createConversation = useCallback((
     workspaceId: string,
-    options?: { provider: ProviderKind; providerProfile?: string; title?: string },
+    options?: {
+      provider?: ProviderKind;
+      providerProfile?: string;
+      title?: string;
+      backendConnectionId?: string;
+      onCreated?: (conversation: ConversationRecord) => void;
+      onFailed?: () => void;
+    },
   ) => {
     const workspace = workspacesRef.current.find((item) => item.id === workspaceId);
     if (!workspace) {
       Alert.alert('未找到工作区', '请返回后重新选择工作区。');
       return null;
     }
-    if (!options?.provider) {
-      Alert.alert('请选择 Agent', '新建对话时必须选择一个可用的 Agent。');
+    const agent = resolveCreateAgent(
+      options?.provider,
+      options?.providerProfile,
+      v2ProvidersRef.current,
+      conversationsRef.current,
+      activeConversationRef.current,
+      workspace.id,
+    );
+    if (!agent) {
+      Alert.alert('没有可用的 Agent', '请先连接后端，并确认至少有一个 Agent 可用。');
       return null;
     }
-
+    const backendProfile = backendProfilesRef.current.find((item) => item.id === options?.backendConnectionId)
+      || backendProfilesRef.current.find((item) => item.id === workspace.backendConnectionId)
+      || backendProfilesRef.current.find((item) => item.id === activeBackendConnectionIdRef.current)
+      || null;
+    const previousActiveConversationId = activeConversationRef.current;
     const placeholder = {
       ...createDefaultConversation(workspace),
-      title: options.title?.trim() || '新对话',
-      provider: options.provider,
-      providerProfile: options.providerProfile,
+      title: options?.title?.trim() || '新对话',
+      provider: agent.provider,
+      providerProfile: agent.providerProfile,
+      backendConnectionId: backendProfile?.id || workspace.backendConnectionId || activeBackendConnectionIdRef.current || null,
     };
     setConversations((current) => [placeholder, ...current]);
     setActiveWorkspaceId(workspace.id);
     setActiveConversationId(placeholder.id);
     appendTimeline(makeSystemEntry(
       '正在创建对话',
-      `Agent：${providerDisplayName(options.provider)}`,
+      `Agent：${providerDisplayName(agent.provider)}`,
       workspace.id,
       placeholder.id,
     ));
 
     void (async () => {
       try {
-        const api = new V2ApiClient({ serverUrl: settings.serverUrl, authToken: settings.authToken });
+        const api = apiClientForConnection(settings, backendProfile);
         const created = await api.createConversation({
-          provider: options.provider,
+          provider: agent.provider,
           workspace: workspace.path,
-          title: options.title?.trim() || undefined,
-          providerProfile: options.providerProfile,
+          title: options?.title?.trim() || undefined,
+          providerProfile: agent.providerProfile,
         });
-        const record = conversationFromManifest(created, workspace.id);
+        const record = {
+          ...conversationFromManifest(created, workspace.id),
+          backendConnectionId: backendProfile?.id || workspace.backendConnectionId || activeBackendConnectionIdRef.current || null,
+        };
+        rekeyConversationComposer(placeholder.id, record.id);
         setConversations((current) => [
           record,
           ...current.filter((item) => item.id !== placeholder.id && item.id !== record.id),
         ]);
         setV2Conversations((current) => [created, ...current.filter((item) => item.id !== created.id)]);
         setActiveConversationId(record.id);
+        options?.onCreated?.(record);
         try {
           sendRawProtocolFrame({
             id: createRequestId('sub'),
@@ -6387,14 +7283,77 @@ export default function App() {
         appendTimeline(makeSystemEntry('对话已创建', created.provider, workspace.id, record.id));
       } catch (error) {
         setConversations((current) => current.filter((item) => item.id !== placeholder.id));
+        setActiveConversationId((current) => current === placeholder.id ? previousActiveConversationId : current);
         const message = error instanceof Error ? error.message : '创建对话失败';
         setLastError(message);
+        options?.onFailed?.();
         Alert.alert('创建对话失败', message);
       }
     })();
 
     return placeholder;
-  }, [appendTimeline, sendRawProtocolFrame, settings.authToken, settings.serverUrl]);
+  }, [appendTimeline, rekeyConversationComposer, sendRawProtocolFrame, settings, v2Providers]);
+
+  const switchConversationAgent = useCallback((conversationId: string, provider: ProviderKind, providerProfile?: string) => {
+    const context = getConversationContext(conversationId);
+    if (!context) return false;
+    const { workspace, conversation } = context;
+    const descriptor = v2ProvidersRef.current.find((item) => item.id === provider && item.available);
+    if (!descriptor) {
+      Alert.alert('Agent 不可用', '请刷新 Agent 列表后重试。');
+      return false;
+    }
+    const targetProfile = providerProfile || descriptor.profiles[0];
+    if (
+      conversation.provider === provider
+      && (conversation.providerProfile || '') === (targetProfile || '')
+    ) return true;
+    if (!canSwitchConversationAgent(
+      conversation,
+      timelineRef.current,
+      thinkingConversationsRef.current[conversation.id] === true,
+    )) {
+      Alert.alert('无法切换 Agent', '任务开始后不能切换 Agent，请新建对话。');
+      return false;
+    }
+    const created = createConversation(workspace.id, {
+      provider,
+      providerProfile: targetProfile,
+      title: conversation.title,
+      backendConnectionId: conversation.backendConnectionId || workspace.backendConnectionId || undefined,
+      onCreated: (next) => {
+        rekeyConversationComposer(conversation.id, next.id);
+        setConversations((current) => current.filter((item) => item.id !== conversation.id));
+        setV2Conversations((current) => current.filter((item) => item.id !== conversation.v2ConversationId && item.id !== conversation.id));
+      },
+    });
+    if (!created) return false;
+    return true;
+  }, [createConversation, getConversationContext, rekeyConversationComposer]);
+
+  const applyConversationModelSelection = useCallback((conversationId: string, model: string, reasoningEffort: string | null) => {
+    const normalizedModel = model.trim();
+    const normalizedEffort = normalizeReasoningEffort(reasoningEffort);
+    const context = getConversationContext(conversationId);
+    if (!context || !normalizedModel) return false;
+    updateConversation(conversationId, {
+      model: normalizedModel,
+      reasoningEffort: normalizedEffort,
+    });
+    if (context.conversation.provider === 'codex') {
+      updateWorkspace(context.workspace.id, {
+        model: normalizedModel,
+        reasoningEffort: normalizedEffort,
+      });
+    }
+    appendTimeline(makeSystemEntry(
+      '已更新模型',
+      `${normalizedModel}${normalizedEffort ? ` · ${reasoningEffortLabel(normalizedEffort)}` : ''}`,
+      context.workspace.id,
+      conversationId,
+    ));
+    return true;
+  }, [appendTimeline, getConversationContext, updateConversation, updateWorkspace]);
 
   const renameConversation = useCallback((conversationId: string, title: string) => {
     const nextTitle = title.trim();
@@ -6527,6 +7486,8 @@ export default function App() {
       const skillRefs = skills
         .filter((skill) => Boolean(skill.resourceId))
         .map((skill) => ({ resourceId: skill.resourceId as string, name: skill.name }));
+      const model = conversation.model || (conversation.provider === 'codex' ? workspace.model || settings.defaultModel : undefined);
+      const reasoningEffort = normalizeReasoningEffort(conversation.reasoningEffort || (conversation.provider === 'codex' ? workspace.reasoningEffort || settings.defaultReasoningEffort : null));
       setConversationThinking(conversation.id, true);
       appendTimeline(makeSystemEntry(
         '正在思考',
@@ -6540,6 +7501,8 @@ export default function App() {
         payload: {
           conversationId: v2Id,
           text,
+          ...(model ? { model } : {}),
+          ...(reasoningEffort ? { reasoningEffort } : {}),
           ...(skillRefs.length ? { skills: skillRefs } : {}),
         },
       });
@@ -6553,7 +7516,7 @@ export default function App() {
       }
       return true;
     },
-    [appendTimeline, getConversationContext, sendRawProtocolFrame, setConversationThinking, updateConversation],
+    [appendTimeline, getConversationContext, sendRawProtocolFrame, setConversationThinking, settings.defaultModel, settings.defaultReasoningEffort, updateConversation],
   );
 
   const sendLocalTurn = useCallback(
@@ -8002,16 +8965,12 @@ export default function App() {
                   renameWorkspace={renameWorkspace}
                   forkWorkspace={forkWorkspace}
                   removeWorkspace={removeWorkspace}
-                />
-              )}
-            </Stack.Screen>
-            <Stack.Screen name="V2Conversations" options={{ title: 'TodeX 2.0' }}>
-              {(props) => (
-                <V2ConversationsScreen
-                  {...props}
-                  settings={settings}
-                  providers={v2Providers}
-                  defaultWorkspace={activeWorkspace?.path ?? serverVersion?.workspace_root ?? settings.defaultWorkspacePath}
+                  openUsage={openUsage}
+                  openAbout={openAbout}
+                  openKanban={openKanban}
+                  openGit={openGit}
+                  backendProfiles={backendProfiles}
+                  activeBackendConnectionId={activeBackendConnectionId}
                 />
               )}
             </Stack.Screen>
@@ -8069,7 +9028,20 @@ export default function App() {
                   runThreadMenuAction={runThreadMenuAction}
                   sendSlashCommand={sendSlashCommand}
                   openGitDiff={openGitDiff}
+                  openGit={openGit}
                   openTerminal={openTerminal}
+                  openBrowser={openBrowser}
+                  openFiles={openFiles}
+                  openWorkbench={openWorkbench}
+                  openUsage={openUsage}
+                  v2Providers={v2Providers}
+                  providerModels={providerModels}
+                  providerCommands={providerCommands}
+                  providerCatalogStatus={providerCatalogStatus}
+                  contextUsage={contextUsageByConversation[props.route.params.conversationId] ?? null}
+                  switchConversationAgent={switchConversationAgent}
+                  applyConversationModelSelection={applyConversationModelSelection}
+                  refreshProviderCatalog={refreshProviderCatalog}
                   removeWorkspace={removeWorkspace}
                   capabilityCatalog={capabilityCatalogs.codex}
                 />
@@ -8216,30 +9188,216 @@ export default function App() {
                   {...props}
                   settings={settings}
                   setSettings={setSettings}
-                  modelCatalog={modelCatalog}
-                  modelCatalogStatus={modelCatalogStatus}
-                  modelCatalogError={modelCatalogError}
-                  refreshModelCatalog={requestModelCatalog}
-                  openDefaultModelPicker={() => {
-                    setModelPickerPrompt({ target: 'settings' });
-                    if (connectionState === 'open' && modelCatalogStatus !== 'loading') {
-                      requestModelCatalog();
-                    }
-                  }}
-                  serverVersion={serverVersion}
-                  activeWorkspace={activeWorkspace}
-                  pendingRequestCount={pendingRequests.length}
-                  turnId={activeTurnId}
-                  runtimeStatus={runtimeStatus}
                   connectionState={connectionState}
                   connectionHealth={connectionHealth}
                   lastError={lastError}
                   connect={connect}
                   closeSocket={closeSocket}
-                  refreshServerVersion={refreshServerVersion}
-                  v2Providers={v2Providers}
+                  backendProfiles={backendProfiles}
+                  activeBackendConnectionId={activeBackendConnectionId}
+                  updateBackendProfile={updateBackendProfile}
+                  addBackendProfile={addBackendProfile}
+                  removeBackendProfile={removeBackendProfile}
+                  selectBackendProfile={selectBackendProfile}
                 />
               )}
+            </Stack.Screen>
+            <Stack.Screen name="Usage" options={{ title: '使用统计' }}>
+              {(props) => <UsageScreen {...props} records={usageRecords} onRefresh={() => undefined} />}
+            </Stack.Screen>
+            <Stack.Screen name="About" options={{ title: '关于 TodeX' }}>
+              {(props) => (
+                <AboutScreen
+                  {...props}
+                  appVersion="1.0.0"
+                  backendVersion={serverVersion?.version}
+                  backendUrl={settings.serverUrl}
+                  workspacePath={activeWorkspace?.path}
+                  dataDirectory={serverVersion?.data_dir}
+                  connectionState={connectionState}
+                  onCopy={async (value, label) => {
+                    await Clipboard.setStringAsync(value);
+                    Alert.alert('已复制', label);
+                  }}
+                />
+              )}
+            </Stack.Screen>
+            <Stack.Screen name="Kanban" options={{ title: '看板' }}>
+              {(props) => (
+                <KanbanScreen
+                  {...props}
+                  conversations={conversations.map((conversation) => ({
+                    ...conversation,
+                    workspaceName: workspaces.find((workspace) => workspace.id === conversation.workspaceId)?.name,
+                    status: conversation.nativeStatus,
+                  }))}
+                  onOpenConversation={(item) => {
+                    selectConversation(item.workspaceId, item.id);
+                    props.navigation.navigate('Chat', { workspaceId: item.workspaceId, conversationId: item.id });
+                  }}
+                  onRefresh={() => {
+                    if (connectionState === 'open') void refreshServerVersion();
+                  }}
+                />
+              )}
+            </Stack.Screen>
+            <Stack.Screen name="Browser" options={{ title: '浏览器' }}>
+              {(props) => {
+                const profile = backendProfileForContext(
+                  props.route.params.workspaceId,
+                  props.route.params.conversationId,
+                );
+                const api = apiClientForConnection(settings, profile);
+                const backendUrl = profile?.serverUrl || settings.serverUrl;
+                return (
+                  <BrowserScreen
+                    {...props}
+                    client={api}
+                    initialUrl={props.route.params.url || backendUrl}
+                    initialFilePath={props.route.params.filePath}
+                    renderWebView={(result) => (
+                      <BrowserPreviewWebView
+                        result={result}
+                        backendUrl={backendUrl}
+                        onInspect={(inspectedElement) => updateWorkbenchState(
+                          props.route.params.conversationId,
+                          { inspectedElement },
+                        )}
+                      />
+                    )}
+                  />
+                );
+              }}
+            </Stack.Screen>
+            <Stack.Screen name="Files" options={{ title: '文件' }}>
+              {(props) => {
+                const profile = backendProfileForContext(
+                  props.route.params.workspaceId,
+                  props.route.params.conversationId,
+                );
+                return (
+                  <FilesScreen
+                    {...props}
+                    client={apiClientForConnection(settings, profile)}
+                    rootPath={workspaces.find((workspace) => workspace.id === props.route.params.workspaceId)?.path || settings.defaultWorkspacePath}
+                    initialFilePath={props.route.params.filePath}
+                    onFileSelected={(path) => updateWorkbenchState(props.route.params.conversationId, { browserFilePath: path })}
+                  />
+                );
+              }}
+            </Stack.Screen>
+            <Stack.Screen name="Workbench" options={{ title: '工作台' }}>
+              {(props) => {
+                const workspace = workspaces.find((item) => item.id === props.route.params.workspaceId) ?? null;
+                const conversation = conversations.find((item) => item.id === props.route.params.conversationId) ?? null;
+                const profile = backendProfileForContext(
+                  props.route.params.workspaceId,
+                  props.route.params.conversationId,
+                );
+                const workbench = workbenchStateFor(props.route.params.conversationId);
+                const tab = props.route.params.tab || workbench.activeTab;
+                const backendUrl = profile?.serverUrl || settings.serverUrl;
+                return (
+                  <WorkbenchScreen
+                    {...props}
+                    activeTab={tab}
+                    visibleTabs={workbench.tabs}
+                    onTabChange={(next) => updateWorkbenchState(props.route.params.conversationId, { activeTab: next })}
+                    title={workspace?.name || '工作台'}
+                    subtitle={conversation?.title || workspace?.path}
+                    action={workbench.inspectedElement
+                      ? {
+                          label: '插入元素',
+                          icon: 'add-circle-outline',
+                          onPress: () => {
+                            const element = workbench.inspectedElement;
+                            if (!element) return;
+                            const description = [
+                              `[浏览器元素 ${element.tagName.toLowerCase() || 'element'}${element.selector ? ` ${element.selector}` : ''}]`,
+                              element.text,
+                            ].filter(Boolean).join(' ');
+                            setConversationChatDraft(props.route.params.conversationId, (current) => (
+                              `${current}${current.trim() ? '\n' : ''}${description}`
+                            ));
+                            updateWorkbenchState(props.route.params.conversationId, { inspectedElement: null });
+                            props.navigation.navigate('Chat', {
+                              workspaceId: props.route.params.workspaceId,
+                              conversationId: props.route.params.conversationId,
+                            });
+                          },
+                        }
+                      : { label: 'Git', icon: 'git-branch-outline', onPress: () => openGit(props.route.params.conversationId) }}
+                    renderTerminal={<TerminalScreen
+                      workspace={workspace}
+                      conversation={conversation}
+                      terminal={conversation ? terminalById[terminalIdForConversation(conversation.id)] ?? null : null}
+                      connectionState={connectionState}
+                      startTerminalSession={startTerminalSession}
+                      stopTerminalSession={stopTerminalSession}
+                      sendTerminalInput={sendTerminalInput}
+                      resizeTerminalSession={resizeTerminalSession}
+                      requestTerminalStatus={requestTerminalStatus}
+                      clearTerminalOutput={clearTerminalOutput}
+                    />}
+                    renderGitDiff={<GitDiffScreen
+                      workspace={workspace}
+                      conversation={conversation}
+                      diffState={conversation ? gitDiffByConversation[conversation.id] ?? null : null}
+                      requestGitDiff={requestGitDiff}
+                    />}
+                    renderBrowser={<BrowserScreen
+                      client={apiClientForConnection(settings, profile)}
+                      initialUrl={workbench.browserUrl || backendUrl}
+                      initialFilePath={workbench.browserFilePath || undefined}
+                      onResult={(result) => updateWorkbenchState(props.route.params.conversationId, { browserUrl: result.url })}
+                      renderWebView={(result) => (
+                        <BrowserPreviewWebView
+                          result={result}
+                          backendUrl={backendUrl}
+                          onInspect={(inspectedElement) => updateWorkbenchState(
+                            props.route.params.conversationId,
+                            { inspectedElement },
+                          )}
+                        />
+                      )}
+                    />}
+                    renderFiles={<FilesScreen
+                      client={apiClientForConnection(settings, profile)}
+                      rootPath={workspace?.path || settings.defaultWorkspacePath}
+                      initialFilePath={workbench.browserFilePath || undefined}
+                      onFileSelected={(path) => updateWorkbenchState(props.route.params.conversationId, { browserFilePath: path })}
+                    />}
+                  />
+                );
+              }}
+            </Stack.Screen>
+            <Stack.Screen name="Git" options={{ title: 'Git 操作' }}>
+              {(props) => {
+                const workspace = workspaces.find((item) => item.id === props.route.params.workspaceId) ?? null;
+                const profile = backendProfileForContext(
+                  props.route.params.workspaceId,
+                  props.route.params.conversationId,
+                );
+                const workspacePath = workspace?.path || settings.defaultWorkspacePath;
+                const target = `${profile?.id || activeBackendConnectionId || 'default'}\n${workspacePath}`;
+                const targetMatches = gitRepositoryTarget === target;
+                return (
+                  <GitScreen
+                    key={target}
+                    client={apiClientForConnection(settings, profile)}
+                    workspacePath={workspacePath}
+                    repositories={targetMatches ? gitRepositories : []}
+                    status={targetMatches ? gitRepositoryStatus : 'loading'}
+                    error={targetMatches ? gitRepositoryError : ''}
+                    output={targetMatches && gitRepositoryOutputTarget === target ? gitRepositoryOutput : ''}
+                    actionBusy={Boolean(gitRepositoryActionTarget)}
+                    onRefresh={(path) => requestGitRepositories(path, profile?.id)}
+                    onRun={(path, action, message, includeUnstaged) => (
+                      runGitAction(path, action, message, includeUnstaged, profile?.id)
+                    )}
+                  />
+                );
+              }}
             </Stack.Screen>
             </Stack.Navigator>
             </NavigationContainer>
@@ -8381,6 +9539,12 @@ function WorkspaceListScreen({
   renameWorkspace,
   forkWorkspace,
   removeWorkspace,
+  openUsage,
+  openAbout,
+  openKanban,
+  openGit,
+  backendProfiles,
+  activeBackendConnectionId,
 }: NativeStackScreenProps<RootStackParamList, 'Workspaces'> & {
   workspaces: WorkspaceRecord[];
   conversations: ConversationRecord[];
@@ -8389,11 +9553,17 @@ function WorkspaceListScreen({
   v2Providers: ProviderDescriptor[];
   v2ConversationCount: number;
   connectionState: string;
-  createWorkspace: (name: string, path: string) => { workspace: WorkspaceRecord; conversation: ConversationRecord } | null;
+  createWorkspace: (name: string, path: string, backendConnectionId?: string) => { workspace: WorkspaceRecord; conversation: ConversationRecord } | null;
   selectWorkspace: (workspaceId: string) => void;
   renameWorkspace: (workspaceId: string, name: string) => void;
   forkWorkspace: (workspaceId: string) => { workspace: WorkspaceRecord; conversation: ConversationRecord | null } | null;
   removeWorkspace: (workspaceId: string) => void;
+  openUsage: () => void;
+  openAbout: () => void;
+  openKanban: () => void;
+  openGit: (conversationId?: string) => void;
+  backendProfiles: BackendConnectionProfile[];
+  activeBackendConnectionId: string;
 }) {
   const [modalVisible, setModalVisible] = useState(false);
   const [workspaceNameDraft, setWorkspaceNameDraft] = useState('');
@@ -8401,19 +9571,27 @@ function WorkspaceListScreen({
   const [pathPickerVisible, setPathPickerVisible] = useState(false);
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [renamingWorkspace, setRenamingWorkspace] = useState<WorkspaceRecord | null>(null);
+  const [workspaceMenuVisible, setWorkspaceMenuVisible] = useState(false);
+  const [createBackendId, setCreateBackendId] = useState(activeBackendConnectionId);
   const availableProviderCount = v2Providers.filter((provider) => provider.available).length;
+
+  useEffect(() => {
+    if (!backendProfiles.some((profile) => profile.id === createBackendId)) {
+      setCreateBackendId(activeBackendConnectionId);
+    }
+  }, [activeBackendConnectionId, backendProfiles, createBackendId]);
 
   useLayoutEffect(() => {
     navigation.setOptions({
       headerRight: () => (
         <View style={styles.headerActions}>
-          <HeaderIconButton label="2.0" onPress={() => navigation.navigate('V2Conversations')} />
-          <HeaderIconButton label="设置" onPress={() => navigation.navigate('Settings')} />
+          <HeaderIconButton label="看板" onPress={openKanban} />
+          <HeaderIconButton label="更多" onPress={() => setWorkspaceMenuVisible(true)} />
           <HeaderIconButton label="+" onPress={() => setModalVisible(true)} />
         </View>
       ),
     });
-  }, [navigation]);
+  }, [navigation, openKanban]);
 
   const submit = () => {
     if (creatingWorkspace) {
@@ -8425,9 +9603,11 @@ function WorkspaceListScreen({
       return;
     }
     setCreatingWorkspace(true);
-    void fetchWorkspaceDirectorySnapshot(settings, pathDraft)
+      const selectedProfile = backendProfiles.find((profile) => profile.id === createBackendId);
+      const directorySettings = selectedProfile ? profileSettings(selectedProfile, settings) : settings;
+      void fetchWorkspaceDirectorySnapshot(directorySettings, pathDraft)
       .then((snapshot) => {
-        const created = createWorkspace(workspaceNameDraft, snapshot.current);
+        const created = createWorkspace(workspaceNameDraft, snapshot.current, createBackendId || undefined);
         if (!created) {
           return;
         }
@@ -8474,9 +9654,9 @@ function WorkspaceListScreen({
     <Surface className="flex-1 bg-background">
       <ScrollView contentContainerStyle={styles.listContent}>
         <View className="mx-4 mb-2 mt-1 flex-row items-center justify-between">
-          <View>
+          <View className="min-w-0 flex-1 pr-3">
             <HeroText className="text-2xl font-semibold text-foreground">TodeX</HeroText>
-            <HeroText className="mt-1 text-xs text-muted">移动端工作区 · v2 {availableProviderCount}/{v2Providers.length} provider · {v2ConversationCount} 个远端会话</HeroText>
+            <HeroText className="mt-1 text-xs text-muted" numberOfLines={2}>移动端工作区 · v2 {availableProviderCount}/{v2Providers.length} provider · {v2ConversationCount} 个远端会话</HeroText>
           </View>
           <Chip
             color={connectionState === 'open' ? 'success' : 'default'}
@@ -8524,27 +9704,61 @@ function WorkspaceListScreen({
         )}
       </ScrollView>
 
+      <Modal visible={workspaceMenuVisible} transparent animationType="fade" onRequestClose={() => setWorkspaceMenuVisible(false)}>
+        <Pressable style={styles.menuBackdrop} onPress={() => setWorkspaceMenuVisible(false)}>
+          <Pressable onPress={(event) => event.stopPropagation()}>
+            <Card className="w-[280px] rounded-lg">
+              <Card.Title>工作区工具</Card.Title>
+              <MenuItem title="Git 操作" onPress={() => openGit()} close={() => setWorkspaceMenuVisible(false)} />
+              <MenuItem title="使用统计" onPress={openUsage} close={() => setWorkspaceMenuVisible(false)} />
+              <MenuItem title="关于" onPress={openAbout} close={() => setWorkspaceMenuVisible(false)} />
+              <MenuItem title="设置" onPress={() => navigation.navigate('Settings')} close={() => setWorkspaceMenuVisible(false)} />
+            </Card>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       <Modal visible={modalVisible} animationType="slide" transparent onRequestClose={() => setModalVisible(false)}>
         <KeyboardAvoidingView behavior="padding" style={styles.modalBackdrop}>
-          <Card className="rounded-b-none">
+          <Card className="max-h-[85%] rounded-b-none">
             <View style={styles.modalHeader}>
               <Card.Title>新建工作区</Card.Title>
               <Button variant="ghost" size="sm" onPress={() => setModalVisible(false)}>
                 <Button.Label>关闭</Button.Label>
               </Button>
             </View>
-            <Field label="工作区名称" value={workspaceNameDraft} onChangeText={setWorkspaceNameDraft} placeholder="可选" />
-            <PathField
-              label="目录路径"
-              value={workspacePathDraft}
-              onChangeText={setWorkspacePathDraft}
-              placeholder={settings.defaultWorkspacePath}
-              onBrowse={() => setPathPickerVisible(true)}
-            />
-            <Row>
-              <ActionButton title={creatingWorkspace ? '验证中' : '创建'} onPress={submit} disabled={creatingWorkspace} />
-              <ActionButton title="填入默认路径" onPress={() => setWorkspacePathDraft(settings.defaultWorkspacePath)} tone="ghost" />
-            </Row>
+            <ScrollView keyboardShouldPersistTaps="handled" contentContainerClassName="gap-4 pb-4">
+              <Field label="工作区名称" value={workspaceNameDraft} onChangeText={setWorkspaceNameDraft} placeholder="可选" />
+              <PathField
+                label="目录路径"
+                value={workspacePathDraft}
+                onChangeText={setWorkspacePathDraft}
+                placeholder={settings.defaultWorkspacePath}
+                onBrowse={() => setPathPickerVisible(true)}
+              />
+              {backendProfiles.length > 1 ? (
+                <View className="gap-2">
+                  <HeroText className="text-xs font-semibold text-muted">绑定后端</HeroText>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.profileRail}>
+                    {backendProfiles.map((profile) => (
+                      <Button
+                        key={profile.id}
+                        size="sm"
+                        variant={createBackendId === profile.id ? 'primary' : 'secondary'}
+                        onPress={() => setCreateBackendId(profile.id)}
+                        className="min-h-11 max-w-[220px] rounded-lg"
+                      >
+                        <Button.Label numberOfLines={1}>{profile.name}</Button.Label>
+                      </Button>
+                    ))}
+                  </ScrollView>
+                </View>
+              ) : null}
+              <Row>
+                <ActionButton title={creatingWorkspace ? '验证中' : '创建'} onPress={submit} disabled={creatingWorkspace} />
+                <ActionButton title="填入默认路径" onPress={() => setWorkspacePathDraft(settings.defaultWorkspacePath)} tone="ghost" />
+              </Row>
+            </ScrollView>
           </Card>
         </KeyboardAvoidingView>
       </Modal>
@@ -8736,7 +9950,7 @@ function ConversationListScreen({
   connectionState: ConnectionState;
   threadListStatus: 'idle' | 'loading' | 'ready' | 'error';
   threadListError: string;
-  createConversation: (workspaceId: string, options?: { provider: ProviderKind; providerProfile?: string; title?: string }) => ConversationRecord | null;
+  createConversation: (workspaceId: string, options?: { provider?: ProviderKind; providerProfile?: string; title?: string }) => ConversationRecord | null;
   v2Providers: ProviderDescriptor[];
   refreshNativeThreads: (workspaceId: string, includeArchived?: boolean) => Promise<boolean>;
   selectWorkspace: (workspaceId: string) => void;
@@ -8749,10 +9963,19 @@ function ConversationListScreen({
   const [createVisible, setCreateVisible] = useState(false);
   const [createProvider, setCreateProvider] = useState<ProviderKind | ''>('');
   const [createProfile, setCreateProfile] = useState('');
+  const [createTitle, setCreateTitle] = useState('');
   const workspace = workspaces.find((item) => item.id === route.params.workspaceId) ?? null;
   const workspaceConversations = conversations.filter((conversation) => conversation.workspaceId === route.params.workspaceId && conversation.archived !== true);
   const selectedProvider = v2Providers.find((item) => item.id === createProvider) ?? null;
   const needsProfile = Boolean(selectedProvider && (selectedProvider.id === 'acp' || selectedProvider.profiles.length > 1));
+
+  const openCreateConversation = useCallback(() => {
+    const firstAvailable = v2Providers.find((item) => item.available);
+    setCreateProvider(firstAvailable?.id || '');
+    setCreateProfile(firstAvailable?.profiles[0] || '');
+    setCreateTitle('');
+    setCreateVisible(true);
+  }, [v2Providers]);
 
   useEffect(() => {
     selectWorkspace(route.params.workspaceId);
@@ -8781,19 +10004,11 @@ function ConversationListScreen({
       title: workspace?.name ?? '对话',
       headerRight: () => (
         <View style={styles.headerActions}>
-          <HeaderIconButton
-            label="+"
-            onPress={() => {
-              const first = v2Providers.find((item) => item.available);
-              setCreateProvider(first?.id ?? '');
-              setCreateProfile(first?.profiles[0] ?? '');
-              setCreateVisible(true);
-            }}
-          />
+          <HeaderIconButton label="+" onPress={openCreateConversation} />
         </View>
       ),
     });
-  }, [createConversation, navigation, route.params.workspaceId, v2Providers, workspace?.name]);
+  }, [navigation, openCreateConversation, workspace?.name]);
 
   const conversationTitle = (conversation: ConversationRecord) => {
     return conversation.title || conversation.preview || 'Untitled thread';
@@ -8852,7 +10067,7 @@ function ConversationListScreen({
         </Card>
 
       {workspaceConversations.length === 0 ? (
-        <EmptyState text="还没有对话。点右上角 + 选择 Agent 后创建。" />
+        <EmptyState text="还没有对话。点右上角 + 创建会话。" />
       ) : (
         workspaceConversations.map((conversation) => {
           const preview = conversation.title || conversation.preview || 'Untitled thread';
@@ -8870,11 +10085,15 @@ function ConversationListScreen({
               onLongPress={() => openConversationActions(conversation)}
               className={`mx-3 mb-2 min-h-[76px] justify-start rounded-lg px-3 py-3 ${running ? 'bg-success-soft' : highlighted ? 'bg-accent-soft' : 'bg-surface'}`}
             >
-              <View className={`h-12 w-12 items-center justify-center rounded-lg ${running ? 'bg-success' : 'bg-surface-tertiary'}`}>
-                <HeroText className={`text-base font-semibold ${running ? 'text-success-foreground' : 'text-surface-tertiary-foreground'}`}>
-                  {preview.slice(0, 1).toUpperCase()}
-                </HeroText>
-              </View>
+              {conversation.provider ? (
+                <ProviderIcon provider={conversation.provider} size={18} />
+              ) : (
+                <View className={`h-12 w-12 items-center justify-center rounded-lg ${running ? 'bg-success' : 'bg-surface-tertiary'}`}>
+                  <HeroText className={`text-base font-semibold ${running ? 'text-success-foreground' : 'text-surface-tertiary-foreground'}`}>
+                    {preview.slice(0, 1).toUpperCase()}
+                  </HeroText>
+                </View>
+              )}
               <View className="min-w-0 flex-1">
                 <View className="flex-row items-center justify-between gap-2">
                   <HeroText className={`min-w-0 flex-1 text-base font-semibold ${running ? 'text-success-soft-foreground' : 'text-foreground'}`} numberOfLines={1}>
@@ -8909,7 +10128,9 @@ function ConversationListScreen({
         <Pressable style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'center', padding: 24 }} onPress={() => setCreateVisible(false)}>
           <Pressable onPress={() => undefined} className="rounded-2xl bg-background p-4">
             <HeroText className="text-lg font-semibold text-foreground">新建对话</HeroText>
-            <HeroText className="mt-1 text-xs text-muted">Agent 只在创建时选择，创建后不可切换。</HeroText>
+            <HeroText className="mt-1 text-xs text-muted">在当前工作区创建 TodeX 2.0 会话。</HeroText>
+            <HeroText className="mt-1 text-xs text-muted" numberOfLines={2}>{workspace.name} · {workspace.path}</HeroText>
+            <Field label="会话标题" value={createTitle} onChangeText={setCreateTitle} placeholder="可选" />
             <View className="mt-3 flex-row flex-wrap gap-2">
               {v2Providers.map((item) => (
                 <Button
@@ -8944,8 +10165,10 @@ function ConversationListScreen({
                   const next = createConversation(route.params.workspaceId, {
                     provider: selectedProvider.id,
                     providerProfile: needsProfile ? createProfile || undefined : selectedProvider.profiles[0],
+                    title: createTitle.trim() || undefined,
                   });
                   setCreateVisible(false);
+                  setCreateTitle('');
                   if (next) {
                     navigation.navigate('Chat', { workspaceId: route.params.workspaceId, conversationId: next.id });
                   }
@@ -8993,7 +10216,20 @@ function ChatScreen({
   runThreadMenuAction,
   sendSlashCommand,
   openGitDiff,
+  openGit,
   openTerminal,
+  openBrowser,
+  openFiles,
+  openWorkbench,
+  openUsage,
+  v2Providers,
+  providerModels,
+  providerCommands,
+  providerCatalogStatus,
+  contextUsage,
+  switchConversationAgent,
+  applyConversationModelSelection,
+  refreshProviderCatalog,
   removeWorkspace,
   capabilityCatalog,
 }: NativeStackScreenProps<RootStackParamList, 'Chat'> & {
@@ -9025,7 +10261,20 @@ function ChatScreen({
   runThreadMenuAction: (conversationId: string, action: ThreadMenuAction) => void;
   sendSlashCommand: (input: string, conversationId?: string) => void;
   openGitDiff: (conversationId: string) => void;
+  openGit: (conversationId: string) => void;
   openTerminal: (conversationId: string) => void;
+  openBrowser: (conversationId: string, target?: { url?: string; filePath?: string }) => void;
+  openFiles: (conversationId: string, filePath?: string) => void;
+  openWorkbench: (conversationId: string, tab?: WorkbenchTab) => void;
+  openUsage: () => void;
+  v2Providers: ProviderDescriptor[];
+  providerModels: Partial<Record<ProviderKind, ProviderModelDescriptor[]>>;
+  providerCommands: Partial<Record<ProviderKind, ProviderCommandDescriptor[]>>;
+  providerCatalogStatus: Partial<Record<ProviderKind, 'idle' | 'loading' | 'ready' | 'error'>>;
+  contextUsage: MobileContextUsage | null;
+  switchConversationAgent: (conversationId: string, provider: ProviderKind, providerProfile?: string) => boolean;
+  applyConversationModelSelection: (conversationId: string, model: string, reasoningEffort: string | null) => void;
+  refreshProviderCatalog: (provider: ProviderKind, workspacePath?: string) => Promise<boolean>;
   removeWorkspace: (workspaceId: string) => void;
   capabilityCatalog?: CatalogState;
 }) {
@@ -9047,6 +10296,25 @@ function ChatScreen({
   const composerPaddingBottom = 12 + insets.bottom;
   const workspace = workspaces.find((item) => item.id === route.params.workspaceId) ?? null;
   const conversation = conversations.find((item) => item.id === route.params.conversationId) ?? null;
+  const currentProvider = conversation?.provider as ProviderKind | undefined;
+  const agentProvider = currentProvider || (conversation ? 'codex' : undefined);
+  const availableProviders = useMemo(
+    () => v2Providers.filter((provider) => provider.available),
+    [v2Providers],
+  );
+  const providerDescriptor = currentProvider
+    ? v2Providers.find((provider) => provider.id === currentProvider)
+    : v2Providers.find((provider) => provider.id === 'codex');
+  const liveProviderModels = currentProvider ? providerModels[currentProvider] ?? providerDescriptor?.models ?? [] : [];
+  const currentModel = conversation?.model
+    || liveProviderModels.find((model) => model.isDefault)?.id
+    || (agentProvider === 'codex' ? workspace?.model || settings.defaultModel : '');
+  const currentReasoningEffort = conversation?.reasoningEffort ?? (agentProvider === 'codex' ? workspace?.reasoningEffort ?? settings.defaultReasoningEffort ?? null : null);
+  const currentModelDescriptor = liveProviderModels.find((model) => model.id === currentModel || model.id.endsWith(`/${currentModel}`));
+  const currentProviderCommands = currentProvider ? providerCommands[currentProvider] ?? [] : [];
+  const canSwitchAgent = conversation ? canSwitchConversationAgent(conversation, timeline, isThinking) : false;
+  const contextWindow = contextUsage?.contextWindow ?? currentModelDescriptor?.contextWindow;
+  const contextPercent = contextWindow && contextUsage ? Math.min(100, Math.max(0, contextUsage.usedTokens / contextWindow * 100)) : null;
   const conversationMessages = useMemo(
     () => timeline
       .filter((entry) => entry.conversationId === route.params.conversationId && isVisibleConversationEntry(entry))
@@ -9085,8 +10353,14 @@ function ChatScreen({
     return result;
   }, [conversationRenderItems]);
   const slashQuery = chatDraft.startsWith('/') ? chatDraft.slice(1).trim().toLowerCase() : '';
+  const providerSlashCommands = currentProviderCommands.map((item) => ({
+    command: `/${item.name}`,
+    title: item.name,
+    description: item.description || `${item.source} command`,
+  }));
+  const slashCatalog = [...SLASH_COMMANDS, ...providerSlashCommands];
   const slashSuggestions = chatDraft.startsWith('/')
-    ? SLASH_COMMANDS.filter((item, index, list) => {
+    ? slashCatalog.filter((item, index, list) => {
         const unique = list.findIndex((candidate) => candidate.command === item.command) === index;
         if (!unique) {
           return false;
@@ -9117,6 +10391,75 @@ function ChatScreen({
       .map((item) => ({ id: `mcp:${item.resourceId}`, kind: 'mcp' as const, name: item.name, description: `${item.transport} MCP Server`, insertText: `#mcp/${item.name} ` }));
     return [...skills, ...servers].slice(0, 8);
   }, [capabilityCatalog, capabilityHashTrigger]);
+
+  const chooseProvider = useCallback((provider: ProviderDescriptor) => {
+    if (!conversation || !canSwitchAgent || !provider.available) return;
+    const apply = (profile?: string) => {
+      switchConversationAgent(conversation.id, provider.id, profile);
+    };
+    if (provider.profiles.length <= 1) {
+      apply(provider.profiles[0]);
+      return;
+    }
+    Alert.alert('选择 Agent 配置', provider.displayName, [
+      ...provider.profiles.slice(0, 4).map((profile) => ({ text: profile, onPress: () => apply(profile) })),
+      { text: '默认配置', onPress: () => apply() },
+      { text: '取消', style: 'cancel' },
+    ]);
+  }, [canSwitchAgent, conversation, switchConversationAgent]);
+
+  const chooseAgent = useCallback(() => {
+    if (!conversation || !canSwitchAgent) return;
+    if (availableProviders.length === 0) {
+      Alert.alert('暂无可用 Agent', '请检查后端 Provider 配置后重试。');
+      return;
+    }
+    Alert.alert('选择 Agent', providerDescriptor?.displayName || '当前对话 Agent', [
+      ...availableProviders.slice(0, 8).map((provider) => ({
+        text: provider.displayName,
+        onPress: () => chooseProvider(provider),
+      })),
+      { text: '取消', style: 'cancel' },
+    ]);
+  }, [availableProviders, canSwitchAgent, chooseProvider, conversation, providerDescriptor?.displayName]);
+
+  const chooseModel = useCallback(() => {
+    if (!conversation) return;
+    const options = liveProviderModels.length > 0
+      ? liveProviderModels
+      : currentModel ? [{ id: currentModel, displayName: currentModel, description: '', isDefault: true, supportedReasoningEfforts: [], contextWindow: undefined }] : [];
+    if (options.length === 0) {
+      if (currentProvider) void refreshProviderCatalog(currentProvider, workspace?.path);
+      Alert.alert('暂无模型', '正在刷新当前 Agent 的模型列表，请稍后再试。');
+      return;
+    }
+    Alert.alert('选择模型', '当前对话模型', [
+      ...options.slice(0, 8).map((model) => ({
+        text: model.displayName || model.id,
+        onPress: () => applyConversationModelSelection(conversation.id, model.id, model.supportedReasoningEfforts[0] || currentReasoningEffort || null),
+      })),
+      { text: '刷新列表', onPress: () => { if (currentProvider) void refreshProviderCatalog(currentProvider, workspace?.path); } },
+      { text: '取消', style: 'cancel' },
+    ]);
+  }, [applyConversationModelSelection, conversation, currentModel, currentProvider, currentReasoningEffort, liveProviderModels, refreshProviderCatalog, workspace?.path]);
+
+  const chooseReasoning = useCallback(() => {
+    if (!conversation) return;
+    const efforts = currentModelDescriptor?.supportedReasoningEfforts ?? [];
+    const options = [...new Set([...(currentReasoningEffort ? [currentReasoningEffort] : []), ...efforts])];
+    if (options.length === 0) {
+      Alert.alert('思考强度', '当前 Agent 没有返回可选强度，将使用 Provider 默认值。');
+      return;
+    }
+    Alert.alert('思考强度', currentModel || '当前模型', [
+      ...options.map((effort) => ({
+        text: effort,
+        onPress: () => applyConversationModelSelection(conversation.id, currentModel, effort),
+      })),
+      { text: '使用默认', onPress: () => applyConversationModelSelection(conversation.id, currentModel, null) },
+      { text: '取消', style: 'cancel' },
+    ]);
+  }, [applyConversationModelSelection, conversation, currentModel, currentModelDescriptor?.supportedReasoningEfforts, currentReasoningEffort]);
 
   useEffect(() => {
     if (connectionState !== 'open' || !workspace || !conversation?.sessionId) {
@@ -9536,6 +10879,22 @@ function ChatScreen({
     [collapseAutoExpandedRequest, sendApprovalResponse],
   );
 
+  const openMessageLink = useCallback((href: string) => {
+    if (!workspace || !conversation) return;
+    const target: WorkspaceLinkTarget = sharedWorkspaceLinkTarget(href, workspace.path, { requireLoopback: true });
+    if (!target) {
+      Alert.alert('无法打开链接', '仅支持当前工作区内的文件和本机 HTTP 地址。');
+      return;
+    }
+    if (target.kind === 'browser-url') {
+      openBrowser(conversation.id, { url: target.url });
+    } else if (target.kind === 'browser-file') {
+      openBrowser(conversation.id, { filePath: target.filePath });
+    } else {
+      openFiles(conversation.id, target.filePath);
+    }
+  }, [conversation, openBrowser, openFiles, workspace]);
+
   const renderConversationRenderItem = useCallback(({ item }: ListRenderItemInfo<ConversationRenderItem>) => {
     if (item.type === 'executionGroup') {
       const manuallyExpanded = expandedProgressIds.has(item.id);
@@ -9551,6 +10910,7 @@ function ChatScreen({
           onToggleGroup={toggleProgressId}
           onToggleProgress={toggleProgressEntry}
           onApprovalResponse={handleApprovalResponse}
+          onOpenLink={openMessageLink}
         />
       );
     }
@@ -9567,12 +10927,21 @@ function ChatScreen({
         pendingRequest={entry.requestId ? pendingRequestById.get(entry.requestId) : undefined}
         onToggleProgress={toggleProgressEntry}
         onApprovalResponse={handleApprovalResponse}
+        onOpenLink={openMessageLink}
+        onFork={entry.kind === 'incoming' && conversation
+          ? () => runThreadMenuAction(conversation.id, 'fork')
+          : undefined}
+        usage={entry.kind === 'incoming' ? contextUsage : null}
       />
     );
   }, [
     expandedProgressIds,
     handleApprovalResponse,
+    contextUsage,
+    conversation,
+    openMessageLink,
     pendingRequestById,
+    runThreadMenuAction,
     toggleProgressEntry,
     toggleProgressId,
   ]);
@@ -9605,16 +10974,30 @@ function ChatScreen({
           agentLabel={conversation?.provider ? providerDisplayName(conversation.provider) : conversation ? '历史 Codex' : undefined}
         />
       ),
-      headerRight: () => <HeaderIconButton label="..." onPress={() => setMenuVisible(true)} />,
+      headerRight: () => (
+        <>
+          <HeaderIconButton
+            label="Git"
+            onPress={() => {
+              if (conversation) {
+                openGit(conversation.id);
+              }
+            }}
+          />
+          <HeaderIconButton label="更多" onPress={() => setMenuVisible(true)} />
+        </>
+      ),
     });
   }, [
     conversation?.goalObjective,
     conversation?.goalStatus,
+    conversation?.id,
     conversation?.localAdapterState,
     conversation?.mode,
     conversation?.provider,
     chatHeaderTitle,
     navigation,
+    openGit,
   ]);
 
   if (!workspace || !conversation) {
@@ -9669,6 +11052,55 @@ function ChatScreen({
 
       <KeyboardStickyView offset={composerKeyboardOffset} style={styles.composerSticky}>
         <View style={[styles.composer, { paddingBottom: composerPaddingBottom }]}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          contentContainerStyle={styles.composerControlRail}
+        >
+          <Button
+            size="sm"
+            variant="primary"
+            isDisabled={!canSwitchAgent || (agentProvider ? providerCatalogStatus[agentProvider] === 'loading' : false)}
+            onPress={chooseAgent}
+            className="min-h-11 max-w-[176px] flex-row rounded-lg px-2"
+            accessibilityLabel="选择 Agent"
+          >
+            <ProviderIcon provider={agentProvider} size={14} />
+            <Button.Label numberOfLines={1}>
+              {providerDescriptor?.displayName || providerDisplayName(agentProvider || 'codex')}
+            </Button.Label>
+            <StyledIonicons name="chevron-down" size={14} className="text-accent-foreground" />
+          </Button>
+          <Button size="sm" variant="secondary" onPress={chooseModel} className="min-h-11 max-w-[170px] rounded-lg px-3" accessibilityLabel="选择模型">
+            <StyledIonicons name="hardware-chip-outline" size={16} className="text-foreground" />
+            <Button.Label numberOfLines={1}>{currentModel || '选择模型'}</Button.Label>
+          </Button>
+          <Button size="sm" variant="secondary" onPress={chooseReasoning} className="min-h-11 max-w-[136px] rounded-lg px-3" accessibilityLabel="选择思考强度">
+            <StyledIonicons name="flash-outline" size={16} className="text-foreground" />
+            <Button.Label numberOfLines={1}>{currentReasoningEffort || '默认强度'}</Button.Label>
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            onPress={() => navigation.navigate('SlashCommandAction', { workspaceId: workspace.id, conversationId: conversation.id, command: '/permissions' })}
+            className="min-h-11 max-w-[136px] rounded-lg px-3"
+            accessibilityLabel="选择权限"
+          >
+            <StyledIonicons name="shield-checkmark-outline" size={16} className="text-foreground" />
+            <Button.Label numberOfLines={1}>权限</Button.Label>
+          </Button>
+          {contextUsage ? (
+            <View className="min-h-11 min-w-[118px] justify-center rounded-lg bg-surface-secondary px-3">
+              <HeroText className="text-xs font-semibold text-foreground" numberOfLines={1}>
+                {compactTokenCount(contextUsage.usedTokens)}{contextWindow ? ` / ${compactTokenCount(contextWindow)}` : ''} tok
+              </HeroText>
+              <View className="mt-1 h-1.5 overflow-hidden rounded-full bg-surface-tertiary">
+                <View className="h-full bg-accent" style={{ width: `${contextPercent ?? 0}%` }} />
+              </View>
+            </View>
+          ) : null}
+        </ScrollView>
         {slashSuggestions.length > 0 ? (
           <Surface variant="secondary" className="mb-2 overflow-hidden rounded-lg">
             <ScrollView
@@ -9874,6 +11306,10 @@ function ChatScreen({
               <MenuItem title="Unarchive Thread" onPress={() => runThreadMenuAction(conversation.id, 'unarchive')} close={() => setMenuVisible(false)} />
               <MenuItem title="Git Diff" onPress={() => openGitDiff(conversation.id)} close={() => setMenuVisible(false)} />
               <MenuItem title="终端" onPress={() => openTerminal(conversation.id)} close={() => setMenuVisible(false)} />
+              <MenuItem title="浏览器" onPress={() => openBrowser(conversation.id)} close={() => setMenuVisible(false)} />
+              <MenuItem title="文件" onPress={() => openFiles(conversation.id)} close={() => setMenuVisible(false)} />
+              <MenuItem title="工作台" onPress={() => openWorkbench(conversation.id)} close={() => setMenuVisible(false)} />
+              <MenuItem title="使用统计" onPress={openUsage} close={() => setMenuVisible(false)} />
               <MenuItem
                 title="Slash Commands"
                 onPress={() => navigation.navigate('SlashCommands', { workspaceId: workspace.id, conversationId: conversation.id })}
@@ -10816,7 +12252,7 @@ function GitDiffScreen({
   conversation,
   diffState,
   requestGitDiff,
-}: NativeStackScreenProps<RootStackParamList, 'GitDiff'> & {
+}: Partial<NativeStackScreenProps<RootStackParamList, 'GitDiff'>> & {
   workspace: WorkspaceRecord | null;
   conversation: ConversationRecord | null;
   diffState: GitDiffState | null;
@@ -10894,7 +12330,7 @@ function TerminalScreen({
   resizeTerminalSession,
   requestTerminalStatus,
   clearTerminalOutput,
-}: NativeStackScreenProps<RootStackParamList, 'Terminal'> & {
+}: Partial<NativeStackScreenProps<RootStackParamList, 'Terminal'>> & {
   workspace: WorkspaceRecord | null;
   conversation: ConversationRecord | null;
   terminal: TerminalClientState | null;
@@ -10914,12 +12350,34 @@ function TerminalScreen({
   const [colsDraft, setColsDraft] = useState(String(terminal?.cols ?? DEFAULT_TERMINAL_COLS));
   const [inputDraft, setInputDraft] = useState('');
   const outputScrollRef = useRef<ScrollView | null>(null);
+  const terminalStateRef = useRef(terminal);
+  const autoStartKeyRef = useRef('');
+  const reconnectAttemptRef = useRef(0);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const manualStopRef = useRef(false);
   const insets = useSafeAreaInsets();
   const isRunning = terminal?.status === 'running';
   const isBusy = terminal?.status === 'starting' || terminal?.status === 'stopping';
   const canControl = Boolean(workspace && conversation && terminalId && connectionState === 'open');
   const rows = Math.max(8, Math.min(200, Number.parseInt(rowsDraft, 10) || DEFAULT_TERMINAL_ROWS));
   const cols = Math.max(20, Math.min(400, Number.parseInt(colsDraft, 10) || DEFAULT_TERMINAL_COLS));
+
+  useEffect(() => {
+    terminalStateRef.current = terminal;
+  }, [terminal]);
+
+  useEffect(() => {
+    manualStopRef.current = false;
+  }, [conversation?.id]);
+
+  useEffect(() => {
+    autoStartKeyRef.current = '';
+    reconnectAttemptRef.current = 0;
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+  }, [connectionState, conversation?.id]);
 
   useEffect(() => {
     if (workspace?.path && !cwd) {
@@ -10944,6 +12402,71 @@ function TerminalScreen({
   }, [connectionState, conversation?.id, requestTerminalStatus, workspace?.id]);
 
   useEffect(() => {
+    if (!workspace || !conversation || !terminalId || connectionState !== 'open' || manualStopRef.current) return;
+    const attemptKey = `${conversation.id}:${terminalId}`;
+    if (autoStartKeyRef.current === attemptKey) return;
+    autoStartKeyRef.current = attemptKey;
+    requestTerminalStatus(workspace, conversation);
+    const timer = setTimeout(() => {
+      if (manualStopRef.current) return;
+      const latest = terminalStateRef.current;
+      if (!latest || latest.status === 'idle') {
+        startTerminalSession(workspace, conversation, {
+          cwd: latest?.cwd || workspace.path,
+          shell: latest?.shell || '',
+          rows: latest?.rows || DEFAULT_TERMINAL_ROWS,
+          cols: latest?.cols || DEFAULT_TERMINAL_COLS,
+        });
+      }
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [
+    connectionState,
+    conversation?.id,
+    requestTerminalStatus,
+    startTerminalSession,
+    terminalId,
+    workspace?.id,
+    workspace?.path,
+  ]);
+
+  useEffect(() => {
+    if (!workspace || !conversation || !terminalId || connectionState !== 'open' || manualStopRef.current) return;
+    if (terminal?.status === 'running') {
+      reconnectAttemptRef.current = 0;
+      return;
+    }
+    if (terminal?.status !== 'error' && terminal?.status !== 'exited') return;
+    if (reconnectTimerRef.current) return;
+    const delay = Math.min(10_000, 1000 * 2 ** reconnectAttemptRef.current);
+    reconnectAttemptRef.current += 1;
+    reconnectTimerRef.current = setTimeout(() => {
+      reconnectTimerRef.current = null;
+      const latest = terminalStateRef.current;
+      startTerminalSession(workspace, conversation, {
+        cwd: latest?.cwd || workspace.path,
+        shell: latest?.shell || '',
+        rows: latest?.rows || DEFAULT_TERMINAL_ROWS,
+        cols: latest?.cols || DEFAULT_TERMINAL_COLS,
+      });
+    }, delay);
+    return () => {
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+    };
+  }, [
+    connectionState,
+    conversation?.id,
+    startTerminalSession,
+    terminal?.status,
+    terminalId,
+    workspace?.id,
+    workspace?.path,
+  ]);
+
+  useEffect(() => {
     requestAnimationFrame(() => outputScrollRef.current?.scrollToEnd({ animated: true }));
   }, [terminal?.output.length]);
 
@@ -10956,6 +12479,8 @@ function TerminalScreen({
       Alert.alert('后端未连接', '请先在设置里连接后端。');
       return;
     }
+    manualStopRef.current = false;
+    reconnectAttemptRef.current = 0;
     startTerminalSession(workspace, conversation, {
       cwd: cwd.trim() || workspace.path,
       shell,
@@ -10967,6 +12492,11 @@ function TerminalScreen({
   const stop = useCallback((force = false) => {
     if (!terminalId) {
       return;
+    }
+    manualStopRef.current = true;
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
     }
     stopTerminalSession(terminalId, effectiveTenantId, force);
   }, [effectiveTenantId, stopTerminalSession, terminalId]);
@@ -11224,48 +12754,35 @@ function ExperimentalScreen({
 function SettingsScreen({
   settings,
   setSettings,
-  modelCatalog,
-  modelCatalogStatus,
-  modelCatalogError,
-  refreshModelCatalog,
-  openDefaultModelPicker,
-  serverVersion,
-  activeWorkspace,
-  pendingRequestCount,
-  turnId,
-  runtimeStatus,
   connectionState,
   connectionHealth,
   lastError,
   connect,
   closeSocket,
-  refreshServerVersion,
-  v2Providers,
+  backendProfiles,
+  activeBackendConnectionId,
+  updateBackendProfile,
+  addBackendProfile,
+  removeBackendProfile,
+  selectBackendProfile,
 }: NativeStackScreenProps<RootStackParamList, 'Settings'> & {
   settings: ConnectionSettings;
   setSettings: React.Dispatch<React.SetStateAction<ConnectionSettings>>;
-  modelCatalog: CodexModelCatalogItem[];
-  modelCatalogStatus: 'idle' | 'loading' | 'ready' | 'error';
-  modelCatalogError: string;
-  refreshModelCatalog: () => boolean;
-  openDefaultModelPicker: () => void;
-  serverVersion: ServerVersion | null;
-  activeWorkspace: WorkspaceRecord | null;
-  pendingRequestCount: number;
-  turnId: string;
-  runtimeStatus: RuntimeStatusState;
   connectionState: ConnectionState;
   connectionHealth: ConnectionHealth;
   lastError: string;
   connect: () => void;
   closeSocket: (manual?: boolean) => void;
-  refreshServerVersion: () => void;
-  v2Providers: ProviderDescriptor[];
+  backendProfiles: BackendConnectionProfile[];
+  activeBackendConnectionId: string;
+  updateBackendProfile: (id: string, patch: Partial<BackendConnectionProfile>) => void;
+  addBackendProfile: (draft?: Partial<BackendConnectionProfile>) => BackendConnectionProfile | null;
+  removeBackendProfile: (id: string) => void;
+  selectBackendProfile: (id: string) => void;
 }) {
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [pairingScannerVisible, setPairingScannerVisible] = useState(false);
   const [pairingScannerStatus, setPairingScannerStatus] = useState('对准后端配对二维码。');
-  const [pathPickerVisible, setPathPickerVisible] = useState(false);
   const pairingChunkCollectorRef = useRef<PairingChunkCollector | null>(null);
   const pairingScanBusyRef = useRef(false);
   const pairingScannerLastRawRef = useRef<string | null>(null);
@@ -11288,9 +12805,8 @@ function SettingsScreen({
       : settings.encryptionProtocol === 'x25519'
         ? 'X25519'
         : 'ML-KEM-768';
-  const currentModelName = activeWorkspace?.model || settings.defaultModel;
-  const currentReasoningEffort = normalizeReasoningEffort(activeWorkspace?.reasoningEffort ?? settings.defaultReasoningEffort);
   const connectionChipColor = connectionState === 'open' ? 'success' : connectionState === 'error' || connectionHealth.status === 'offline' ? 'danger' : 'default';
+  const activeBackendProfile = backendProfiles.find((profile) => profile.id === activeBackendConnectionId) ?? null;
 
   const openPairingScanner = useCallback(async () => {
     if (Platform.OS === 'web') {
@@ -11414,6 +12930,46 @@ function SettingsScreen({
           </Chip>
         </Card.Header>
         <Card.Body className="gap-4">
+          <Surface variant="secondary" className="gap-3 rounded-lg p-3">
+            <View className="flex-row items-center justify-between gap-3">
+              <View className="min-w-0 flex-1">
+                <HeroText className="text-sm font-semibold text-foreground">后端配置</HeroText>
+                <HeroText className="mt-1 text-xs text-muted" numberOfLines={1}>
+                  {backendProfiles.length} 个连接 · 当前 {activeBackendProfile?.name || '未选择'}
+                </HeroText>
+              </View>
+              {backendProfiles.length > 1 ? <Button size="sm" variant="danger-soft" onPress={() => {
+                if (!activeBackendProfile) return;
+                Alert.alert('删除后端配置', `确定删除「${activeBackendProfile.name}」？`, [
+                  { text: '取消', style: 'cancel' },
+                  { text: '删除', style: 'destructive', onPress: () => removeBackendProfile(activeBackendProfile.id) },
+                ]);
+              }}><Button.Label>删除</Button.Label></Button> : null}
+            </View>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.profileRail}>
+              {backendProfiles.map((profile) => (
+                <Button
+                  key={profile.id}
+                  size="sm"
+                  variant={profile.id === activeBackendConnectionId ? 'primary' : 'secondary'}
+                  onPress={() => selectBackendProfile(profile.id)}
+                  className="min-h-11 max-w-[220px]"
+                >
+                  <Button.Label numberOfLines={1}>{profile.name}</Button.Label>
+                </Button>
+              ))}
+            </ScrollView>
+            {activeBackendProfile ? <Field
+              label="配置名称"
+              value={activeBackendProfile.name}
+              onChangeText={(value) => updateBackendProfile(activeBackendProfile.id, { name: value })}
+              placeholder="我的后端"
+            /> : null}
+            <ActionButton title="新增后端配置" onPress={() => {
+              const created = addBackendProfile({ name: `后端 ${backendProfiles.length + 1}` });
+              if (created) Alert.alert('已新增后端配置', '请填写地址和凭据后再连接。');
+            }} tone="ghost" />
+          </Surface>
           <Surface variant="secondary" className="rounded-lg p-3">
             <View className="flex-row items-center gap-3">
               <View style={[styles.connectionDot, dotStyle]} />
@@ -11425,23 +12981,8 @@ function SettingsScreen({
               </View>
               <HeroText className="text-sm font-semibold text-foreground">{latencyLabelOf(connectionHealth.latencyMs)}</HeroText>
             </View>
-            <View className="mt-3 gap-1">
-              <View className="flex-row justify-between gap-3">
-                <HeroText className="text-xs text-muted">WebSocket: {runtimeStatus.socket}</HeroText>
-              </View>
-              <View className="flex-row justify-between gap-3">
-                <HeroText className="text-xs text-muted">Daemon: {runtimeStatus.daemon}</HeroText>
-                <HeroText className="text-xs text-muted">Codex: {runtimeStatus.codexAdapter}</HeroText>
-              </View>
-              <View className="flex-row justify-between gap-3">
-                <HeroText className="text-xs text-muted">Turn: {runtimeStatus.turn}</HeroText>
-                <HeroText className="text-xs text-muted">
-                  {connectionHealth.lastCheckedAt ? `检测: ${nowLabel(connectionHealth.lastCheckedAt)}` : '检测: --'}
-                </HeroText>
-              </View>
-            </View>
           </Surface>
-            {runtimeStatus.daemon === 'offline' && connectionHealth.error ? (
+            {connectionHealth.status === 'offline' && connectionHealth.error ? (
               <Text style={styles.connectionErrorText} numberOfLines={3}>{classifiedError ? `${classifiedError}\n${connectionHealth.error}` : connectionHealth.error}</Text>
             ) : lastError ? (
               <Text style={styles.connectionErrorText} numberOfLines={3}>{classifiedError ? `${classifiedError}\n${lastError}` : lastError}</Text>
@@ -11507,7 +13048,6 @@ function SettingsScreen({
               onPress={connectionAction}
               tone={isConnected || isConnecting ? 'danger' : 'solid'}
             />
-            <ActionButton title="刷新版本" onPress={refreshServerVersion} tone="ghost" />
           </Row>
           {lastError ? <HeroText className="text-sm text-danger">{lastError}</HeroText> : null}
         </Card.Body>
@@ -11533,89 +13073,6 @@ function SettingsScreen({
         </View>
       </Modal>
 
-      <Card className="gap-4">
-        <Card.Header>
-          <Card.Title>默认参数</Card.Title>
-        </Card.Header>
-        <Card.Body className="gap-4">
-          <PathField
-            label="默认目录路径"
-            value={settings.defaultWorkspacePath}
-            onChangeText={(value) => setSettings((current) => ({ ...current, defaultWorkspacePath: value }))}
-            placeholder="/home/dev/projects"
-            onBrowse={() => setPathPickerVisible(true)}
-          />
-          <Field
-            label="默认模型"
-            value={settings.defaultModel}
-            onChangeText={(value) => setSettings((current) => ({ ...current, defaultModel: value }))}
-            placeholder="gpt-5.5"
-          />
-          <Surface variant="secondary" className="gap-3 rounded-lg p-3">
-            <View style={styles.modelControlHeader}>
-              <View style={styles.modelControlTitleBlock}>
-                <HeroText className="text-sm font-semibold text-foreground">模型选择</HeroText>
-                <HeroText className="text-xs text-muted" numberOfLines={1}>
-                  {modelDisplayLabel(settings.defaultModel, modelCatalog)} · {reasoningEffortLabel(settings.defaultReasoningEffort)}
-                </HeroText>
-              </View>
-              {modelCatalogStatus === 'loading' ? <ActivityIndicator size="small" color="#17202a" /> : null}
-            </View>
-            <Row>
-              <ActionButton title="选择模型" onPress={openDefaultModelPicker} tone="solid" />
-              <ActionButton title="刷新列表" onPress={refreshModelCatalog} tone="ghost" disabled={modelCatalogStatus === 'loading'} />
-            </Row>
-            {modelCatalogError ? <HeroText className="text-sm text-warning">{modelCatalogError}</HeroText> : null}
-          </Surface>
-          <ReasoningEffortSelector
-            label="默认思考强度"
-            options={reasoningOptionsForModel(settings.defaultModel, modelCatalog)}
-            value={normalizeReasoningEffort(settings.defaultReasoningEffort)}
-            defaultValue={defaultReasoningForModel(settings.defaultModel, modelCatalog)}
-            onChange={(value) => setSettings((current) => ({ ...current, defaultReasoningEffort: value }))}
-          />
-          <Field
-            label="Approval policy"
-            value={settings.approvalPolicy}
-            onChangeText={(value) => setSettings((current) => ({ ...current, approvalPolicy: value }))}
-            placeholder="on-request"
-          />
-          <Field
-            label="Sandbox mode"
-            value={settings.sandboxMode}
-            onChangeText={(value) => setSettings((current) => ({ ...current, sandboxMode: value }))}
-            placeholder="workspace-write"
-          />
-        </Card.Body>
-      </Card>
-
-      <Card className="gap-4">
-        <Card.Header>
-          <Card.Title>运行状态</Card.Title>
-        </Card.Header>
-        <Card.Body className="gap-2">
-          <Diagnostic label="版本" value={serverVersion ? `${serverVersion.name} ${serverVersion.version}` : 'unknown'} />
-          <Diagnostic label="v2 Providers" value={v2Providers.filter((provider) => provider.available).map((provider) => provider.id).join(', ') || 'none'} />
-          <Diagnostic label="数据目录" value={serverVersion?.data_dir ?? 'unknown'} />
-          <Diagnostic label="工作区根目录" value={serverVersion?.workspace_root ?? 'unknown'} />
-          <Diagnostic label="当前目录" value={activeWorkspace?.path ?? 'none'} />
-          <Diagnostic label="当前模型" value={currentModelName || 'none'} />
-          <Diagnostic label="思考强度" value={reasoningEffortLabel(currentReasoningEffort)} />
-          <Diagnostic label="待处理请求" value={String(pendingRequestCount)} />
-          <Diagnostic label="当前 Turn" value={turnId || 'unknown'} />
-        </Card.Body>
-      </Card>
-      <WorkspacePathPickerModal
-        visible={pathPickerVisible}
-        title="默认工作区目录"
-        settings={settings}
-        rootHint={serverVersion?.workspace_root ?? ''}
-        onSelect={(path) => {
-          setSettings((current) => ({ ...current, defaultWorkspacePath: path }));
-          setPathPickerVisible(false);
-        }}
-        onCancel={() => setPathPickerVisible(false)}
-      />
       </ScrollView>
     </Surface>
   );
@@ -11629,6 +13086,9 @@ function MessageBubble({
   pendingRequest,
   onToggleProgress,
   onApprovalResponse,
+  onOpenLink,
+  onFork,
+  usage,
 }: {
   entry: TimelineEntry;
   collapsed?: boolean;
@@ -11637,6 +13097,9 @@ function MessageBubble({
   pendingRequest?: PendingRequest;
   onToggleProgress?: (entry: TimelineEntry, collapsed: boolean) => void;
   onApprovalResponse?: (accepted: boolean, request: PendingRequest) => void;
+  onOpenLink?: (href: string) => void;
+  onFork?: () => void;
+  usage?: MobileContextUsage | null;
 }) {
   const outgoing = entry.kind === 'outgoing';
   const system = entry.kind === 'system';
@@ -11647,6 +13110,21 @@ function MessageBubble({
     }
     await Clipboard.setStringAsync(text);
     Alert.alert('已复制', '消息内容已复制到剪贴板。');
+  };
+  const showUsage = () => {
+    if (!usage) {
+      Alert.alert('回复统计', '暂无该回复的 usage 数据。');
+      return;
+    }
+    const total = usage.inputTokens + usage.outputTokens + usage.cachedInputTokens + usage.cacheWriteTokens;
+    const elapsedSeconds = Math.max(0.001, (usage.updatedAt - entry.at) / 1000);
+    const outputTps = usage.outputTokens / elapsedSeconds;
+    Alert.alert('回复统计', [
+      `模型：${usage.model || 'unknown'}`,
+      `输入 ${compactTokenCount(usage.inputTokens)} · 输出 ${compactTokenCount(usage.outputTokens)}`,
+      `缓存读取 ${compactTokenCount(usage.cachedInputTokens)} · 写入 ${compactTokenCount(usage.cacheWriteTokens)}`,
+      `总计 ${compactTokenCount(total)} tokens · 输出 TPS ${outputTps.toFixed(1)}`,
+    ].join('\n'));
   };
   const bubbleClassName = [
     'max-w-[86%] rounded-lg px-3 py-2',
@@ -11666,7 +13144,6 @@ function MessageBubble({
         ) : (
           <View style={styles.hiddenBubbleTitleSpacer} />
         )}
-        <HeroText className={`text-[10px] ${outgoing ? 'text-accent-foreground' : 'text-muted'}`}>{nowLabel(entry.at)}</HeroText>
         <Text style={[styles.bubbleTime, outgoing && styles.bubbleTimeOutgoing]} numberOfLines={1}>
           {nowLabel(entry.at)}
         </Text>
@@ -11678,6 +13155,23 @@ function MessageBubble({
         <HeroText selectable className="mt-1 text-xs text-muted" numberOfLines={1}>
           {entry.subtitle}
         </HeroText>
+      ) : null}
+      {!collapsed && !system && entry.subtitle ? (
+        <View className="mt-2 flex-row flex-wrap gap-2">
+          {extractMessageLinks(entry.subtitle).map((href) => (
+            <Button
+              key={href}
+              size="sm"
+              variant="secondary"
+              onPress={() => onOpenLink?.(href)}
+              className="min-h-10 max-w-[280px] rounded-lg"
+              accessibilityLabel={`打开链接 ${href}`}
+            >
+              <StyledIonicons name="open-outline" size={14} className="text-foreground" />
+              <Button.Label numberOfLines={1}>{href}</Button.Label>
+            </Button>
+          ))}
+        </View>
       ) : null}
       {pendingRequest ? (
         <View style={styles.approvalActions}>
@@ -11698,6 +13192,21 @@ function MessageBubble({
       >
         {content}
       </Pressable>
+      {!outgoing && !system && !collapsible ? (
+        <View className="mt-1 min-h-10 flex-row items-center gap-1">
+          <Button isIconOnly size="sm" variant="ghost" onPress={() => void copyText()} accessibilityLabel="复制回复">
+            <StyledIonicons name="copy-outline" size={15} className="text-muted" />
+          </Button>
+          {onFork ? (
+            <Button isIconOnly size="sm" variant="ghost" onPress={onFork} accessibilityLabel="Fork 对话">
+              <StyledIonicons name="git-branch-outline" size={15} className="text-muted" />
+            </Button>
+          ) : null}
+          <Button isIconOnly size="sm" variant="ghost" onPress={showUsage} accessibilityLabel="查看回复统计">
+            <StyledIonicons name="stats-chart-outline" size={15} className="text-muted" />
+          </Button>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -11712,6 +13221,7 @@ function ExecutionGroupBubble({
   onToggleGroup,
   onToggleProgress,
   onApprovalResponse,
+  onOpenLink,
 }: {
   id: string;
   entries: TimelineEntry[];
@@ -11722,6 +13232,7 @@ function ExecutionGroupBubble({
   onToggleGroup: (id: string, collapsed: boolean) => void;
   onToggleProgress: (entry: TimelineEntry, collapsed: boolean) => void;
   onApprovalResponse?: (accepted: boolean, request: PendingRequest) => void;
+  onOpenLink?: (href: string) => void;
 }) {
   const latestEntry = entries[entries.length - 1];
   const summary = entries
@@ -11753,6 +13264,7 @@ function ExecutionGroupBubble({
                   pendingRequest={entry.requestId ? pendingRequestById.get(entry.requestId) : undefined}
                   onToggleProgress={onToggleProgress}
                   onApprovalResponse={onApprovalResponse}
+                  onOpenLink={onOpenLink}
                 />
               );
             })}
@@ -11784,20 +13296,29 @@ function HeaderIconButton({ label, onPress }: { label: string; onPress: () => vo
       ? 'add'
       : label === '设置'
         ? 'settings-outline'
+        : label === 'Git'
+          ? 'git-branch-outline'
+          : label === '看板'
+            ? 'grid-outline'
+            : label === '统计'
+              ? 'stats-chart-outline'
+              : label === '关于'
+                ? 'information-circle-outline'
+                : label === '2.0'
+                  ? 'sparkles-outline'
         : label === '更多'
           ? 'ellipsis-horizontal'
           : 'chevron-forward';
   return (
-    <Button
-      isIconOnly
-      size="sm"
-      variant="ghost"
+    <Pressable
+      accessibilityRole="button"
       accessibilityLabel={label}
       onPress={onPress}
-      className="rounded-lg"
+      hitSlop={4}
+      style={({ pressed }) => [styles.headerIconButton, pressed && styles.headerIconButtonPressed]}
     >
       <StyledIonicons name={iconName} size={18} className="text-foreground" />
-    </Button>
+    </Pressable>
   );
 }
 
@@ -12586,14 +14107,20 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
   },
+  profileRail: {
+    gap: 8,
+    paddingVertical: 2,
+  },
   headerIconButton: {
-    minWidth: 36,
-    minHeight: 36,
+    width: 44,
+    height: 44,
     borderRadius: 8,
-    backgroundColor: '#eef0f2',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 8,
+  },
+  headerIconButtonPressed: {
+    backgroundColor: '#eef0f2',
+    opacity: 0.8,
   },
   headerIconText: {
     color: '#17202a',
@@ -13915,6 +15442,10 @@ const styles = StyleSheet.create({
     borderTopColor: '#d8e0e7',
     backgroundColor: '#ffffff',
     gap: 10,
+  },
+  composerControlRail: {
+    gap: 8,
+    paddingBottom: 2,
   },
   composerSticky: {
     width: '100%',

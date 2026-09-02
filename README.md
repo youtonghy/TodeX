@@ -1,182 +1,187 @@
-# TodeX App / TodeX 客户端
+# TodeX Mobile App (`TodeX_app`)
 
-TodeX App 是移动端客户端，用来连接 `todex-agentd`，管理工作区和对话，发送消息、处理审批，并查看 Codex 的运行状态。
+<p align="center">
+  <strong>Cross-platform mobile client for <code>todex-agentd</code> built with React Native, Expo SDK 57, and HeroUI Native.</strong>
+</p>
 
-TodeX App is the mobile client for connecting to `todex-agentd`, managing workspaces and conversations, sending messages, handling approvals, and monitoring Codex activity.
+<p align="center">
+  <a href="README.md">English</a> •
+  <a href="README.zh-CN.md">简体中文</a>
+</p>
 
-## 功能 / Features
+---
 
-- 工作区管理：新增、重命名、Fork、删除目录
-- 对话管理：每个工作区下可创建多个对话；新建时选择 Agent（Codex CLI / ACP / Pi / Claude Code），创建后锁定
-- 聊天界面：支持消息输入、历史时间线、跳到最新消息；主聊天走 Backend v2 conversation
-- Skills 和 MCPs：从能力页把 Skill 附加到下一条消息（Backend 按 resourceId 注入）；MCP 工具通过 Backend 调用并走权限审批
-- `@` 文件引用：从后端工作区目录中检索文件和目录建议
-- `/` 命令：内置命令补全和命令路由，不是 shell 执行
-- Skills 和 MCPs：从能力页把 Skill 附加到下一条消息（Backend 按 resourceId 注入）；MCP 工具通过 Backend 调用并走权限审批；输入 `#` 可匹配 Skill 和 MCP
-- 审批处理：支持命令执行、权限、工具请求等审批卡片
-- 运行控制：启动、状态、附加、中断、停止本地 Codex 会话
-- 设置保存：连接地址、token、tenant、可选传输加密、默认目录、默认模型、权限和沙盒模式
-- 配对连接：扫描后端 TUI 二维码，一键导入地址、端口、token 和 X25519/ML-KEM-768 公钥
+## Overview
 
-- Workspace management: add, rename, fork, and delete directories
-- Conversation management: multiple conversations per workspace
-- Chat view: message input, timeline history, and jump-to-latest
-- `@` file references: fetch file and directory suggestions from the backend
-- `/` commands: built-in command completion and routing, not shell execution
-- Approval handling: command, permission, and tool request cards
-- Runtime controls: start, status, attach, interrupt, and stop local Codex sessions
-- Settings persistence: server URL, token, tenant, optional transport encryption, default path, default model, approval policy, and sandbox mode
-- Pairing connection: scan the backend TUI QR to import address, port, token, and X25519/ML-KEM-768 public keys
+**TodeX Mobile App** is the mobile client for the TodeX ecosystem, connecting to [`todex-agentd`](../TodeX_backend) to let developers monitor, steer, and interact with AI coding assistants (such as **Codex**, **ACP 2.0**, **Pi**, and **Claude Code**) directly from their iOS, Android, or mobile web devices.
 
-## 快速开始 / Quick Start
+Built with **React Native 0.86**, **Expo SDK 57**, **Uniwind (Tailwind CSS v4)**, and **HeroUI Native**, the app delivers fluid gesture navigation, in-camera QR code pairing, real-time streaming chat, interactive approval cards, and post-quantum encrypted transport.
 
-客户端基于 Expo SDK 57。升级或安装依赖后，使用 Expo Doctor 确认 Expo 与 React Native 依赖版本一致：
+---
 
-The client targets Expo SDK 57. After installing or updating dependencies, use Expo Doctor to confirm that Expo and React Native package versions are aligned:
+## Key Features
+
+- **Mobile-First Agent Chat**:
+  - Full streaming conversation timeline with auto-scroll and jump-to-latest button.
+  - Interactive approval cards for shell commands, file modifications, tool calls, and permission elevation.
+  - Rich mention auto-complete:
+    - `@` retrieves workspace files and directories directly from the backend sandbox.
+    - `/` suggests built-in and provider slash commands.
+    - `#` filters active Skills and MCP servers.
+- **Workspace & Conversation Lifecycle**:
+  - Manage workspaces: create, rename, fork, and delete directories within the backend sandbox.
+  - Multi-turn conversation management: lock each conversation to a specific agent provider (Codex CLI, ACP profile, Pi, or Claude Code).
+- **Camera Pairing & Instant Configuration**:
+  - Integrated camera QR scanner (`expo-camera`) to pair with the `todex-agentd` TUI in seconds.
+  - Robust multi-frame segmented QR reconstruction to handle dense payload transfers.
+  - Automatic importation of host address, port, auth token, and encryption public keys.
+- **Capabilities & Skill Injection**:
+  - Dedicated Capabilities view to inspect active Skills and MCP servers.
+  - Attach Skills to prompt turns (injected by backend via `resourceId` without uploading full files).
+- **Robust Transport & Cryptography**:
+  - Multiplexed real-time WebSocket client connected to `/v2/ws`.
+  - Active heartbeat monitoring and automatic reconnection with exponential backoff (2s → 30s).
+  - Sequence-based journal catch-up (`afterSequence`) to avoid message loss during network switches.
+  - End-to-end transport encryption supporting **X25519** and **ML-KEM-768** (Post-Quantum) via the `@noble` cryptography suite.
+- **Secure Local Storage**:
+  - Employs `expo-secure-store` on native platforms for encrypted token and key persistence, combined with `AsyncStorage` for local caches.
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+| :--- | :--- |
+| **Framework** | [React Native 0.86](https://reactnative.dev/) & [Expo SDK 57](https://expo.dev/) |
+| **UI & Styling** | [HeroUI Native](https://heroui-native.com/) & [Uniwind](https://github.com/uniwind/uniwind) (Tailwind CSS v4) |
+| **Navigation & Motion** | React Navigation v7, React Native Gesture Handler, Reanimated 4, Gorhom Bottom Sheet |
+| **Hardware & Native** | Expo Camera, Document Picker, Image Picker, Clipboard, SecureStore |
+| **Cryptography** | `@noble/ciphers`, `@noble/curves`, `@noble/hashes`, `@noble/post-quantum` |
+| **Protocol Layer** | Shared `src/lib` implementation (v2 API Client, Transport, Crypto, Metrics) |
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- Node.js 22+
+- npm or pnpm
+- Running instance of [`todex-agentd`](../TodeX_backend)
+- Expo Go on your mobile device (or iOS Simulator / Android Emulator)
+
+### 1. Install Dependencies
+
+```bash
+cd TodeX_app
+npm install
+```
+
+Verify dependency alignment with Expo Doctor:
 
 ```bash
 npx expo install --check
 npx expo-doctor
 ```
 
-### 1. 安装依赖 / Install
+### 2. Start the Development Server
 
-```bash
-npm install
-```
-
-### 2. 启动开发环境 / Start development
+#### LAN Mode (Recommended for physical devices on the same Wi-Fi)
 
 ```bash
 npm run start
 ```
 
-`npm run start` 会以 LAN 模式启动 Expo，方便同一局域网内的真机从开发机加载应用；如果网络禁止局域网发现，可以改用 `npm run start:tunnel`。只在模拟器或本机浏览器调试时，可以用 `npm run start:localhost`。
+Scan the printed QR code using the **Expo Go** app (Android) or **Camera** app (iOS).
 
-`npm run start` starts Expo in LAN mode so physical devices on the same network can load the app from your development machine. If LAN discovery is blocked, use `npm run start:tunnel`. For simulator-only or local-browser development, use `npm run start:localhost`.
-
-也可以直接启动目标平台：
+#### Localhost Mode (For simulators or desktop web testing)
 
 ```bash
-npm run android
+npm run start:localhost
+```
+
+#### Tunnel Mode (When LAN discovery is restricted by firewall/NAT)
+
+```bash
+npm run start:tunnel
+```
+
+### 3. Native Platform Builds & Simulators
+
+```bash
+# Run on iOS Simulator (generates iOS native build)
 npm run ios
+
+# Run on Android Emulator
+npm run android
+
+# Run in Web Browser
 npm run web
 ```
 
-`npm run ios` 会生成本地 iOS 工程并需要 CocoaPods CLI。仅使用 Simulator 中的 Expo Go 时，可运行 `npm run start`，再打开终端显示的 `exp://` 地址。
+---
 
-`npm run ios` generates the local iOS project and requires the CocoaPods CLI. For Expo Go in the Simulator, run `npm run start` and open the `exp://` address printed by the command.
+## Usage Guide
 
-You can also launch a target platform directly:
+1. **Start the Backend**: Start `todex-agentd` (e.g., `cargo run -- tui` or `cargo run -- serve --host 0.0.0.0`).
+2. **Pair Mobile Client**:
+   - Open TodeX App and navigate to **Settings**.
+   - Tap the QR Scanner icon and scan the pairing QR displayed in the backend TUI.
+   - *Alternatively, manually input the backend URL (e.g., `http://192.168.1.100:7345`) and Bearer Token.*
+3. **Select Workspace**: Create or choose a workspace directory within the authorized root.
+4. **Start a Conversation**: Tap `+ New Conversation`, select the desired AI agent, and begin prompting.
+5. **Interactive Controls**:
+   - Type `@` to select files from the backend workspace.
+   - Type `/` to pick slash commands.
+   - Type `#` to attach Skills or MCP tools.
+   - Respond to interactive approval cards when the agent requests permissions or tool executions.
 
-```bash
-npm run android
-npm run ios
-npm run web
-```
+---
 
-## 使用方式 / How to Use
+## Supported Slash Commands
 
-1. 先启动 `TodeX_backend`。
-2. 打开 App，在设置里扫描后端 TUI 的配对二维码，或手动填写后端地址和 `Auth token`。
-3. 新建一个工作区，选择本地目录。
-4. 进入对话，开始发送消息。
-5. 输入 `@` 选择文件，输入 `/` 选择内置命令，输入 `#` 选择当前 Agent 的 Skill 或 MCP Server。
+The app recognizes and routes these built-in commands:
 
-1. Start `TodeX_backend` first.
-2. Open the app and set the backend URL and `Auth token`.
-3. Create a workspace and choose a local directory.
-4. Open a conversation and start sending messages.
-5. Type `@` to pick files and `/` to choose built-in commands.
+| Command Category | Commands |
+| :--- | :--- |
+| **Model & Performance** | `/model`, `/fast` |
+| **Agent Configuration** | `/permissions`, `/personality`, `/plan`, `/goal`, `/compact`, `/review` |
+| **Capabilities** | `/skills`, `/hooks`, `/mcp`, `/subagents`, `/feedback` |
+| **Session Control** | `/start`, `/status`, `/attach`, `/interrupt`, `/stop` |
+| **Workspace & Git** | `/new`, `/rename`, `/diff`, `/init` |
 
-## 主要界面 / Main Screens
+---
 
-- 工作区列表 / Workspace list
-- 对话列表 / Conversation list
-- 聊天页 / Chat view
-- 设置页 / Settings
-
-## 常用命令 / Common Commands
-
-App 会识别并路由这些常见命令：
-
-- `/model`
-- `/fast` and model service-tier commands from the Codex model catalog
-- `/permissions`
-- `/personality`
-- `/plan`
-- `/goal`
-- `/compact`
-- `/review`
-- `/skills`
-- `/hooks`
-- `/mcp`
-- `/subagents`
-- `/feedback`
-- `/start`
-- `/status`
-- `/attach`
-- `/interrupt`
-- `/stop`
-- `/new`
-- `/rename`
-- `/diff`
-- `/init`
-
-The app recognizes and routes these common commands:
-
-- `/model`
-- `/fast` and model service-tier commands from the Codex model catalog
-- `/permissions`
-- `/personality`
-- `/plan`
-- `/goal`
-- `/compact`
-- `/review`
-- `/skills`
-- `/hooks`
-- `/mcp`
-- `/subagents`
-- `/feedback`
-- `/start`
-- `/status`
-- `/attach`
-- `/interrupt`
-- `/stop`
-- `/new`
-- `/rename`
-- `/diff`
-- `/init`
-
-## 开发检查 / Development Checks
+## Development & Testing
 
 ```bash
+# Typecheck TypeScript files
 npm run typecheck
+
+# Run unit test suite
+npm run test
+
+# Validate protocol serialization & compatibility
 npm run check:protocol
 ```
 
-## 本地存储 / Local Storage
+---
 
-App 会把设置、工作区、对话、时间线、mention 历史和 token 保存在本地；移动端非 web 环境下优先使用安全存储。
+## Network & Connection Notes
 
-The app persists settings, workspaces, conversations, timeline data, mention history, and tokens locally; on non-web mobile builds it prefers secure storage.
+- **Physical Device Testing**: When connecting a physical phone to `todex-agentd`, do not use `127.0.0.1` (which refers to the phone itself). Use your development machine's LAN IP (e.g. `http://192.168.1.50:7345`).
+- **Backend Binding**: Ensure `todex-agentd` is listening on `0.0.0.0` or your LAN IP.
+- **Firewall**: Ensure the macOS/Linux firewall allows incoming connections on the backend port (default `7345`) and Metro bundler port (default `8081`).
 
-## 连接信息 / Connection Notes
+---
 
-- 默认后端地址：`http://127.0.0.1:7345`
-- 真机调试时不要使用 `127.0.0.1` 连接后端；在 App 设置里改成开发机的局域网地址，例如 `http://192.168.88.240:7345`
-- 后端服务需要监听 `0.0.0.0` 或开发机的局域网地址，并确保 macOS 防火墙允许对应端口（Expo 默认 `8081`，后端默认 `7345`）
-- 默认 tenant：`local`
-- 默认目录：`/home/dev/projects`
-- 默认模型：`gpt-5.5`
-- 默认权限：`on-request`
-- 默认沙盒：`workspace-write`
+## Related Repositories
 
-- Default backend URL: `http://127.0.0.1:7345`
-- For physical device testing, do not use `127.0.0.1` for the backend; set the app to your development machine's LAN address, for example `http://192.168.88.240:7345`
-- The backend must listen on `0.0.0.0` or the development machine's LAN address, and macOS Firewall must allow the relevant ports (Expo defaults to `8081`, backend defaults to `7345`)
-- Default tenant: `local`
-- Default workspace path: `/home/dev/projects`
-- Default model: `gpt-5.5`
-- Default approval policy: `on-request`
-- Default sandbox: `workspace-write`
+- **[TodeX Backend](../TodeX_backend)**: Rust backend daemon (`todex-agentd`).
+- **[TodeX Desktop](../TodeX_desktop)**: Electron & React 19 desktop client.
+
+---
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
