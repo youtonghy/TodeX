@@ -6503,28 +6503,30 @@ export default function App() {
   if (!hydrated) {
     return (
       <GestureHandlerRootView style={{ flex: 1 }}>
-        <HeroUINativeProvider>
-          <KeyboardProvider>
-            <Surface variant="transparent" className="flex-1 items-center justify-center bg-background px-8">
-              <StatusBar style={statusBarStyle} />
-              <View className="h-16 w-16 items-center justify-center rounded-3xl bg-accent">
-                <HeroText type="h2" className="text-accent-foreground">T</HeroText>
-              </View>
-              <HeroText type="h2" className="mt-5 text-foreground">TodeX</HeroText>
-              <HeroText type="body-sm" color="muted" className="mt-2 text-center">正在加载设置和工作区…</HeroText>
-              <Spinner size="sm" className="mt-6" />
-            </Surface>
-          </KeyboardProvider>
-        </HeroUINativeProvider>
+        <SafeAreaProvider>
+          <HeroUINativeProvider>
+            <KeyboardProvider>
+              <Surface variant="transparent" className="flex-1 items-center justify-center bg-background px-8">
+                <StatusBar style={statusBarStyle} />
+                <View className="h-16 w-16 items-center justify-center rounded-3xl bg-accent">
+                  <HeroText type="h2" className="text-accent-foreground">T</HeroText>
+                </View>
+                <HeroText type="h2" className="mt-5 text-foreground">TodeX</HeroText>
+                <HeroText type="body-sm" color="muted" className="mt-2 text-center">正在加载设置和工作区…</HeroText>
+                <Spinner size="sm" className="mt-6" />
+              </Surface>
+            </KeyboardProvider>
+          </HeroUINativeProvider>
+        </SafeAreaProvider>
       </GestureHandlerRootView>
     );
   }
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <HeroUINativeProvider>
-        <ToastBridge />
-        <SafeAreaProvider>
+      <SafeAreaProvider>
+        <HeroUINativeProvider>
+          <ToastBridge />
           <KeyboardProvider>
             <NavigationContainer ref={navigationRef} theme={navigationTheme}>
             <StatusBar style={statusBarStyle} />
@@ -7101,9 +7103,8 @@ export default function App() {
           }}
             />
           </KeyboardProvider>
-        </SafeAreaProvider>
-      </HeroUINativeProvider>
+        </HeroUINativeProvider>
+      </SafeAreaProvider>
     </GestureHandlerRootView>
   );
 }
-
