@@ -776,9 +776,14 @@ export function mergeWorkspaceRecords(local: WorkspaceRecord[], remote: Workspac
     const existing = merged[existingIndex];
     const candidateUpdatedAt = Number.isFinite(normalized.updatedAt) ? normalized.updatedAt : 0;
     const existingUpdatedAt = Number.isFinite(existing.updatedAt) ? existing.updatedAt : 0;
-    if (candidateUpdatedAt > existingUpdatedAt || (preferCandidateOnTie && candidateUpdatedAt === existingUpdatedAt)) {
+    const adoptsRemoteIdentity = preferCandidateOnTie && existing.id !== normalized.id;
+    if (candidateUpdatedAt > existingUpdatedAt || (preferCandidateOnTie && candidateUpdatedAt === existingUpdatedAt) || adoptsRemoteIdentity) {
+      const base = candidateUpdatedAt >= existingUpdatedAt ? normalized : existing;
       merged[existingIndex] = {
-        ...normalized,
+        ...base,
+        id: normalized.id,
+        sessionId: normalized.sessionId,
+        tenantId: normalized.tenantId,
         backendConnectionId: normalized.backendConnectionId ?? existing.backendConnectionId ?? null,
         localAdapterState: preserveRuntimeAdapterState(existing.localAdapterState, normalized.localAdapterState),
       };
@@ -793,6 +798,24 @@ export function mergeWorkspaceRecords(local: WorkspaceRecord[], remote: Workspac
       reasoningEffort: normalizeReasoningEffort(workspace.reasoningEffort) ?? null,
     }))
     .sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+export function remapWorkspaceScopedRecords<T extends { workspaceId?: string }>(
+  records: T[],
+  previousWorkspaces: WorkspaceRecord[],
+  nextWorkspaces: WorkspaceRecord[],
+): T[] {
+  const idMap = new Map<string, string>();
+  for (const previous of previousWorkspaces) {
+    const next = nextWorkspaces.find((workspace) => sameWorkspaceRecord(previous, workspace));
+    if (next && next.id !== previous.id) {
+      idMap.set(previous.id, next.id);
+    }
+  }
+  return records.map((record) => {
+    const workspaceId = record.workspaceId ? idMap.get(record.workspaceId) : undefined;
+    return workspaceId ? { ...record, workspaceId } : record;
+  });
 }
 
 function responseDataArray(value: unknown): unknown[] {

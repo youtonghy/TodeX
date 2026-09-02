@@ -247,6 +247,31 @@ test('merges workspace sync records by newest backend or local cache copy', () =
   assert.equal(merged[0].localAdapterState, 'running');
 });
 
+test('adopts the backend workspace identity without losing newer local metadata', () => {
+  const local = {
+    id: 'device-workspace', name: 'Locally renamed', path: '/workspace/app', sessionId: 'local-session',
+    tenantId: 'local', threadId: '', model: 'gpt-5.5', approvalPolicy: 'on-request',
+    sandboxMode: 'workspace-write', localAdapterState: 'running', createdAt: 10, updatedAt: 40,
+  };
+  const remote = {
+    ...local, id: 'ws_canonical', name: 'Older server name', sessionId: 'cdxs_ws_canonical',
+    localAdapterState: 'idle', updatedAt: 30,
+  };
+
+  const [merged] = todex.mergeWorkspaceRecords([local], [remote]);
+  const [conversation] = todex.remapWorkspaceScopedRecords(
+    [{ id: 'conversation-1', workspaceId: local.id, body: 'persisted content' }],
+    [local],
+    [merged],
+  );
+
+  assert.equal(merged.id, 'ws_canonical');
+  assert.equal(merged.name, 'Locally renamed');
+  assert.equal(merged.localAdapterState, 'running');
+  assert.equal(conversation.workspaceId, 'ws_canonical');
+  assert.equal(conversation.body, 'persisted content');
+});
+
 test('prepares workspace sync payload as backend-safe cache records', () => {
   const payload = todex.prepareWorkspaceSyncPayload([{
     id: 'workspace-1',
