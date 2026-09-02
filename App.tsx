@@ -1949,9 +1949,10 @@ function mergeManifestConversations(
 ): ConversationRecord[] {
   const next = [...current];
   for (const manifest of manifests) {
-    const workspace = manifest.workspaceId
+    const workspace = (manifest.workspaceId
       ? workspaces.find((item) => item.id === manifest.workspaceId)
-      : workspaces.find((item) => item.path === manifest.workspace);
+      : undefined)
+      ?? workspaces.find((item) => item.path === manifest.workspace);
     if (!workspace) {
       continue;
     }
