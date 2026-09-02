@@ -165,6 +165,20 @@ npm run test
 npm run check:protocol
 ```
 
+## Android Releases
+
+Android APK releases are created manually from **Actions > Release Android APK**.
+Enter a stable semantic version such as `1.2.3`; the workflow validates the app,
+runs EAS Build locally on the GitHub runner, and publishes the APK plus its SHA-256
+checksum to the `v1.2.3` GitHub Release. Android's internal version code is assigned
+from the workflow run number so releases remain upgradeable from older CI builds.
+
+The repository must define an `EXPO_TOKEN` Actions secret, and the linked Expo
+project must already have a permanent Android keystore. EAS is used for project
+authentication and managed credential retrieval; compilation does not run on the
+EAS cloud build service. The workflow does not build iOS because installable iOS
+device packages require Apple signing credentials and a provisioning profile.
+
 ---
 
 ## Network & Connection Notes

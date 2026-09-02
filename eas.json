@@ -6,13 +6,10 @@
   "build": {
     "local-apk": {
       "distribution": "internal",
+      "credentialsSource": "remote",
       "android": {
         "buildType": "apk"
       }
-    },
-    "local-ipa": {
-      "distribution": "internal",
-      "ios": {}
     },
     "production": {
       "android": {
