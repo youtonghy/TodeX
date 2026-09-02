@@ -43,7 +43,11 @@ import {
 import { V2ApiClient, providerDisplayName, type ConversationEvent, type ConversationManifest, type ProviderDescriptor, type ProviderKind } from './v2';
 import type { WorkbenchTab } from '../screens/WorkbenchScreen';
 import {
+  buildConversationRenderItems as sharedBuildConversationRenderItems,
   classifyV2ConversationEvent as sharedClassifyV2ConversationEvent,
+  isCollapsibleProgressEntry as sharedIsCollapsibleProgressEntry,
+  isStepProgressEntry as sharedIsStepProgressEntry,
+  isThinkingProgressEntry as sharedIsThinkingProgressEntry,
   isVisibleConversationEntry as sharedIsVisibleConversationEntry,
   normalizeBackendConnectionProfile as sharedNormalizeBackendConnectionProfile,
   profileFromSettings as sharedProfileFromSettings,
@@ -99,6 +103,7 @@ export type ConversationRecord = {
   title: string;
   preview?: string;
   nativeStatus?: string;
+  nativeUpdatedAt?: number;
   archived?: boolean;
   sessionId: string;
   threadId: string;
@@ -1804,6 +1809,7 @@ export function conversationPatchFromNativeThread(thread: CodexNativeThread): Pa
     nativeStatus: thread.status,
     archived: thread.archived,
     threadId: thread.id,
+    nativeUpdatedAt: thread.updatedAt || Date.now(),
     updatedAt: thread.updatedAt || Date.now(),
     createdAt: thread.createdAt || Date.now(),
   };
@@ -2475,20 +2481,15 @@ export function conversationPreviewText(latest: TimelineEntry | undefined): stri
 }
 
 export function isStepProgressEntry(entry: TimelineEntry): boolean {
-  return entry.kind === 'system' && (
-    entry.title === '执行步骤' ||
-    entry.title === '步骤完成' ||
-    entry.title === '工具调用' ||
-    entry.title === '请求权限批准'
-  );
+  return sharedIsStepProgressEntry(entry);
 }
 
 export function isThinkingProgressEntry(entry: TimelineEntry): boolean {
-  return entry.kind === 'system' && entry.title === '思考中';
+  return sharedIsThinkingProgressEntry(entry);
 }
 
 export function isCollapsibleProgressEntry(entry: TimelineEntry): boolean {
-  return isStepProgressEntry(entry) || isThinkingProgressEntry(entry);
+  return sharedIsCollapsibleProgressEntry(entry);
 }
 
 export function executionGroupId(entries: TimelineEntry[]): string {
@@ -2498,30 +2499,7 @@ export function executionGroupId(entries: TimelineEntry[]): string {
 }
 
 export function buildConversationRenderItems(entries: TimelineEntry[]): ConversationRenderItem[] {
-  const items: ConversationRenderItem[] = [];
-  let index = 0;
-
-  while (index < entries.length) {
-    const entry = entries[index];
-    if (!isStepProgressEntry(entry)) {
-      items.push({ type: 'entry', entry });
-      index += 1;
-      continue;
-    }
-
-    const groupEntries: TimelineEntry[] = [];
-    while (index < entries.length && isStepProgressEntry(entries[index])) {
-      groupEntries.push(entries[index]);
-      index += 1;
-    }
-    items.push({
-      type: 'executionGroup',
-      id: executionGroupId(groupEntries),
-      entries: groupEntries,
-    });
-  }
-
-  return items;
+  return sharedBuildConversationRenderItems(entries) as ConversationRenderItem[];
 }
 
 export function createDefaultConversation(workspace: WorkspaceRecord): ConversationRecord {
@@ -2575,4 +2553,3 @@ export function forkConversationRecord(conversation: ConversationRecord, title?:
     updatedAt: Date.now(),
   };
 }
-

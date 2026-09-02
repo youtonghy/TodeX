@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import { FlatList, Platform, View } from 'react-native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
+import { useIsFocused } from '@react-navigation/native';
 import { Avatar, Button, Chip, SearchField, Surface, Text } from 'heroui-native';
 import { Badge } from 'heroui-native-pro';
 
@@ -72,6 +73,7 @@ export function ConversationListScreen({
   forkConversation: (conversationId: string) => ConversationRecord | null;
   removeConversation: (conversationId: string) => void;
 }) {
+  const isFocused = useIsFocused();
   const [renamingConversation, setRenamingConversation] = useState<ConversationRecord | null>(null);
   const [actionConversation, setActionConversation] = useState<ConversationRecord | null>(null);
   const [archivingConversation, setArchivingConversation] = useState<ConversationRecord | null>(null);
@@ -113,7 +115,7 @@ export function ConversationListScreen({
   }, [route.params.workspaceId, selectWorkspace]);
 
   useEffect(() => {
-    if (!workspace || connectionState !== 'open') {
+    if (!isFocused || !workspace || connectionState !== 'open') {
       return;
     }
     let cancelled = false;
@@ -128,7 +130,7 @@ export function ConversationListScreen({
       cancelled = true;
       clearInterval(timer);
     };
-  }, [connectionState, refreshNativeThreads, workspace?.id, workspace?.path]);
+  }, [connectionState, isFocused, refreshNativeThreads, workspace?.id, workspace?.path]);
 
   useLayoutEffect(() => {
     navigation.setOptions({

@@ -70,6 +70,7 @@ import {
 import { createTransportCryptoSession, type TransportCryptoSession } from './src/lib/transportCrypto';
 import { MAX_LEGACY_MESSAGE_BYTES } from './src/lib/transport';
 import { ConnectionError } from './src/lib/connectionError';
+import { ConversationReplayTracker, TimelineStore } from './src/lib/timelineStore';
 import {
   probeBackendConnection,
   nextReconnectDelayMs,
@@ -289,6 +290,8 @@ import {
 const Stack = createNativeStackNavigator<RootStackParamList>();
 const navigationRef = createNavigationContainerRef<RootStackParamList>();
 enableScreens(true);
+
+const timelineStore = new TimelineStore(MAX_TIMELINE_ITEMS);
 export default function App() {
   const { statusBarStyle, navigationTheme, screenOptions } = useAppNavigationTheme();
   const socketRef = useRef<WebSocket | null>(null);
@@ -297,7 +300,6 @@ export default function App() {
   const activeConversationRef = useRef('');
   const workspacesRef = useRef<WorkspaceRecord[]>([]);
   const conversationsRef = useRef<ConversationRecord[]>([]);
-  const timelineRef = useRef<TimelineEntry[]>([]);
   const turnIdsRef = useRef<Record<string, string>>({});
   const thinkingConversationsRef = useRef<Record<string, boolean>>({});
   const terminalByIdRef = useRef<Record<string, TerminalClientState>>({});
@@ -317,6 +319,7 @@ export default function App() {
   const pendingTimelineUpsertFrameRef = useRef<number | null>(null);
   const capabilityWorkspaceRef = useRef('');
   const socketGenerationRef = useRef(0);
+  const v2ReplayTrackerRef = useRef(new ConversationReplayTracker());
   const autoConnectAttemptedRef = useRef(false);
   const sessionCursorsRef = useRef(new Map<string, number>());
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -357,7 +360,6 @@ export default function App() {
   const [lastError, setLastError] = useState('');
   const [serverVersion, setServerVersion] = useState<ServerVersion | null>(null);
   const [events, setEvents] = useState<ServerEvent[]>([]);
-  const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
   const [mentionHistory, setMentionHistory] = useState<WorkspaceMentionHistory[]>([]);
   const [experimentalFeatures, setExperimentalFeatures] = useState<ExperimentalFeatureSettings>(EXPERIMENTAL_FEATURE_DEFAULTS);
   const [selectedRequestId, setSelectedRequestId] = useState('');
@@ -437,9 +439,6 @@ export default function App() {
     };
   }, [hydrated, settings.authToken, settings.serverUrl]);
 
-  useEffect(() => {
-    timelineRef.current = timeline;
-  }, [timeline]);
   const queuedChatDraftsRef = useRef<Record<string, QueuedChatSubmission[]>>({});
   const queuedChatDispatchingRef = useRef(new Set<string>());
   const sendQueuedChatDraftRef = useRef<(submission: QueuedChatSubmission, conversationId: string) => Promise<boolean>>(async () => false);
@@ -649,6 +648,7 @@ export default function App() {
 
   const closeSocket = useCallback((manual = true) => {
     socketGenerationRef.current += 1;
+    v2ReplayTrackerRef.current.resetConnection();
     if (manual) {
       manualDisconnectRef.current = true;
       setAutoConnectEnabled(false);
@@ -839,7 +839,7 @@ export default function App() {
       setWorkbenchByConversation(normalizeWorkbenchMap(storedWorkbenchState));
       setWorkspaces(normalizedWorkspaces);
       setConversations(normalizedConversations);
-      setTimeline(storedTimeline.slice(0, MAX_TIMELINE_ITEMS));
+      timelineStore.replace(storedTimeline.slice(0, MAX_TIMELINE_ITEMS));
       setMentionHistory(storedMentionHistory);
       setExperimentalFeatures(normalizeExperimentalFeatures(storedExperimentalFeatures));
       setActiveWorkspaceId(firstWorkspaceId);
@@ -1138,7 +1138,7 @@ export default function App() {
         workspaceBackendSkipNextSaveRef.current = true;
         setWorkspaces(nextWorkspaces);
         setConversations(nextConversations);
-        setTimeline((current) => remapWorkspaceScopedRecords(current, localActiveWorkspaces, nextActiveWorkspaces));
+        timelineStore.update((current) => remapWorkspaceScopedRecords([...current], localActiveWorkspaces, nextActiveWorkspaces));
         setMentionHistory((current) => remapWorkspaceScopedRecords(current, localActiveWorkspaces, nextActiveWorkspaces));
         if (remappedActive !== activeWorkspaceRef.current) {
           setActiveWorkspaceId(remappedActive);
@@ -1204,8 +1204,12 @@ export default function App() {
     if (!hydrated) {
       return;
     }
-    scheduleJsonSave(TIMELINE_STORAGE_KEY, timeline.slice(0, MAX_TIMELINE_ITEMS));
-  }, [hydrated, scheduleJsonSave, timeline]);
+    const persistTimeline = () => {
+      scheduleJsonSave(TIMELINE_STORAGE_KEY, timelineStore.getAllSnapshot());
+    };
+    persistTimeline();
+    return timelineStore.subscribe(persistTimeline);
+  }, [hydrated, scheduleJsonSave]);
 
   useEffect(() => {
     if (!hydrated) {
@@ -1464,7 +1468,7 @@ export default function App() {
   );
 
   const appendTimeline = useCallback((entry: TimelineEntry) => {
-    setTimeline((current) => [entry, ...current].slice(0, MAX_TIMELINE_ITEMS));
+    timelineStore.append(entry);
   }, []);
 
   const rememberMentionReferences = useCallback((workspaceId: string, references: MentionReference[]) => {
@@ -1530,42 +1534,7 @@ export default function App() {
       if (!pending.length) {
         return;
       }
-      setTimeline((current) => {
-        let next = current;
-        for (const update of pending) {
-          const index = next.findIndex(
-            (item) =>
-              item.id === update.entry.id &&
-              item.workspaceId === update.entry.workspaceId &&
-              item.conversationId === update.entry.conversationId,
-          );
-          if (index === -1) {
-            next = [update.entry, ...next].slice(0, MAX_TIMELINE_ITEMS);
-            continue;
-          }
-          const previous = next[index];
-          const merged = {
-            ...previous,
-            ...update.entry,
-            subtitle: update.appendSubtitle
-              ? `${previous.subtitle === '正在回复...' ? '' : previous.subtitle}${update.entry.subtitle}`
-              : update.entry.subtitle,
-          };
-          if (
-            merged.title === previous.title &&
-            merged.subtitle === previous.subtitle &&
-            merged.raw === previous.raw &&
-            merged.at === previous.at
-          ) {
-            continue;
-          }
-          if (next === current) {
-            next = current.slice();
-          }
-          next[index] = merged;
-        }
-        return next;
-      });
+      timelineStore.upsertBatch(pending);
     });
   }, []);
 
@@ -2228,7 +2197,7 @@ export default function App() {
                 ),
               )
               .reverse();
-            setTimeline((current) => {
+            timelineStore.update((current) => {
               const remaining = current.filter((entry) => entry.conversationId !== pendingThreadAction.conversationId);
               return [...restored, ...remaining].slice(0, MAX_TIMELINE_ITEMS);
             });
@@ -2268,6 +2237,13 @@ export default function App() {
           finishPendingThreadAction(pendingThreadAction);
         } else if (protocolError || event.type === 'codex.control.error') {
           if (pendingThreadAction.restoreHistory && protocolError && isThreadNotMaterializedHistoryError(protocolError)) {
+            const sourceConversation = conversationsRef.current.find(
+              (conversation) => conversation.id === pendingThreadAction.sourceConversationId,
+            );
+            const threadId = normalizeThreadId(sourceConversation?.threadId);
+            if (threadId) {
+              unmaterializedNativeThreadIdsRef.current.add(threadId);
+            }
             finishPendingThreadAction(pendingThreadAction);
           } else {
             finishPendingThreadAction(pendingThreadAction, localTurnErrorMessage(protocolError || `${pendingThreadAction.action} 请求失败`));
@@ -2462,6 +2438,9 @@ export default function App() {
           ? parsed.payload as Record<string, unknown>
           : parsed;
         const conversationId = typeof payload.conversationId === 'string' ? payload.conversationId : '';
+        const sequence = typeof payload.sequence === 'number' && Number.isFinite(payload.sequence)
+          ? payload.sequence
+          : 0;
         const conversation = conversationsRef.current.find((item) => item.id === conversationId || item.v2ConversationId === conversationId);
         if (conversation && typeof payload.type === 'string') {
           const event = payload as unknown as ConversationEvent;
@@ -2522,9 +2501,12 @@ export default function App() {
             setConversationThinking(conversation.id, false);
             setConversationTurnId(conversation.id, '');
           }
-          if (typeof event.sequence === 'number') {
+          if (
+            sequence > 0
+            && (event.type === 'turn.started' || event.type === 'turn.completed' || event.type === 'turn.cancelled' || event.type === 'turn.failed')
+          ) {
             updateConversation(conversation.id, {
-              lastSequence: event.sequence,
+              lastSequence: sequence,
               updatedAt: Date.parse(event.time) || Date.now(),
             });
           }
@@ -2618,6 +2600,24 @@ export default function App() {
     socket.send(frame);
     return message;
   }, []);
+
+  const subscribeV2Conversation = useCallback((conversationId: string) => {
+    const afterSequence = v2ReplayTrackerRef.current.subscriptionCursor(conversationId);
+    if (afterSequence === null) return Boolean(conversationId);
+    const sent = sendRawProtocolFrame({
+      id: createRequestId('sub'),
+      type: 'conversation.subscribe',
+      payload: {
+        conversationId,
+        afterSequence,
+        limit: 200,
+      },
+    });
+    if (sent) {
+      v2ReplayTrackerRef.current.markSubscribed(conversationId);
+    }
+    return Boolean(sent);
+  }, [sendRawProtocolFrame]);
 
   const sendSessionResume = useCallback((sessionCursors: Record<string, number>) => {
     try {
@@ -2805,6 +2805,7 @@ export default function App() {
 
       try {
         const socket = new WebSocket(wsUrl);
+        v2ReplayTrackerRef.current.resetConnection();
         const generation = socketGenerationRef.current;
         socketRef.current = socket;
         socketCryptoRef.current = crypto;
@@ -2822,15 +2823,7 @@ export default function App() {
           );
           if (activeConversation?.v2ConversationId) {
             try {
-              sendRawProtocolFrame({
-                id: createRequestId('sub'),
-                type: 'conversation.subscribe',
-                payload: {
-                  conversationId: activeConversation.v2ConversationId,
-                  afterSequence: 0,
-                  limit: 200,
-                },
-              });
+              subscribeV2Conversation(activeConversation.v2ConversationId);
             } catch {
               // Opening the conversation retries the subscription.
             }
@@ -2870,7 +2863,7 @@ export default function App() {
         setLastError(error instanceof Error ? error.message : ConnectionError.websocketFailed(wsUrl).userMessage);
       }
     })();
-  }, [checkConnectionHealth, closeSocket, enqueueSocketFrame, getSessionCursorSnapshot, refreshServerVersion, sendRawProtocolFrame, sendSessionResume, settings, syncWorkspacesFromBackend]);
+  }, [checkConnectionHealth, closeSocket, enqueueSocketFrame, getSessionCursorSnapshot, refreshServerVersion, sendSessionResume, settings, subscribeV2Conversation, syncWorkspacesFromBackend]);
 
   useEffect(() => {
     if (!hydrated || !autoConnectEnabled || manualDisconnectRef.current) {
@@ -3270,7 +3263,7 @@ export default function App() {
         .map((conversation) => conversation.id);
       setWorkspaces((current) => current.filter((workspace) => workspace.id !== workspaceId));
       setConversations((current) => current.filter((conversation) => conversation.workspaceId !== workspaceId));
-      setTimeline((current) => current.filter((entry) => entry.workspaceId !== workspaceId && !removedConversationIds.includes(entry.conversationId ?? '')));
+      timelineStore.update((current) => current.filter((entry) => entry.workspaceId !== workspaceId && !removedConversationIds.includes(entry.conversationId ?? '')));
       const pruneConversationState = <T,>(current: Record<string, T>) => {
         const next = { ...current };
         removedConversationIds.forEach((id) => {
@@ -3363,15 +3356,7 @@ export default function App() {
 
   const attachWorkspaceConversation = useCallback((workspace: WorkspaceRecord, conversation: ConversationRecord) => {
     if (isV2Conversation(conversation)) {
-      return Boolean(sendRawProtocolFrame({
-        id: createRequestId('sub'),
-        type: 'conversation.subscribe',
-        payload: {
-          conversationId: conversation.v2ConversationId || conversation.id,
-          afterSequence: 0,
-          limit: 200,
-        },
-      }));
+      return subscribeV2Conversation(conversation.v2ConversationId || conversation.id);
     }
     const sessionId = sessionIdForConversation(workspace, conversation);
     const afterCursor = sessionCursorsRef.current.get(sessionId) ?? null;
@@ -3379,7 +3364,7 @@ export default function App() {
       afterCursor,
       replayLimit: CHAT_ATTACH_REPLAY_LIMIT,
     }, conversation);
-  }, [sendRawProtocolFrame, sendWorkspaceCommand]);
+  }, [sendWorkspaceCommand, subscribeV2Conversation]);
 
   const sendLocalMethodRequest = useCallback((
     workspace: WorkspaceRecord,
@@ -4802,10 +4787,17 @@ export default function App() {
       return false;
     }
     const loadedAt = loadedNativeThreadHistoryRef.current.get(threadId) ?? 0;
-    if (!force && loadedAt >= context.conversation.updatedAt) {
+    const nativeRevision = context.conversation.nativeUpdatedAt ?? 0;
+    if (!force && loadedAt > 0 && loadedAt >= nativeRevision) {
       return true;
     }
     if (!force && unmaterializedNativeThreadIdsRef.current.has(threadId)) {
+      return true;
+    }
+    const alreadyLoading = [...pendingThreadActionsRef.current.values()].some(
+      (pending) => pending.restoreHistory && pending.sourceConversationId === conversationId,
+    );
+    if (!force && alreadyLoading) {
       return true;
     }
     void sendNativeThreadAction(
@@ -4890,11 +4882,7 @@ export default function App() {
         setActiveConversationId(record.id);
         options?.onCreated?.(record);
         try {
-          sendRawProtocolFrame({
-            id: createRequestId('sub'),
-            type: 'conversation.subscribe',
-            payload: { conversationId: created.id, afterSequence: 0, limit: 200 },
-          });
+          subscribeV2Conversation(created.id);
         } catch {
           // HTTP create succeeded; subscribe retries on next connect.
         }
@@ -4910,7 +4898,7 @@ export default function App() {
     })();
 
     return placeholder;
-  }, [appendTimeline, rekeyConversationComposer, sendRawProtocolFrame, settings, v2Providers]);
+  }, [appendTimeline, rekeyConversationComposer, settings, subscribeV2Conversation, v2Providers]);
 
   const switchConversationAgent = useCallback((conversationId: string, provider: ProviderKind, providerProfile?: string) => {
     const context = getConversationContext(conversationId);
@@ -4928,7 +4916,7 @@ export default function App() {
     ) return true;
     if (!canSwitchConversationAgent(
       conversation,
-      timelineRef.current,
+      timelineStore.getAllSnapshot(),
       thinkingConversationsRef.current[conversation.id] === true,
     )) {
       notify.warning('无法切换 Agent', '任务开始后不能切换 Agent，请新建对话。');
@@ -5555,7 +5543,7 @@ export default function App() {
       notify.warning('未选择对话', '请先选择一个 Codex 对话。');
       return false;
     }
-    const lastMessage = timelineRef.current.find(
+    const lastMessage = timelineStore.getAllSnapshot().find(
       (entry) => entry.conversationId === conversationId && entry.kind === 'incoming' && entry.subtitle.trim(),
     );
     if (!lastMessage) {
@@ -6588,7 +6576,7 @@ export default function App() {
                   settings={settings}
                   workspaces={workspaces}
                   conversations={conversations}
-                  timeline={timeline}
+                  timelineStore={timelineStore}
                   pendingRequests={pendingRequests}
                   selectedRequest={selectedRequest}
                   chatDraft={chatDrafts[props.route.params.conversationId] ?? ''}
@@ -6606,7 +6594,6 @@ export default function App() {
                   submitChat={submitChat}
                   stopThinking={stopThinking}
                   sendApprovalResponse={sendApprovalResponse}
-                  selectConversation={selectConversation}
                   attachWorkspaceConversation={attachWorkspaceConversation}
                   loadNativeThreadHistory={loadNativeThreadHistory}
                   runWorkspaceCommand={runWorkspaceCommand}

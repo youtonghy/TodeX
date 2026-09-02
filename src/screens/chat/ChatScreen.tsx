@@ -5,12 +5,14 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type Dispatch,
   type SetStateAction,
 } from 'react';
 import {
   FlatList,
   Image,
+  InteractionManager,
   type ListRenderItemInfo,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
@@ -89,6 +91,7 @@ import {
   type WorkspaceEntry,
 } from '../../lib/appCore';
 import type { CatalogState } from '../../components/CapabilitiesScreen';
+import type { TimelineStore } from '../../lib/timelineStore';
 import type { WorkbenchTab } from '../WorkbenchScreen';
 import { ProviderIcon } from '../../components/ProviderIcon';
 import {
@@ -117,13 +120,16 @@ type PickerSheetState =
   | { kind: 'reasoning' }
   | null;
 
+const INITIAL_RENDER_ITEM_COUNT = 32;
+const RENDER_ITEM_PAGE_SIZE = 32;
+
 export function ChatScreen({
   navigation,
   route,
   settings,
   workspaces,
   conversations,
-  timeline,
+  timelineStore,
   pendingRequests,
   selectedRequest,
   chatDraft,
@@ -141,7 +147,6 @@ export function ChatScreen({
   submitChat,
   stopThinking,
   sendApprovalResponse,
-  selectConversation,
   attachWorkspaceConversation,
   loadNativeThreadHistory,
   runWorkspaceCommand,
@@ -168,7 +173,7 @@ export function ChatScreen({
   settings: ConnectionSettings;
   workspaces: WorkspaceRecord[];
   conversations: ConversationRecord[];
-  timeline: TimelineEntry[];
+  timelineStore: TimelineStore;
   pendingRequests: PendingRequest[];
   selectedRequest: PendingRequest | null;
   chatDraft: string;
@@ -186,7 +191,6 @@ export function ChatScreen({
   submitChat: (conversationId: string) => void;
   stopThinking: (conversationId: string) => void;
   sendApprovalResponse: (selection: boolean | PermissionOption, request: PendingRequest) => boolean;
-  selectConversation: (workspaceId: string, conversationId: string) => void;
   attachWorkspaceConversation: (workspace: WorkspaceRecord, conversation: ConversationRecord) => boolean;
   loadNativeThreadHistory: (conversationId: string, force?: boolean) => boolean;
   runWorkspaceCommand: (workspace: WorkspaceRecord, conversation: ConversationRecord, command: 'start' | 'status' | 'attach' | 'stop' | 'interrupt') => void;
@@ -218,9 +222,12 @@ export function ChatScreen({
   const [expandedProgressIds, setExpandedProgressIds] = useState<Set<string>>(() => new Set());
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [attachmentMenuVisible, setAttachmentMenuVisible] = useState(false);
+  const [historyLoadReady, setHistoryLoadReady] = useState(false);
+  const [visibleRenderItemCount, setVisibleRenderItemCount] = useState(INITIAL_RENDER_ITEM_COUNT);
   const messageScrollRef = useRef<FlatList<ConversationRenderItem> | null>(null);
   const shouldFollowLatestRef = useRef(true);
   const initialLatestScrollRef = useRef(true);
+  const pendingScrollFrameRef = useRef<number | null>(null);
   const attachedSessionKeyRef = useRef('');
   const composerInputRef = useRef<TextInput | null>(null);
   const autoExpandedProgressIdsRef = useRef<Set<string>>(new Set());
@@ -231,6 +238,19 @@ export function ChatScreen({
   const composerPaddingBottom = 12 + insets.bottom;
   const workspace = workspaces.find((item) => item.id === route.params.workspaceId) ?? null;
   const conversation = conversations.find((item) => item.id === route.params.conversationId) ?? null;
+  const subscribeTimeline = useCallback(
+    (listener: () => void) => timelineStore.subscribeConversation(
+      route.params.workspaceId,
+      route.params.conversationId,
+      listener,
+    ),
+    [route.params.conversationId, route.params.workspaceId, timelineStore],
+  );
+  const getTimelineSnapshot = useCallback(
+    () => timelineStore.getConversationSnapshot(route.params.workspaceId, route.params.conversationId),
+    [route.params.conversationId, route.params.workspaceId, timelineStore],
+  );
+  const timeline = useSyncExternalStore(subscribeTimeline, getTimelineSnapshot, getTimelineSnapshot);
   const currentProvider = conversation?.provider as ProviderKind | undefined;
   const agentProvider = currentProvider || (conversation ? 'codex' : undefined);
   const availableProviders = useMemo(
@@ -252,15 +272,19 @@ export function ChatScreen({
   const contextPercent = contextWindow && contextUsage ? Math.min(100, Math.max(0, contextUsage.usedTokens / contextWindow * 100)) : null;
   const conversationMessages = useMemo(
     () => timeline
-      .filter((entry) => entry.conversationId === route.params.conversationId && isVisibleConversationEntry(entry))
+      .filter(isVisibleConversationEntry)
       .slice()
       .reverse(),
-    [route.params.conversationId, timeline],
+    [timeline],
   );
   const chatHeaderTitle = conversation?.title || conversationPreviewText(conversationMessages[conversationMessages.length - 1]);
   const conversationRenderItems = useMemo(
     () => buildConversationRenderItems(conversationMessages),
     [conversationMessages],
+  );
+  const visibleConversationRenderItems = useMemo(
+    () => conversationRenderItems.slice(-visibleRenderItemCount),
+    [conversationRenderItems, visibleRenderItemCount],
   );
   const pendingRequestById = useMemo(() => {
     const result = new Map<string, PendingRequest>();
@@ -464,6 +488,27 @@ export function ChatScreen({
   ]);
 
   useEffect(() => {
+    setHistoryLoadReady(false);
+    setVisibleRenderItemCount(INITIAL_RENDER_ITEM_COUNT);
+    initialLatestScrollRef.current = true;
+    shouldFollowLatestRef.current = true;
+    let cancelled = false;
+    const release = () => {
+      if (!cancelled) setHistoryLoadReady(true);
+    };
+    const unsubscribe = navigation.addListener('transitionEnd', (event) => {
+      if (!event.data.closing) release();
+    });
+    const interaction = InteractionManager.runAfterInteractions(release);
+    return () => {
+      cancelled = true;
+      unsubscribe();
+      interaction.cancel();
+    };
+  }, [navigation, route.params.conversationId]);
+
+  useEffect(() => {
+    if (!historyLoadReady) return;
     if (connectionState !== 'open' || !workspace || !conversation?.sessionId) {
       if (connectionState !== 'open') {
         attachedSessionKeyRef.current = '';
@@ -477,19 +522,29 @@ export function ChatScreen({
     }
     attachedSessionKeyRef.current = attachKey;
     attachWorkspaceConversation(workspace, conversation);
-  }, [attachWorkspaceConversation, connectionState, conversation?.id, conversation?.sessionId, workspace?.id]);
+  }, [attachWorkspaceConversation, connectionState, conversation?.id, conversation?.sessionId, historyLoadReady, workspace?.id]);
 
   useEffect(() => {
+    if (!historyLoadReady) return;
     if (connectionState !== 'open' || !conversation?.threadId) {
       return;
     }
     loadNativeThreadHistory(conversation.id);
-  }, [connectionState, conversation?.id, conversation?.threadId, conversation?.updatedAt, loadNativeThreadHistory]);
+  }, [connectionState, conversation?.id, conversation?.threadId, historyLoadReady, loadNativeThreadHistory]);
 
   const scrollToLatest = useCallback((animated = false) => {
-    requestAnimationFrame(() => {
+    if (pendingScrollFrameRef.current !== null) return;
+    pendingScrollFrameRef.current = requestAnimationFrame(() => {
+      pendingScrollFrameRef.current = null;
       messageScrollRef.current?.scrollToEnd({ animated });
     });
+  }, []);
+
+  useEffect(() => () => {
+    if (pendingScrollFrameRef.current !== null) {
+      cancelAnimationFrame(pendingScrollFrameRef.current);
+      pendingScrollFrameRef.current = null;
+    }
   }, []);
 
   const handleMessageScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -498,7 +553,10 @@ export function ChatScreen({
     const isAtBottom = distanceFromBottom <= CHAT_BOTTOM_FOLLOW_THRESHOLD;
     shouldFollowLatestRef.current = isAtBottom;
     setShowJumpToLatest(!isAtBottom && conversationMessages.length > 0);
-  }, [conversationMessages.length]);
+    if (contentOffset.y <= CHAT_BOTTOM_FOLLOW_THRESHOLD && visibleRenderItemCount < conversationRenderItems.length) {
+      setVisibleRenderItemCount((current) => Math.min(conversationRenderItems.length, current + RENDER_ITEM_PAGE_SIZE));
+    }
+  }, [conversationMessages.length, conversationRenderItems.length, visibleRenderItemCount]);
 
   const handleMessageContentSizeChange = useCallback(() => {
     if (!shouldFollowLatestRef.current) {
@@ -897,6 +955,10 @@ export function ChatScreen({
     }
   }, [conversation, openBrowser, openFiles, workspace]);
 
+  const forkCurrentConversation = useCallback(() => {
+    if (conversation) runThreadMenuAction(conversation.id, 'fork');
+  }, [conversation?.id, runThreadMenuAction]);
+
   const renderConversationRenderItem = useCallback(({ item }: ListRenderItemInfo<ConversationRenderItem>) => {
     if (item.type === 'executionGroup') {
       const manuallyExpanded = expandedProgressIds.has(item.id);
@@ -930,9 +992,7 @@ export function ChatScreen({
         onToggleProgress={toggleProgressEntry}
         onApprovalResponse={handleApprovalResponse}
         onOpenLink={openMessageLink}
-        onFork={entry.kind === 'incoming' && conversation
-          ? () => runThreadMenuAction(conversation.id, 'fork')
-          : undefined}
+        onFork={entry.kind === 'incoming' && conversation ? forkCurrentConversation : undefined}
         usage={entry.kind === 'incoming' ? contextUsage : null}
       />
     );
@@ -941,16 +1001,12 @@ export function ChatScreen({
     handleApprovalResponse,
     contextUsage,
     conversation,
+    forkCurrentConversation,
     openMessageLink,
     pendingRequestById,
-    runThreadMenuAction,
     toggleProgressEntry,
     toggleProgressId,
   ]);
-
-  useEffect(() => {
-    selectConversation(route.params.workspaceId, route.params.conversationId);
-  }, [route.params.conversationId, route.params.workspaceId, selectConversation]);
 
   useEffect(() => {
     shouldFollowLatestRef.current = true;
@@ -1056,7 +1112,7 @@ export function ChatScreen({
       <View className="relative min-h-0 flex-1">
         <FlatList
           ref={messageScrollRef}
-          data={conversationRenderItems}
+          data={visibleConversationRenderItems}
           renderItem={renderConversationRenderItem}
           keyExtractor={keyConversationRenderItem}
           className="flex-1"
@@ -1073,6 +1129,7 @@ export function ChatScreen({
           maxToRenderPerBatch={12}
           updateCellsBatchingPeriod={40}
           windowSize={9}
+          maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
           removeClippedSubviews={Platform.OS !== 'web'}
           onContentSizeChange={handleMessageContentSizeChange}
           onScroll={handleMessageScroll}

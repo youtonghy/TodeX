@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import { Pressable, View } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { Button, Chip, Surface, Text } from 'heroui-native';
@@ -102,7 +102,7 @@ function UsageDialog({
   );
 }
 
-export function MessageBubble({
+export const MessageBubble = memo(function MessageBubble({
   entry,
   collapsed = false,
   collapsible = false,
@@ -256,9 +256,9 @@ export function MessageBubble({
       ) : null}
     </View>
   );
-}
+});
 
-export function ExecutionGroupBubble({
+export const ExecutionGroupBubble = memo(function ExecutionGroupBubble({
   id,
   entries,
   collapsed,
@@ -340,4 +340,4 @@ export function ExecutionGroupBubble({
       </Surface>
     </View>
   );
-}
+});
