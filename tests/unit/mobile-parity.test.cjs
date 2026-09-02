@@ -159,6 +159,18 @@ test('classifies nested Pi thought, tool, and assistant events', () => {
   assert.equal(thought.subtitle, 'checking the workspace');
   assert.equal(thought.at, Date.parse('2026-01-01T00:00:00.000Z'));
 
+  const nextThought = parity.classifyV2ConversationEvent(event({
+    eventId: 'thought-2',
+    type: 'thought.delta',
+    payload: { delta: { type: 'thinking_delta', contentIndex: 0, delta: ' next' } },
+  }), 'workspace-1');
+  const firstThought = parity.classifyV2ConversationEvent(event({
+    eventId: 'thought-1',
+    type: 'thought.delta',
+    payload: { delta: { type: 'thinking_delta', contentIndex: 0, delta: 'first' } },
+  }), 'workspace-1');
+  assert.equal(nextThought.id, firstThought.id);
+
   const tool = parity.classifyV2ConversationEvent(event({
     eventId: 'tool-1',
     type: 'tool.updated',
@@ -170,6 +182,18 @@ test('classifies nested Pi thought, tool, and assistant events', () => {
   assert.equal(tool.kind, 'system');
   assert.equal(tool.title, '工具调用');
   assert.equal(tool.subtitle, 'partial args');
+
+  const nextTool = parity.classifyV2ConversationEvent(event({
+    eventId: 'tool-2',
+    type: 'tool.updated',
+    payload: { delta: { type: 'toolcall_end', contentIndex: 2, content: 'done' } },
+  }), 'workspace-1');
+  const firstTool = parity.classifyV2ConversationEvent(event({
+    eventId: 'tool-1',
+    type: 'tool.updated',
+    payload: { delta: { type: 'toolcall_delta', contentIndex: 2, content: 'partial' } },
+  }), 'workspace-1');
+  assert.equal(nextTool.id, firstTool.id);
 
   const rawProviderTool = parity.classifyV2ConversationEvent(event({
     type: 'provider.event',
@@ -200,6 +224,7 @@ test('filters startup reminders and groups progress entries', () => {
   };
   assert.equal(parity.isChatReminderEntry(reminder), true);
   assert.equal(parity.isVisibleConversationEntry(reminder), false);
+  assert.equal(parity.isVisibleConversationEntry({ ...reminder, subtitle: 'codex.local.turn' }), false);
   assert.equal(parity.isVisibleConversationEntry({ ...reminder, subtitle: '普通消息' }), true);
 
   const steps = [

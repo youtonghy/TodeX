@@ -707,6 +707,8 @@ export function classifyV2ConversationEvent(
   const role = (readString(payload, ['role']) || readString(message, ['role'])).toLowerCase();
   const turnId = readString(payload, ['turnId', 'turn_id']) || activeTurnId;
   const deltaType = readString(delta, ['type', 'deltaType', 'delta_type']);
+  const contentIndex = readNumber(delta, ['contentIndex', 'content_index'], -1);
+  const streamId = turnId || (contentIndex >= 0 ? `content-${contentIndex}` : 'current');
   const providerMethod = readString(payload, ['providerMethod', 'provider_method', 'method']);
   const messageRole = readString(message, ['role']).toLowerCase();
   const at = eventTime(event, now);
@@ -730,7 +732,7 @@ export function classifyV2ConversationEvent(
   if (isThoughtEvent) {
     const thought = thoughtPayload || content;
     return thought
-      ? { id: `v2-thought-${conversationId}-${turnId || eventId}`, kind: 'system', title: '思考中', subtitle: thought, ...base }
+      ? { id: `v2-thought-${conversationId}-${streamId}`, kind: 'system', title: '思考中', subtitle: thought, ...base }
       : null;
   }
 
@@ -741,7 +743,7 @@ export function classifyV2ConversationEvent(
     || Boolean(payload.tool || payload.toolCall || payload.tool_call || payload.command || payload.function || payload.functionCall || payload.function_call);
   if (isToolEvent) {
     return {
-      id: `v2-tool-${conversationId}-${turnId || eventId}`,
+      id: `v2-tool-${conversationId}-${turnId || (contentIndex >= 0 ? `content-${contentIndex}` : eventId)}`,
       kind: 'system',
       title: '工具调用',
       subtitle: content || shortJsonValue(payload),
@@ -791,7 +793,7 @@ export function isChatReminderEntry(entry: Pick<TimelineEntry, 'subtitle' | 'tit
   const title = typeof entry.title === 'string' ? entry.title : '';
   return subtitle.includes('本地会话启动超时')
     || title === '本地会话启动超时'
-    || subtitle.trim() === 'codex.local.start';
+    || /^codex\.local\.(?:start|turn|attach|status|stop|interrupt)$/i.test(subtitle.trim());
 }
 
 export function isVisibleConversationEntry(entry: TimelineEntry): boolean {

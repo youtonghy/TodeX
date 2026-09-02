@@ -149,6 +149,7 @@ import { GitScreen } from './src/screens/GitScreen';
 import {
   contextUsageFromV2Event as sharedContextUsageFromV2Event,
   classifyV2ConversationEvent as sharedClassifyV2ConversationEvent,
+  isVisibleConversationEntry as sharedIsVisibleConversationEntry,
   normalizeBackendConnectionProfile as sharedNormalizeBackendConnectionProfile,
   normalizeBackendConnectionProfiles as sharedNormalizeBackendConnectionProfiles,
   normalizeUsageRecords as sharedNormalizeUsageRecords,
@@ -483,6 +484,11 @@ type PendingSocketFrame = {
   data: string;
   generation: number;
   crypto: TransportCryptoSession | null;
+};
+
+type PendingTimelineUpsert = {
+  entry: TimelineEntry;
+  appendSubtitle: boolean;
 };
 
 type ConversationContext = {
@@ -2666,23 +2672,7 @@ function timelineEntryFromNativeHistoryEntry(
 }
 
 function isVisibleConversationEntry(entry: TimelineEntry): boolean {
-  if (entry.kind === 'outgoing' || entry.kind === 'incoming') {
-    return true;
-  }
-
-  if (/^sent codex\./i.test(entry.title)) {
-    return false;
-  }
-
-  if (entry.title === '协议指令' || entry.title === '已开始思考') {
-    return false;
-  }
-
-  if (isLifecycleProgressText(entry.subtitle)) {
-    return false;
-  }
-
-  return true;
+  return sharedIsVisibleConversationEntry(entry);
 }
 
 function conversationPreviewText(latest: TimelineEntry | undefined): string {
@@ -2694,6 +2684,7 @@ function isStepProgressEntry(entry: TimelineEntry): boolean {
   return entry.kind === 'system' && (
     entry.title === '执行步骤' ||
     entry.title === '步骤完成' ||
+    entry.title === '工具调用' ||
     entry.title === '请求权限批准'
   );
 }
@@ -2819,6 +2810,8 @@ export default function App() {
   const pendingServerEventFrameRef = useRef<number | null>(null);
   const pendingSocketFramesRef = useRef<PendingSocketFrame[]>([]);
   const pendingSocketFrameDrainRef = useRef<number | null>(null);
+  const pendingTimelineUpsertsRef = useRef<PendingTimelineUpsert[]>([]);
+  const pendingTimelineUpsertFrameRef = useRef<number | null>(null);
   const capabilityWorkspaceRef = useRef('');
   const socketGenerationRef = useRef(0);
   const autoConnectAttemptedRef = useRef(false);
@@ -3186,6 +3179,11 @@ export default function App() {
       cancelAnimationFrame(pendingSocketFrameDrainRef.current);
       pendingSocketFrameDrainRef.current = null;
     }
+    pendingTimelineUpsertsRef.current = [];
+    if (pendingTimelineUpsertFrameRef.current !== null) {
+      cancelAnimationFrame(pendingTimelineUpsertFrameRef.current);
+      pendingTimelineUpsertFrameRef.current = null;
+    }
   }, []);
 
   useEffect(() => {
@@ -3200,6 +3198,11 @@ export default function App() {
       if (pendingSocketFrameDrainRef.current !== null) {
         cancelAnimationFrame(pendingSocketFrameDrainRef.current);
         pendingSocketFrameDrainRef.current = null;
+      }
+      pendingTimelineUpsertsRef.current = [];
+      if (pendingTimelineUpsertFrameRef.current !== null) {
+        cancelAnimationFrame(pendingTimelineUpsertFrameRef.current);
+        pendingTimelineUpsertFrameRef.current = null;
       }
     };
   }, [flushJsonSave]);
@@ -3880,11 +3883,25 @@ export default function App() {
   }, []);
 
   const updateConversation = useCallback((id: string, patch: Partial<ConversationRecord>) => {
-    setConversations((current) =>
-      current.map((conversation) =>
-        conversation.id === id ? { ...conversation, ...patch, updatedAt: Date.now() } : conversation,
-      ),
-    );
+    setConversations((current) => {
+      let changed = false;
+      const next = current.map((conversation) => {
+        if (conversation.id !== id) {
+          return conversation;
+        }
+        const patchEntries = Object.entries(patch) as [keyof ConversationRecord, ConversationRecord[keyof ConversationRecord]][];
+        if (patchEntries.every(([key, value]) => conversation[key] === value)) {
+          return conversation;
+        }
+        changed = true;
+        return {
+          ...conversation,
+          ...patch,
+          updatedAt: patch.updatedAt ?? Date.now(),
+        };
+      });
+      return changed ? next : current;
+    });
   }, []);
 
   const upsertNativeThreads = useCallback((workspaceId: string, sessionId: string, threads: CodexNativeThread[]) => {
@@ -4000,27 +4017,52 @@ export default function App() {
   }, []);
 
   const upsertChatTimeline = useCallback((entry: TimelineEntry, appendSubtitle = false) => {
-    setTimeline((current) => {
-      const index = current.findIndex(
-        (item) =>
-          item.id === entry.id &&
-          item.workspaceId === entry.workspaceId &&
-          item.conversationId === entry.conversationId,
-      );
-
-      if (index === -1) {
-        return [entry, ...current].slice(0, MAX_TIMELINE_ITEMS);
+    pendingTimelineUpsertsRef.current.push({ entry, appendSubtitle });
+    if (pendingTimelineUpsertFrameRef.current !== null) {
+      return;
+    }
+    pendingTimelineUpsertFrameRef.current = requestAnimationFrame(() => {
+      pendingTimelineUpsertFrameRef.current = null;
+      const pending = pendingTimelineUpsertsRef.current.splice(0);
+      if (!pending.length) {
+        return;
       }
-
-      const next = current.slice();
-      const previous = next[index];
-      next[index] = {
-        ...previous,
-        ...entry,
-        subtitle: appendSubtitle ? `${previous.subtitle === '正在回复...' ? '' : previous.subtitle}${entry.subtitle}` : entry.subtitle,
-        at: Date.now(),
-      };
-      return next;
+      setTimeline((current) => {
+        let next = current;
+        for (const update of pending) {
+          const index = next.findIndex(
+            (item) =>
+              item.id === update.entry.id &&
+              item.workspaceId === update.entry.workspaceId &&
+              item.conversationId === update.entry.conversationId,
+          );
+          if (index === -1) {
+            next = [update.entry, ...next].slice(0, MAX_TIMELINE_ITEMS);
+            continue;
+          }
+          const previous = next[index];
+          const merged = {
+            ...previous,
+            ...update.entry,
+            subtitle: update.appendSubtitle
+              ? `${previous.subtitle === '正在回复...' ? '' : previous.subtitle}${update.entry.subtitle}`
+              : update.entry.subtitle,
+          };
+          if (
+            merged.title === previous.title &&
+            merged.subtitle === previous.subtitle &&
+            merged.raw === previous.raw &&
+            merged.at === previous.at
+          ) {
+            continue;
+          }
+          if (next === current) {
+            next = current.slice();
+          }
+          next[index] = merged;
+        }
+        return next;
+      });
     });
   }, []);
 
@@ -4964,7 +5006,11 @@ export default function App() {
             payloadTurnId || turnIdsRef.current[conversation.id] || '',
           );
           if (entry) {
-            upsertChatTimeline(entry, event.type.includes('delta'));
+            const delta = eventPayload.delta && typeof eventPayload.delta === 'object' && !Array.isArray(eventPayload.delta)
+              ? eventPayload.delta as Record<string, unknown>
+              : {};
+            const deltaType = typeof delta.type === 'string' ? delta.type : '';
+            upsertChatTimeline(entry, /(?:thinking|text|toolcall)_delta$/i.test(deltaType));
           }
           if (event.type === 'turn.started') {
             setConversationThinking(conversation.id, true);
@@ -4974,7 +5020,10 @@ export default function App() {
             setConversationTurnId(conversation.id, '');
           }
           if (typeof event.sequence === 'number') {
-            updateConversation(conversation.id, { lastSequence: event.sequence, updatedAt: Date.now() });
+            updateConversation(conversation.id, {
+              lastSequence: event.sequence,
+              updatedAt: Date.parse(event.time) || Date.now(),
+            });
           }
           if (event.type === 'permission.requested') {
             const inner = event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
@@ -5265,24 +5314,22 @@ export default function App() {
           void checkConnectionHealth();
           void refreshServerVersion();
           void syncWorkspacesFromBackend();
-          for (const conversation of conversationsRef.current) {
-            if (conversation.v2ConversationId) {
-              try {
-                sendRawProtocolFrame({
-                  id: createRequestId('sub'),
-                  type: 'conversation.subscribe',
-                  payload: {
-                    conversationId: conversation.v2ConversationId,
-                    // The manifest high-water mark is server state, not this device's
-                    // applied cursor. Replaying from zero lets a fresh device hydrate
-                    // the complete history; timeline upserts deduplicate events.
-                    afterSequence: 0,
-                    limit: 200,
-                  },
-                });
-              } catch {
-                // subscribe is best-effort after resume
-              }
+          const activeConversation = conversationsRef.current.find(
+            (conversation) => conversation.id === activeConversationRef.current,
+          );
+          if (activeConversation?.v2ConversationId) {
+            try {
+              sendRawProtocolFrame({
+                id: createRequestId('sub'),
+                type: 'conversation.subscribe',
+                payload: {
+                  conversationId: activeConversation.v2ConversationId,
+                  afterSequence: 0,
+                  limit: 200,
+                },
+              });
+            } catch {
+              // Opening the conversation retries the subscription.
             }
           }
         };
@@ -5812,13 +5859,24 @@ export default function App() {
   );
 
   const attachWorkspaceConversation = useCallback((workspace: WorkspaceRecord, conversation: ConversationRecord) => {
+    if (isV2Conversation(conversation)) {
+      return Boolean(sendRawProtocolFrame({
+        id: createRequestId('sub'),
+        type: 'conversation.subscribe',
+        payload: {
+          conversationId: conversation.v2ConversationId || conversation.id,
+          afterSequence: 0,
+          limit: 200,
+        },
+      }));
+    }
     const sessionId = sessionIdForConversation(workspace, conversation);
     const afterCursor = sessionCursorsRef.current.get(sessionId) ?? null;
     return sendWorkspaceCommand(workspace, 'codex.local.attach', {
       afterCursor,
       replayLimit: CHAT_ATTACH_REPLAY_LIMIT,
     }, conversation);
-  }, [sendWorkspaceCommand]);
+  }, [sendRawProtocolFrame, sendWorkspaceCommand]);
 
   const sendLocalMethodRequest = useCallback((
     workspace: WorkspaceRecord,
@@ -8577,42 +8635,6 @@ export default function App() {
   }, [activeConversationId, activeWorkspaceId, conversations, hydrated, workspaces]);
 
   useEffect(() => {
-    if (
-      !hydrated ||
-      connectionState !== 'open' ||
-      !activeWorkspace ||
-      !activeConversation ||
-      activeConversation.archived === true
-    ) {
-      return;
-    }
-    const state = localConversationStateOf(activeConversation);
-    if (
-      state === 'running' ||
-      state === 'starting' ||
-      pendingLocalStartsRef.current.has(activeConversation.id)
-    ) {
-      return;
-    }
-    void startLocalAdapter(activeWorkspace, activeConversation).catch(() => undefined);
-  }, [
-    activeConversation?.archived,
-    activeConversation?.id,
-    activeConversation?.localAdapterState,
-    activeConversation?.sessionId,
-    activeWorkspace?.approvalPolicy,
-    activeWorkspace?.approvalsReviewer,
-    activeWorkspace?.id,
-    activeWorkspace?.model,
-    activeWorkspace?.path,
-    activeWorkspace?.reasoningEffort,
-    activeWorkspace?.sandboxMode,
-    connectionState,
-    hydrated,
-    startLocalAdapter,
-  ]);
-
-  useEffect(() => {
     if (!hydrated || connectionState !== 'open') {
       return;
     }
@@ -9636,6 +9658,20 @@ function WorkspaceListScreen({
   const [workspaceMenuVisible, setWorkspaceMenuVisible] = useState(false);
   const [createBackendId, setCreateBackendId] = useState(activeBackendConnectionId);
   const availableProviderCount = v2Providers.filter((provider) => provider.available).length;
+  const orderedWorkspaces = useMemo(() => {
+    const latestConversationAt = new Map<string, number>();
+    conversations.forEach((conversation) => {
+      latestConversationAt.set(
+        conversation.workspaceId,
+        Math.max(latestConversationAt.get(conversation.workspaceId) ?? 0, conversation.updatedAt),
+      );
+    });
+    return [...workspaces].sort((left, right) => {
+      const leftActivity = Math.max(left.updatedAt, latestConversationAt.get(left.id) ?? 0);
+      const rightActivity = Math.max(right.updatedAt, latestConversationAt.get(right.id) ?? 0);
+      return rightActivity - leftActivity;
+    });
+  }, [conversations, workspaces]);
 
   useEffect(() => {
     if (!backendProfiles.some((profile) => profile.id === createBackendId)) {
@@ -9729,10 +9765,10 @@ function WorkspaceListScreen({
           </Chip>
         </View>
 
-        {workspaces.length === 0 ? (
+        {orderedWorkspaces.length === 0 ? (
           <EmptyState text="还没有工作区。点右上角 + 添加一个目录。" />
         ) : (
-          workspaces.map((workspace) => {
+          orderedWorkspaces.map((workspace) => {
             const count = conversations.filter((conversation) => conversation.workspaceId === workspace.id).length;
             return (
               <Button
@@ -10012,7 +10048,12 @@ function ConversationListScreen({
   connectionState: ConnectionState;
   threadListStatus: 'idle' | 'loading' | 'ready' | 'error';
   threadListError: string;
-  createConversation: (workspaceId: string, options?: { provider?: ProviderKind; providerProfile?: string; title?: string }) => ConversationRecord | null;
+  createConversation: (workspaceId: string, options?: {
+    provider?: ProviderKind;
+    providerProfile?: string;
+    title?: string;
+    onCreated?: (conversation: ConversationRecord) => void;
+  }) => ConversationRecord | null;
   v2Providers: ProviderDescriptor[];
   refreshNativeThreads: (workspaceId: string, includeArchived?: boolean) => Promise<boolean>;
   selectWorkspace: (workspaceId: string) => void;
@@ -10027,7 +10068,12 @@ function ConversationListScreen({
   const [createProfile, setCreateProfile] = useState('');
   const [createTitle, setCreateTitle] = useState('');
   const workspace = workspaces.find((item) => item.id === route.params.workspaceId) ?? null;
-  const workspaceConversations = conversations.filter((conversation) => conversation.workspaceId === route.params.workspaceId && conversation.archived !== true);
+  const workspaceConversations = useMemo(
+    () => conversations
+      .filter((conversation) => conversation.workspaceId === route.params.workspaceId && conversation.archived !== true)
+      .sort((left, right) => right.updatedAt - left.updatedAt),
+    [conversations, route.params.workspaceId],
+  );
   const selectedProvider = v2Providers.find((item) => item.id === createProvider) ?? null;
   const needsProfile = Boolean(selectedProvider && (selectedProvider.id === 'acp' || selectedProvider.profiles.length > 1));
 
@@ -10113,32 +10159,39 @@ function ConversationListScreen({
 
   return (
     <Surface className="flex-1 bg-background">
-      <ScrollView contentContainerStyle={styles.listContent}>
-        <Card variant="transparent" className="mx-4 mb-2 border border-separator bg-surface-secondary">
-          <Card.Body className="gap-1">
-            <Card.Title numberOfLines={1}>{workspace.name}</Card.Title>
-            <Card.Description numberOfLines={2}>{workspace.path}</Card.Description>
-            <HeroText className="text-xs text-muted" numberOfLines={1}>
-            {threadListStatus === 'loading'
-              ? '正在同步 Codex 原生 threads'
-              : threadListError
-                ? threadListError
-                : `${workspaceConversations.length} 个原生 thread`}
-            </HeroText>
-          </Card.Body>
-        </Card>
-
-      {workspaceConversations.length === 0 ? (
-        <EmptyState text="还没有对话。点右上角 + 创建会话。" />
-      ) : (
-        workspaceConversations.map((conversation) => {
+      <FlatList
+        data={workspaceConversations}
+        keyExtractor={(conversation) => conversation.id}
+        contentContainerStyle={styles.listContent}
+        initialNumToRender={10}
+        maxToRenderPerBatch={8}
+        updateCellsBatchingPeriod={40}
+        windowSize={7}
+        removeClippedSubviews={Platform.OS !== 'web'}
+        extraData={[activeConversationId, activeTurns]}
+        ListHeaderComponent={(
+          <Card variant="transparent" className="mx-4 mb-2 border border-separator bg-surface-secondary">
+            <Card.Body className="gap-1">
+              <Card.Title numberOfLines={1}>{workspace.name}</Card.Title>
+              <Card.Description numberOfLines={2}>{workspace.path}</Card.Description>
+              <HeroText className="text-xs text-muted" numberOfLines={1}>
+                {threadListStatus === 'loading'
+                  ? '正在同步 Codex 原生 threads'
+                  : threadListError
+                    ? threadListError
+                    : `${workspaceConversations.length} 个原生 thread`}
+              </HeroText>
+            </Card.Body>
+          </Card>
+        )}
+        ListEmptyComponent={<EmptyState text="还没有对话。点右上角 + 创建会话。" />}
+        renderItem={({ item: conversation }) => {
           const preview = conversation.title || conversation.preview || 'Untitled thread';
           const running = Boolean(activeTurns[conversation.id]);
           const highlighted = isConversationHighlighted(conversation, activeConversationId, activeTurns);
           const statusLabel = running ? '运行中' : conversation.nativeStatus || nowLabel(conversation.updatedAt);
           return (
             <Button
-              key={conversation.id}
               variant="ghost"
               onPress={() => {
                 selectConversation(workspace.id, conversation.id);
@@ -10171,8 +10224,8 @@ function ConversationListScreen({
               </View>
             </Button>
           );
-        })
-      )}
+        }}
+      />
       <PromptModal
         visible={Boolean(renamingConversation)}
         title="重命名对话"
@@ -10224,16 +10277,19 @@ function ConversationListScreen({
                 isDisabled={!selectedProvider?.available || (needsProfile && !createProfile)}
                 onPress={() => {
                   if (!selectedProvider?.available) return;
-                  const next = createConversation(route.params.workspaceId, {
+                  createConversation(route.params.workspaceId, {
                     provider: selectedProvider.id,
                     providerProfile: needsProfile ? createProfile || undefined : selectedProvider.profiles[0],
                     title: createTitle.trim() || undefined,
+                    onCreated: (created) => {
+                      navigation.navigate('Chat', {
+                        workspaceId: route.params.workspaceId,
+                        conversationId: created.id,
+                      });
+                    },
                   });
                   setCreateVisible(false);
                   setCreateTitle('');
-                  if (next) {
-                    navigation.navigate('Chat', { workspaceId: route.params.workspaceId, conversationId: next.id });
-                  }
                 }}
               >
                 <Button.Label>创建</Button.Label>
@@ -10242,7 +10298,6 @@ function ConversationListScreen({
           </Pressable>
         </Pressable>
       </Modal>
-      </ScrollView>
     </Surface>
   );
 }
