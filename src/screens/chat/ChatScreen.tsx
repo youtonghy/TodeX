@@ -26,7 +26,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import { KeyboardStickyView, useKeyboardState } from 'react-native-keyboard-controller';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Button, Chip, Surface, Text, TextArea } from 'heroui-native';
+import { Button, Surface, Text, TextArea } from 'heroui-native';
 import { ProgressBar } from 'heroui-native-pro';
 
 import {

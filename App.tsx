@@ -2,82 +2,29 @@ import 'react-native-get-random-values';
 import {
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type Dispatch,
-  type ReactNode,
   type SetStateAction,
 } from 'react';
-import {
-  Alert,
-  AppState,
-  Image,
-  ActivityIndicator,
-  FlatList,
-  type NativeScrollEvent,
-  type NativeSyntheticEvent,
-  type ListRenderItemInfo,
-  Modal,
-  Platform,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Switch,
-  Text,
-  TextInput,
-  type StyleProp,
-  type TextStyle,
-  type TextInputSelectionChangeEventData,
-  View,
-} from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { WebView } from 'react-native-webview';
+import { Alert, AppState, View } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
-import { CameraView, useCameraPermissions, type BarcodeScanningResult } from 'expo-camera';
-import * as DocumentPicker from 'expo-document-picker';
-import * as FileSystem from 'expo-file-system/legacy';
-import * as ImagePicker from 'expo-image-picker';
 import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer, createNavigationContainerRef } from '@react-navigation/native';
-import { createNativeStackNavigator, type NativeStackScreenProps } from '@react-navigation/native-stack';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import {
-  KeyboardAvoidingView,
-  KeyboardProvider,
-  KeyboardStickyView,
-  useKeyboardState,
-} from 'react-native-keyboard-controller';
-import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { KeyboardProvider } from 'react-native-keyboard-controller';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { enableScreens } from 'react-native-screens';
-import {
-  Button,
-  Card,
-  Chip,
-  HeroUINativeProvider,
-  Input,
-  Label,
-  Surface,
-  Text as HeroText,
-  TextField,
-} from 'heroui-native';
-import { useUniwind, withUniwind } from 'uniwind';
+import { HeroUINativeProvider, Spinner, Surface, Text as HeroText } from 'heroui-native';
 
 import {
   BackendConnectionProfile,
   ConnectionSettings,
   CodexNativeThread,
   CodexModelCatalogItem,
-  CodexMcpServerStatus,
-  CodexHooksListEntry,
   CodexMemorySettings,
-  CodexPermissionProfileSummary,
-  CodexPluginListResult,
-  CodexReasoningEffortOption,
-  DEFAULT_REASONING_EFFORT_OPTIONS,
-  FAST_SERVICE_TIER,
-  FALLBACK_CODEX_MODELS,
   LocalAdapterState,
   PendingRequest,
   PermissionOption,
@@ -87,10 +34,8 @@ import {
   buildHttpUrl,
   classifyPendingRequest,
   permissionDecision,
-  permissionActions,
   createRequestId,
   displayNameFromPath,
-  eventId,
   eventPayloadData,
   utf8ByteLength,
   extractThreadIdFromEvent,
@@ -112,96 +57,76 @@ import {
   parseWorkspaceSyncResponse,
   prepareWorkspaceSyncPayload,
   remapWorkspaceScopedRecords,
-  findCapabilityHashTrigger,
-  insertCapabilityReference,
   sandboxPolicyForMode,
   shortJson,
   type CodexServiceTierOption,
-  type CodexThreadHistoryEntry,
 } from './src/lib/todex';
-import { loadJson, loadSecret, saveJson, saveSecret } from './src/lib/storage';
 import {
-  applyPairingToSettings,
-  assemblePairingQrChunkPayload,
-  createTransportCryptoSession,
-  parsePairingQrFrame,
-  resolvePairingPayload,
-  type PairingQrChunk,
-  type TransportCryptoSession,
-} from './src/lib/transportCrypto';
+  loadJson,
+  loadSecret,
+  saveJson,
+  saveSecret,
+} from './src/lib/storage';
+import { createTransportCryptoSession, type TransportCryptoSession } from './src/lib/transportCrypto';
+import { MAX_LEGACY_MESSAGE_BYTES } from './src/lib/transport';
+import { ConnectionError } from './src/lib/connectionError';
 import {
-  MAX_LEGACY_MESSAGE_BYTES,
-  cursorFromEvent as transportCursorFromEvent,
-  sessionIdFromEvent as transportSessionIdFromEvent,
-} from './src/lib/transport';
-import { ConnectionError, connectionFailureLabel } from './src/lib/connectionError';
-import { probeBackendConnection, nextReconnectDelayMs, inspectServerUrl, tokenMatchesOrigin } from './src/lib/connectionProbe';
-import { V2ApiClient, V2ConversationSocket, buildV2WebSocketUrlWithOptions, providerDisplayName, type ConversationEvent, type ConversationManifest, type GitAction, type GitRepositorySummary as V2GitRepositorySummary, type ProviderCommandDescriptor, type ProviderDescriptor, type ProviderKind, type ProviderModelDescriptor, type SkillCatalogDescriptor } from './src/lib/v2';
+  probeBackendConnection,
+  nextReconnectDelayMs,
+  inspectServerUrl,
+  tokenMatchesOrigin,
+} from './src/lib/connectionProbe';
+import {
+  V2ApiClient,
+  buildV2WebSocketUrlWithOptions,
+  providerDisplayName,
+  type ConversationEvent,
+  type ConversationManifest,
+  type GitAction,
+  type GitRepositorySummary as V2GitRepositorySummary,
+  type ProviderCommandDescriptor,
+  type ProviderDescriptor,
+  type ProviderKind,
+  type ProviderModelDescriptor,
+  type SkillCatalogDescriptor,
+} from './src/lib/v2';
 import { CapabilitiesScreen, type CatalogState } from './src/components/CapabilitiesScreen';
-import { ProviderIcon } from './src/components/ProviderIcon';
 import { UsageScreen } from './src/screens/UsageScreen';
 import { AboutScreen } from './src/screens/AboutScreen';
 import { KanbanScreen } from './src/screens/KanbanScreen';
 import { FilesScreen } from './src/screens/FilesScreen';
-import { BrowserScreen, type BrowserFetchResult } from './src/screens/BrowserScreen';
+import { BrowserScreen } from './src/screens/BrowserScreen';
 import { WorkbenchScreen, type WorkbenchTab } from './src/screens/WorkbenchScreen';
 import { GitScreen } from './src/screens/GitScreen';
 import {
   contextUsageFromV2Event as sharedContextUsageFromV2Event,
-  classifyV2ConversationEvent as sharedClassifyV2ConversationEvent,
-  isVisibleConversationEntry as sharedIsVisibleConversationEntry,
-  normalizeBackendConnectionProfile as sharedNormalizeBackendConnectionProfile,
   normalizeBackendConnectionProfiles as sharedNormalizeBackendConnectionProfiles,
   normalizeUsageRecords as sharedNormalizeUsageRecords,
   profileFromSettings as sharedProfileFromSettings,
   settingsFromProfile as sharedSettingsFromProfile,
   usageRecordFromV2Event as sharedUsageRecordFromV2Event,
-  validateLoopbackUrl,
-  workspaceLinkTarget as sharedWorkspaceLinkTarget,
-  type UsageRecord as SharedUsageRecord,
-  type WorkspaceLinkTarget,
 } from './src/lib/mobileParity';
 
 import {
   DEFAULT_COMPOSER_SELECTION,
   CONNECTION_HEALTH_INTERVAL_MS,
   CONNECTION_HEALTH_TIMEOUT_MS,
-  MAX_COMPOSER_ATTACHMENTS,
-  MAX_IMAGE_ATTACHMENT_BYTES,
-  MAX_FILE_ATTACHMENT_BYTES,
   localConversationStateOf,
-  isConversationHighlighted,
   sessionIdForConversation,
   commandWorkspaceForConversation,
   isLocalAdapterAlreadyRunning,
   isLocalAdapterFailed,
   isThreadNotFound,
   localTurnErrorMessage,
-  attachmentId,
-  formatBytes,
-  fileNameFromUri,
-  inferMimeType,
-  isImageMimeType,
-  mimeTypeFromDataUrl,
-  base64FromDataUrl,
-  estimatedBytesFromBase64,
-  readBase64DataUrl,
-  resolveFileSizeBytes,
-  readTextAttachmentContent,
   attachmentPrompt,
   codexInputFromComposer,
   attachmentSummary,
   selectedSkillSummary,
-  skillIdFromPath,
   parseSkillListItems,
   extractProtocolError,
   reasoningEffortLabel,
-  compactTokenCount,
-  extractMessageLinks,
   modelDisplayLabel,
-  reasoningOptionsForModel,
   defaultReasoningForModel,
-  serviceTiersForModel,
   fastServiceTierForModel,
   serviceTierLabel,
   mergeModelCatalog,
@@ -234,30 +159,18 @@ import {
   MAX_USAGE_RECORDS,
   backendProfileTokenKey,
   CHAT_ATTACH_REPLAY_LIMIT,
-  CHAT_BOTTOM_FOLLOW_THRESHOLD,
   TERMINAL_MAX_OUTPUT_ENTRIES,
   DEFAULT_TERMINAL_ROWS,
   DEFAULT_TERMINAL_COLS,
   LOCAL_SESSION_IDLE_SUSPEND_MS,
   LOCAL_SESSION_IDLE_SWEEP_MS,
-  SLASH_COMMANDS,
   EXPERIMENTAL_FEATURE_DEFAULTS,
-  EXPERIMENTAL_FEATURES,
-  SLASH_COMMAND_CATEGORY_ORDER,
-  SLASH_COMMAND_CATEGORY_LABELS,
   canonicalSlashCommand,
-  slashCommandDefinition,
-  slashCommandNeedsActionPage,
   serviceTierCommandForModel,
-  serviceTierSlashCommandsForModel,
   PERMISSION_PRESETS,
   permissionPresetForProfile,
   permissionProfileLabel,
-  approvalsReviewerValue,
-  permissionPresetSelected,
-  PERSONALITY_OPTIONS,
   personalityLabel,
-  FEEDBACK_CATEGORIES,
   defaultSettings,
   defaultConnectionHealth,
   DEFAULT_WORKBENCH_STATE,
@@ -272,20 +185,13 @@ import {
   workspaceSyncPayloadEquals,
   createSessionId,
   terminalIdForConversation,
-  terminalStatusLabel,
   terminalOutputLine,
-  nowLabel,
-  connectionStateLabel,
-  latencyLabelOf,
-  healthLabelOf,
   isV2Conversation,
   resolveCreateAgent,
   canSwitchConversationAgent,
   conversationFromManifest,
   mergeManifestConversations,
   classifyV2ConversationEvent,
-  modeLabelOf,
-  compactGoalLabel,
   conversationTitleFromNativeThread,
   conversationPatchFromNativeThread,
   resultThreadFromValue,
@@ -298,12 +204,8 @@ import {
   goalPatchFromEventData,
   turnIdFromEventData,
   turnStatusFromEventData,
-  findMentionTrigger,
-  buildMentionSuggestions,
-  insertMention,
   parseMentionReferences,
   summarizeMentionReferences,
-  fetchWorkspaceDirectorySnapshot,
   sessionIdFromEvent,
   cursorFromEvent,
   threadIdFromEventData,
@@ -313,16 +215,11 @@ import {
   makeSystemEntry,
   makeOutgoingEntry,
   timelineEntryFromNativeHistoryEntry,
-  isVisibleConversationEntry,
-  conversationPreviewText,
-  isCollapsibleProgressEntry,
-  buildConversationRenderItems,
   createDefaultConversation,
   conversationsForWorkspaceSnapshot,
   forkConversationRecord,
   type RootStackParamList,
   type ServerVersion,
-  type WorkspaceDirectorySnapshot,
   type ConversationRecord,
   type MobileUsageRecord,
   type MobileContextUsage,
@@ -330,7 +227,6 @@ import {
   type GitRepositorySummary,
   type PendingThreadList,
   type PendingGitDiff,
-  type ExperimentalFeatureId,
   type ExperimentalFeatureSettings,
   type GitDiffState,
   type McpInventoryState,
@@ -343,7 +239,6 @@ import {
   type TerminalClientState,
   type PendingThreadAction,
   type ComposerSelection,
-  type PairingChunkCollector,
   type ComposerAttachmentDraft,
   type QueuedChatSubmission,
   type PendingLocalStart,
@@ -367,9 +262,6 @@ import {
   type RuntimeStatusState,
   type ConnectionHealth,
   type TimelineEntry,
-  type ConversationRenderItem,
-  type WorkspaceEntry,
-  type MentionSuggestion,
   type PermissionPreset,
   type MentionReference,
   type WorkspaceMentionHistory,
@@ -377,6 +269,7 @@ import {
 } from './src/lib/appCore';
 import { BrowserPreviewWebView } from './src/components/BrowserPreviewWebView';
 import { useAppNavigationTheme } from './src/theme/navigation';
+import { ToastBridge, notify } from './src/components/ui';
 import { WorkspaceListScreen } from './src/screens/WorkspaceListScreen';
 import { ConversationListScreen } from './src/screens/ConversationListScreen';
 import { ChatScreen } from './src/screens/chat/ChatScreen';
@@ -389,32 +282,13 @@ import { SlashCommandActionScreen } from './src/screens/SlashCommandActionScreen
 import {
   ModelPickerModal,
   PromptModal,
-  ReasoningEffortSelector,
   SkillPickerModal,
   ThreadInfoModal,
-  WorkspacePathPickerModal,
 } from './src/components/modals';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 const navigationRef = createNavigationContainerRef<RootStackParamList>();
 enableScreens(true);
-const StyledIonicons = withUniwind(Ionicons);
-const LIGHT_NAV_THEME = {
-  background: '#f7f9fa',
-  title: '#17202a',
-  foreground: '#17202a',
-  chip: '#eef0f2',
-  chipAccent: '#dcefeb',
-  chipText: '#52606b',
-};
-const DARK_NAV_THEME = {
-  background: '#202b36',
-  title: '#e7edf2',
-  foreground: '#d7dde3',
-  chip: '#2d3a46',
-  chipAccent: '#20483f',
-  chipText: '#b9c5cf',
-};
 export default function App() {
   const { statusBarStyle, navigationTheme, screenOptions } = useAppNavigationTheme();
   const socketRef = useRef<WebSocket | null>(null);
@@ -3299,7 +3173,7 @@ export default function App() {
     (nameDraft: string, pathDraft: string, backendConnectionId?: string) => {
       const path = pathDraft.trim();
       if (!path) {
-        Alert.alert('缺少目录', '请输入要管理的目录路径。');
+        notify.warning('缺少目录', '请输入要管理的目录路径。');
         return null;
       }
 
@@ -3435,7 +3309,7 @@ export default function App() {
   const renameWorkspace = useCallback((workspaceId: string, name: string) => {
     const nextName = name.trim();
     if (!nextName) {
-      Alert.alert('名称不能为空', '请输入新的工作区名称。');
+      notify.warning('名称不能为空', '请输入新的工作区名称。');
       return;
     }
     updateWorkspace(workspaceId, { name: nextName });
@@ -3444,7 +3318,7 @@ export default function App() {
   const forkWorkspace = useCallback((workspaceId: string) => {
     const workspace = workspaces.find((item) => item.id === workspaceId);
     if (!workspace) {
-      Alert.alert('未找到工作区', '请返回后重新选择工作区。');
+      notify.warning('未找到工作区', '请返回后重新选择工作区。');
       return null;
     }
 
@@ -3748,7 +3622,7 @@ export default function App() {
   ) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择一个 Codex thread。');
+      notify.warning('未选择对话', '请先选择一个 Codex thread。');
       return false;
     }
     const { workspace, conversation } = context;
@@ -3821,7 +3695,7 @@ export default function App() {
   ) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择一个 Codex thread。');
+      notify.warning('未选择对话', '请先选择一个 Codex thread。');
       return false;
     }
     const { workspace, conversation } = context;
@@ -3867,7 +3741,7 @@ export default function App() {
   ) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      notify.warning('未选择对话', '请先选择一个 Codex 对话。');
       return false;
     }
     const { workspace, conversation } = context;
@@ -3948,7 +3822,7 @@ export default function App() {
   const requestPermissionProfiles = useCallback(async (conversationId = activeConversationRef.current) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      notify.warning('未选择对话', '请先选择一个 Codex 对话。');
       return false;
     }
     const { workspace, conversation } = context;
@@ -4022,7 +3896,7 @@ export default function App() {
   const requestHooksCatalog = useCallback(async (conversationId = activeConversationRef.current) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      notify.warning('未选择对话', '请先选择一个 Codex 对话。');
       return false;
     }
     const { workspace, conversation } = context;
@@ -4094,7 +3968,7 @@ export default function App() {
   const requestPluginsCatalog = useCallback(async (conversationId = activeConversationRef.current) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      notify.warning('未选择对话', '请先选择一个 Codex 对话。');
       return false;
     }
     const { workspace, conversation } = context;
@@ -4167,7 +4041,7 @@ export default function App() {
   const requestMemorySettings = useCallback(async (conversationId = activeConversationRef.current) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      notify.warning('未选择对话', '请先选择一个 Codex 对话。');
       return false;
     }
     const { workspace, conversation } = context;
@@ -4242,7 +4116,7 @@ export default function App() {
   ) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      notify.warning('未选择对话', '请先选择一个 Codex 对话。');
       return false;
     }
     const { workspace, conversation } = context;
@@ -4344,7 +4218,7 @@ export default function App() {
   const resetMemories = useCallback(async (conversationId: string) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      notify.warning('未选择对话', '请先选择一个 Codex 对话。');
       return false;
     }
     const { workspace, conversation } = context;
@@ -4391,7 +4265,7 @@ export default function App() {
   ) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      notify.warning('未选择对话', '请先选择一个 Codex 对话。');
       return false;
     }
     const { workspace, conversation } = context;
@@ -4455,7 +4329,7 @@ export default function App() {
   const setWorkspaceServiceTier = useCallback((conversationId: string, nextTier: string, title: string) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      notify.warning('未选择对话', '请先选择一个 Codex 对话。');
       return false;
     }
     const { workspace, conversation } = context;
@@ -4484,7 +4358,7 @@ export default function App() {
   const toggleFastServiceTier = useCallback((conversationId: string) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      notify.warning('未选择对话', '请先选择一个 Codex 对话。');
       return false;
     }
     const { workspace } = context;
@@ -4503,7 +4377,7 @@ export default function App() {
   const applyPersonality = useCallback((conversationId: string, personality: string) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      notify.warning('未选择对话', '请先选择一个 Codex 对话。');
       return false;
     }
     const { workspace, conversation } = context;
@@ -4533,7 +4407,7 @@ export default function App() {
   ) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      notify.warning('未选择对话', '请先选择一个 Codex 对话。');
       return false;
     }
     const { workspace, conversation } = context;
@@ -4561,7 +4435,7 @@ export default function App() {
   const requestGitDiff = useCallback(async (conversationId = activeConversationRef.current) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      notify.warning('未选择对话', '请先选择一个 Codex 对话。');
       return false;
     }
     const { workspace, conversation } = context;
@@ -4628,7 +4502,7 @@ export default function App() {
   const openGitDiff = useCallback((conversationId = activeConversationRef.current) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      notify.warning('未选择对话', '请先选择一个 Codex 对话。');
       return;
     }
     navigationRef.current?.navigate('GitDiff', {
@@ -4641,7 +4515,7 @@ export default function App() {
   const openTerminal = useCallback((conversationId = activeConversationRef.current) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      notify.warning('未选择对话', '请先选择一个 Codex 对话。');
       return;
     }
     seedTerminalState(context.workspace, context.conversation);
@@ -4780,7 +4654,7 @@ export default function App() {
   const openGit = useCallback((conversationId = activeConversationRef.current) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择工作区和对话。');
+      notify.warning('未选择对话', '请先选择工作区和对话。');
       return;
     }
     navigationRef.current?.navigate('Git', {
@@ -4796,7 +4670,7 @@ export default function App() {
   const openBrowser = useCallback((conversationId = activeConversationRef.current, target?: { url?: string; filePath?: string }) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择工作区和对话。');
+      notify.warning('未选择对话', '请先选择工作区和对话。');
       return;
     }
     navigationRef.current?.navigate('Browser', {
@@ -4810,7 +4684,7 @@ export default function App() {
   const openFiles = useCallback((conversationId = activeConversationRef.current, filePath?: string) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择工作区和对话。');
+      notify.warning('未选择对话', '请先选择工作区和对话。');
       return;
     }
     navigationRef.current?.navigate('Files', {
@@ -4823,7 +4697,7 @@ export default function App() {
   const openWorkbench = useCallback((conversationId = activeConversationRef.current, tab?: WorkbenchTab) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择工作区和对话。');
+      notify.warning('未选择对话', '请先选择工作区和对话。');
       return;
     }
     navigationRef.current?.navigate('Workbench', {
@@ -4862,7 +4736,7 @@ export default function App() {
   const requestSkillList = useCallback(async (conversationId = activeConversationRef.current, forceReload = false) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      notify.warning('未选择对话', '请先选择一个 Codex 对话。');
       return false;
     }
     const { workspace, conversation } = context;
@@ -4909,7 +4783,7 @@ export default function App() {
   const openExperimentalFeatures = useCallback((conversationId = activeConversationRef.current) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      notify.warning('未选择对话', '请先选择一个 Codex 对话。');
       return;
     }
     navigationRef.current?.navigate('Experimental', {
@@ -4957,7 +4831,7 @@ export default function App() {
   ) => {
     const workspace = workspacesRef.current.find((item) => item.id === workspaceId);
     if (!workspace) {
-      Alert.alert('未找到工作区', '请返回后重新选择工作区。');
+      notify.warning('未找到工作区', '请返回后重新选择工作区。');
       return null;
     }
     const agent = resolveCreateAgent(
@@ -4969,7 +4843,7 @@ export default function App() {
       workspace.id,
     );
     if (!agent) {
-      Alert.alert('没有可用的 Agent', '请先连接后端，并确认至少有一个 Agent 可用。');
+      notify.warning('没有可用的 Agent', '请先连接后端，并确认至少有一个 Agent 可用。');
       return null;
     }
     const backendProfile = backendProfilesRef.current.find((item) => item.id === options?.backendConnectionId)
@@ -5031,7 +4905,7 @@ export default function App() {
         const message = error instanceof Error ? error.message : '创建对话失败';
         setLastError(message);
         options?.onFailed?.();
-        Alert.alert('创建对话失败', message);
+        notify.warning('创建对话失败', message);
       }
     })();
 
@@ -5044,7 +4918,7 @@ export default function App() {
     const { workspace, conversation } = context;
     const descriptor = v2ProvidersRef.current.find((item) => item.id === provider && item.available);
     if (!descriptor) {
-      Alert.alert('Agent 不可用', '请刷新 Agent 列表后重试。');
+      notify.warning('Agent 不可用', '请刷新 Agent 列表后重试。');
       return false;
     }
     const targetProfile = providerProfile || descriptor.profiles[0];
@@ -5057,7 +4931,7 @@ export default function App() {
       timelineRef.current,
       thinkingConversationsRef.current[conversation.id] === true,
     )) {
-      Alert.alert('无法切换 Agent', '任务开始后不能切换 Agent，请新建对话。');
+      notify.warning('无法切换 Agent', '任务开始后不能切换 Agent，请新建对话。');
       return false;
     }
     const created = createConversation(workspace.id, {
@@ -5102,12 +4976,12 @@ export default function App() {
   const renameConversation = useCallback((conversationId: string, title: string) => {
     const nextTitle = title.trim();
     if (!nextTitle) {
-      Alert.alert('名称不能为空', '请输入新的对话标题。');
+      notify.warning('名称不能为空', '请输入新的对话标题。');
       return;
     }
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择一个 Codex thread。');
+      notify.warning('未选择对话', '请先选择一个 Codex thread。');
       return;
     }
     updateConversation(conversationId, { title: nextTitle });
@@ -5123,7 +4997,7 @@ export default function App() {
   const forkConversation = useCallback((conversationId: string) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择一个 Codex thread。');
+      notify.warning('未选择对话', '请先选择一个 Codex thread。');
       return null;
     }
     const { workspace, conversation } = context;
@@ -5218,13 +5092,13 @@ export default function App() {
     ) => {
       const context = getConversationContext(conversationId);
       if (!context) {
-        Alert.alert('未选择对话', '请先选择工作区和对话。');
+        notify.warning('未选择对话', '请先选择工作区和对话。');
         return false;
       }
       const { workspace, conversation } = context;
       const v2Id = conversation.v2ConversationId || (isV2Conversation(conversation) ? conversation.id : '');
       if (!v2Id) {
-        Alert.alert('当前不是 v2 对话', '请新建对话后再发送。');
+        notify.warning('当前不是 v2 对话', '请新建对话后再发送。');
         return false;
       }
       const skillRefs = skills
@@ -5273,7 +5147,7 @@ export default function App() {
     ) => {
       const context = getConversationContext(conversationId);
       if (!context) {
-        Alert.alert('未选择对话', '请先选择工作区和对话。');
+        notify.warning('未选择对话', '请先选择工作区和对话。');
         return false;
       }
 
@@ -5361,7 +5235,7 @@ export default function App() {
 
   const toggleSelectedSkill = useCallback((conversationId: string, skill: SkillListItem) => {
     if (!skill.enabled) {
-      Alert.alert('Skill 已禁用', '该 Skill 当前未启用，不能添加到下一条消息。');
+      notify.warning('Skill 已禁用', '该 Skill 当前未启用，不能添加到下一条消息。');
       return;
     }
     const nextSkill: SelectedSkillAttachment = {
@@ -5380,7 +5254,7 @@ export default function App() {
 
   const toggleCatalogSkill = useCallback((conversationId: string, skill: SkillCatalogDescriptor, provider: ProviderKind) => {
     if (!skill.valid) {
-      Alert.alert('Skill 无效', skill.error || '该 Skill 当前不能添加到下一条消息。');
+      notify.warning('Skill 无效', skill.error || '该 Skill 当前不能添加到下一条消息。');
       return;
     }
     const nextSkill: SelectedSkillAttachment = {
@@ -5406,7 +5280,7 @@ export default function App() {
       : null;
     const v2Id = conversation?.v2ConversationId || conversation?.id;
     if (!conversation || !workspace || !isV2Conversation(conversation) || !v2Id) {
-      Alert.alert('需要 v2 对话', '请先新建对话后再调用 MCP。');
+      notify.warning('需要 v2 对话', '请先新建对话后再调用 MCP。');
       return false;
     }
     appendTimeline(makeSystemEntry('正在调用 MCP', toolName, workspace.id, conversation.id));
@@ -5426,7 +5300,7 @@ export default function App() {
         const v2Id = conversation?.v2ConversationId || conversation?.id || conversationId;
         const permissionId = typeof data.permissionId === 'string' ? data.permissionId : request.requestId;
         if (!v2Id || !permissionId) {
-          Alert.alert('权限请求无效', '找不到对应的对话。');
+          notify.warning('权限请求无效', '找不到对应的对话。');
           return false;
         }
         return Boolean(sendRawProtocolFrame({
@@ -5448,7 +5322,7 @@ export default function App() {
         : null;
 
       if (!requestSessionId || !workspace || !conversation) {
-        Alert.alert('未选择工作区', '请先选择一个工作区。');
+        notify.warning('未选择工作区', '请先选择一个工作区。');
         return false;
       }
       return sendProtocolMessage('codex.local.approval.respond', {
@@ -5473,7 +5347,7 @@ export default function App() {
   const applyPermissionPreset = useCallback(
     (preset: PermissionPreset) => {
       if (!activeConversation) {
-        Alert.alert('未选择工作区', '请先选择一个工作区。');
+        notify.warning('未选择工作区', '请先选择一个工作区。');
         return;
       }
       void applyPermissionProfile(activeConversation.id, preset.profileId, preset.description);
@@ -5506,14 +5380,14 @@ export default function App() {
     (conversationId: string, args: string[], promptWhenEmpty = true) => {
       const context = getConversationContext(conversationId);
       if (!context) {
-        Alert.alert('未选择工作区', '请先选择一个工作区。');
+        notify.warning('未选择工作区', '请先选择一个工作区。');
         return;
       }
 
       const { workspace, conversation } = context;
       const { model, reasoningEffort, invalidReasoningEffort } = parseModelCommandArgs(args);
       if (invalidReasoningEffort) {
-        Alert.alert(
+        notify.warning(
           '无效思考强度',
           '支持 none、minimal、low、medium、high、xhigh，也支持 max 作为 xhigh 的别名。',
         );
@@ -5527,7 +5401,7 @@ export default function App() {
             initialValue: modelCommandInitialValue(workspace, settings),
           });
         } else {
-          Alert.alert('Model', '请输入模型名或思考强度，例如 gpt-5.5 high。');
+          notify.warning('Model', '请输入模型名或思考强度，例如 gpt-5.5 high。');
         }
         return;
       }
@@ -5557,12 +5431,12 @@ export default function App() {
     (conversationId: string, model: string, reasoningEffort: string | null) => {
       const context = getConversationContext(conversationId);
       if (!context) {
-        Alert.alert('未选择工作区', '请先选择一个工作区。');
+        notify.warning('未选择工作区', '请先选择一个工作区。');
         return;
       }
       const nextModel = model.trim();
       if (!nextModel) {
-        Alert.alert('缺少模型', '请选择或输入模型名。');
+        notify.warning('缺少模型', '请选择或输入模型名。');
         return;
       }
       const nextReasoningEffort = normalizeReasoningEffort(reasoningEffort) ?? defaultReasoningForModel(nextModel, modelCatalog);
@@ -5678,14 +5552,14 @@ export default function App() {
   const copyLastAgentMessage = useCallback(async (conversationId: string) => {
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择对话', '请先选择一个 Codex 对话。');
+      notify.warning('未选择对话', '请先选择一个 Codex 对话。');
       return false;
     }
     const lastMessage = timelineRef.current.find(
       (entry) => entry.conversationId === conversationId && entry.kind === 'incoming' && entry.subtitle.trim(),
     );
     if (!lastMessage) {
-      Alert.alert('Copy', '当前对话还没有可复制的 Codex 回复。');
+      notify.warning('Copy', '当前对话还没有可复制的 Codex 回复。');
       return false;
     }
     await Clipboard.setStringAsync(lastMessage.subtitle);
@@ -5706,7 +5580,7 @@ export default function App() {
       const context = getConversationContext(conversationId);
 
       if (!context) {
-        Alert.alert('未选择工作区', '请先选择一个工作区。');
+        notify.warning('未选择工作区', '请先选择一个工作区。');
         return;
       }
 
@@ -5768,7 +5642,7 @@ export default function App() {
         const requestId = rest[1] || selectedRequest?.requestId || '';
         const target = pendingRequests.find((request) => request.requestId === requestId) ?? selectedRequest;
         if (!target) {
-          Alert.alert('没有待处理请求', '当前没有可回复的审批或问题。');
+          notify.warning('没有待处理请求', '当前没有可回复的审批或问题。');
           return;
         }
         sendApprovalResponse(!deny, target);
@@ -5811,7 +5685,7 @@ export default function App() {
           addCommandNotice('MCP inventory requested', '已请求 MCP server 状态。');
           return;
         }
-        Alert.alert('MCP', 'Usage: /mcp [verbose]');
+        notify.warning('MCP', 'Usage: /mcp [verbose]');
         return;
       }
 
@@ -5841,7 +5715,7 @@ export default function App() {
         }
         const objective = subcommand === 'set' ? rest.slice(1).join(' ').trim() : rest.join(' ').trim();
         if (subcommand === 'set' && !objective) {
-          Alert.alert('Goal', 'Usage: /goal <objective>');
+          notify.warning('Goal', 'Usage: /goal <objective>');
           return;
         }
         const method =
@@ -5873,7 +5747,7 @@ export default function App() {
       if (lower === 'rename') {
         const nextTitle = rest.join(' ').trim();
         if (!nextTitle) {
-          Alert.alert('Rename', '请输入新的对话标题。');
+          notify.warning('Rename', '请输入新的对话标题。');
           return;
         }
         updateConversation(conversation.id, { title: nextTitle });
@@ -6318,7 +6192,7 @@ export default function App() {
       ? workspacesRef.current.find((item) => item.id === conversation.workspaceId) ?? null
       : null;
     if (!workspace || !conversation) {
-      Alert.alert('未选择工作区', '请先选择一个工作区。');
+      notify.warning('未选择工作区', '请先选择一个工作区。');
       return;
     }
     if (isV2Conversation(conversation)) {
@@ -6353,7 +6227,7 @@ export default function App() {
     }
     const context = getConversationContext(conversationId);
     if (!context) {
-      Alert.alert('未选择工作区', '请先选择一个工作区。');
+      notify.warning('未选择工作区', '请先选择一个工作区。');
       return;
     }
     const { workspace, conversation } = context;
@@ -6526,7 +6400,7 @@ export default function App() {
     if (prompt.command === 'metadata') {
       const parsed = parseThreadMetadataPrompt(trimmed);
       if (parsed.error) {
-        Alert.alert('Metadata', parsed.error);
+        notify.warning('Metadata', parsed.error);
         return;
       }
       void sendNativeThreadAction(prompt.conversationId, 'metadata', 'thread/metadata/update', (threadId) => ({
@@ -6542,7 +6416,7 @@ export default function App() {
     if (prompt.command === 'memory') {
       const mode = parseThreadMemoryMode(trimmed);
       if (!mode) {
-        Alert.alert('Memory', '请输入 on、off 或 reset。');
+        notify.warning('Memory', '请输入 on、off 或 reset。');
         return;
       }
       if (mode === 'reset') {
@@ -6562,7 +6436,7 @@ export default function App() {
     }
     if (prompt.command === 'shell') {
       if (!trimmed) {
-        Alert.alert('Shell command', '请输入要执行的 shell command。');
+        notify.warning('Shell command', '请输入要执行的 shell command。');
         return;
       }
       void sendNativeThreadAction(prompt.conversationId, 'shell', 'thread/shellCommand', (threadId) => ({
@@ -6578,7 +6452,7 @@ export default function App() {
     }
     if (prompt.command === 'items') {
       if (!trimmed) {
-        Alert.alert('Turn items', '请输入 turn id。');
+        notify.warning('Turn items', '请输入 turn id。');
         return;
       }
       void sendNativeThreadAction(prompt.conversationId, 'items', 'thread/turns/items/list', (threadId) => ({
@@ -6596,7 +6470,7 @@ export default function App() {
     if (prompt.command === 'inject') {
       const items = parseJsonArrayPrompt(trimmed);
       if (!items) {
-        Alert.alert('Inject items', '请输入 JSON 数组。');
+        notify.warning('Inject items', '请输入 JSON 数组。');
         return;
       }
       void sendNativeThreadAction(prompt.conversationId, 'inject', 'thread/inject_items', (threadId) => ({
@@ -6621,23 +6495,24 @@ export default function App() {
         });
         setThreadCommandPrompt(null);
       } catch {
-        Alert.alert('Guardian', '请输入有效 JSON。');
+        notify.warning('Guardian', '请输入有效 JSON。');
       }
     }
   }, [sendNativeThreadAction, sendTrackedLocalMethod]);
 
   if (!hydrated) {
     return (
-      <GestureHandlerRootView style={styles.appRoot}>
+      <GestureHandlerRootView style={{ flex: 1 }}>
         <HeroUINativeProvider>
           <KeyboardProvider>
-            <Surface className="flex-1 items-center justify-center bg-background px-8">
+            <Surface variant="transparent" className="flex-1 items-center justify-center bg-background px-8">
               <StatusBar style={statusBarStyle} />
-              <View className="h-14 w-14 items-center justify-center rounded-lg bg-accent">
-                <HeroText className="text-2xl font-semibold text-accent-foreground">T</HeroText>
+              <View className="h-16 w-16 items-center justify-center rounded-3xl bg-accent">
+                <HeroText type="h2" className="text-accent-foreground">T</HeroText>
               </View>
-              <HeroText className="mt-4 text-3xl font-semibold text-foreground">TodeX</HeroText>
-              <HeroText className="mt-2 text-center text-sm text-muted">正在加载设置和工作区...</HeroText>
+              <HeroText type="h2" className="mt-5 text-foreground">TodeX</HeroText>
+              <HeroText type="body-sm" color="muted" className="mt-2 text-center">正在加载设置和工作区…</HeroText>
+              <Spinner size="sm" className="mt-6" />
             </Surface>
           </KeyboardProvider>
         </HeroUINativeProvider>
@@ -6646,8 +6521,9 @@ export default function App() {
   }
 
   return (
-    <GestureHandlerRootView style={styles.appRoot}>
+    <GestureHandlerRootView style={{ flex: 1 }}>
       <HeroUINativeProvider>
+        <ToastBridge />
         <SafeAreaProvider>
           <KeyboardProvider>
             <NavigationContainer ref={navigationRef} theme={navigationTheme}>
@@ -7118,7 +6994,7 @@ export default function App() {
             if (modelCommandPrompt?.target === 'settings') {
               const { model, reasoningEffort, invalidReasoningEffort } = parseModelCommandArgs(value.trim().split(/\s+/));
               if (invalidReasoningEffort) {
-                Alert.alert('无效思考强度', '支持 none、minimal、low、medium、high、xhigh，也支持 max 作为 xhigh 的别名。');
+                notify.warning('无效思考强度', '支持 none、minimal、low、medium、high、xhigh，也支持 max 作为 xhigh 的别名。');
                 return;
               }
               applyDefaultModelSelection(model || settings.defaultModel, reasoningEffort ?? settings.defaultReasoningEffort ?? null);
@@ -7231,1959 +7107,3 @@ export default function App() {
   );
 }
 
-function EmptyState({ text }: { text: string }) {
-  return (
-    <Card variant="transparent" className="mx-4 my-4 border border-separator bg-surface-secondary">
-      <Card.Body className="items-center gap-2 py-6">
-        <StyledIonicons name="chatbubbles-outline" size={24} className="text-muted" />
-        <HeroText className="text-center text-sm leading-5 text-muted">{text}</HeroText>
-      </Card.Body>
-    </Card>
-  );
-}
-
-function Row({ children }: { children: ReactNode }) {
-  return <View style={styles.row}>{children}</View>;
-}
-
-function HeaderIconButton({ label, onPress }: { label: string; onPress: () => void }) {
-  const iconName =
-    label === '+'
-      ? 'add'
-      : label === '设置'
-        ? 'settings-outline'
-        : label === 'Git'
-          ? 'git-branch-outline'
-          : label === '看板'
-            ? 'grid-outline'
-            : label === '统计'
-              ? 'stats-chart-outline'
-              : label === '关于'
-                ? 'information-circle-outline'
-                : label === '2.0'
-                  ? 'sparkles-outline'
-        : label === '更多'
-          ? 'ellipsis-horizontal'
-          : 'chevron-forward';
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={label}
-      onPress={onPress}
-      hitSlop={4}
-      style={({ pressed }) => [styles.headerIconButton, pressed && styles.headerIconButtonPressed]}
-    >
-      <StyledIonicons name={iconName} size={18} className="text-foreground" />
-    </Pressable>
-  );
-}
-
-function ActionButton({
-  title,
-  onPress,
-  tone = 'solid',
-  disabled = false,
-}: {
-  title: string;
-  onPress: () => void;
-  tone?: 'solid' | 'ghost' | 'danger';
-  disabled?: boolean;
-}) {
-  const variant = tone === 'ghost' ? 'secondary' : tone === 'danger' ? 'danger-soft' : 'primary';
-  return (
-    <Button
-      size="md"
-      variant={variant}
-      isDisabled={disabled}
-      onPress={onPress}
-      className="min-h-11 flex-1 rounded-lg"
-    >
-      <Button.Label numberOfLines={1}>{title}</Button.Label>
-    </Button>
-  );
-}
-
-function MiniButton({ title, onPress }: { title: string; onPress: () => void }) {
-  return (
-    <Button size="sm" variant={title === '拒绝' ? 'danger-soft' : 'secondary'} onPress={onPress} className="rounded-md">
-      <Button.Label>{title}</Button.Label>
-    </Button>
-  );
-}
-
-function MenuItem({
-  title,
-  onPress,
-  close,
-  danger = false,
-}: {
-  title: string;
-  onPress: () => void;
-  close: () => void;
-  danger?: boolean;
-}) {
-  return (
-    <Button
-      variant={danger ? 'danger-soft' : 'ghost'}
-      size="lg"
-      onPress={() => {
-        close();
-        onPress();
-      }}
-      className="min-h-12 justify-start rounded-lg"
-    >
-      <Button.Label className={danger ? 'text-danger-soft-foreground' : undefined}>{title}</Button.Label>
-    </Button>
-  );
-}
-
-function Diagnostic({ label, value }: { label: string; value: string }) {
-  return (
-    <Surface variant="secondary" className="min-h-12 flex-row items-center justify-between gap-3 rounded-lg px-3 py-2">
-      <HeroText className="text-xs font-semibold text-muted">{label}</HeroText>
-      <HeroText className="min-w-0 flex-1 text-right text-sm font-medium text-foreground" numberOfLines={1}>
-        {value}
-      </HeroText>
-    </Surface>
-  );
-}
-
-function Field({
-  label,
-  value,
-  onChangeText,
-  onBlur,
-  placeholder,
-  multiline = false,
-  editable = true,
-  secureTextEntry = false,
-  inputStyle,
-}: {
-  label: string;
-  value: string;
-  onChangeText: (value: string) => void;
-  onBlur?: () => void;
-  placeholder?: string;
-  multiline?: boolean;
-  editable?: boolean;
-  secureTextEntry?: boolean;
-  inputStyle?: StyleProp<TextStyle>;
-}) {
-  return (
-    <TextField className="gap-2">
-      <Label>{label}</Label>
-      <Input
-        value={value}
-        onChangeText={onChangeText}
-        onBlur={onBlur}
-        placeholder={placeholder}
-        className={multiline ? 'min-h-24 items-start rounded-lg' : 'min-h-11 rounded-lg'}
-        style={[multiline && styles.inputMultiline, inputStyle]}
-        multiline={multiline}
-        isDisabled={!editable}
-        secureTextEntry={secureTextEntry}
-        autoCapitalize="none"
-        autoCorrect={false}
-        textAlignVertical={multiline ? 'top' : 'center'}
-      />
-    </TextField>
-  );
-}
-
-function PathField({
-  label,
-  value,
-  onChangeText,
-  onBlur,
-  placeholder,
-  editable = true,
-  onBrowse,
-}: {
-  label: string;
-  value: string;
-  onChangeText: (value: string) => void;
-  onBlur?: () => void;
-  placeholder?: string;
-  editable?: boolean;
-  onBrowse: () => void;
-}) {
-  return (
-    <TextField className="gap-2">
-      <Label>{label}</Label>
-      <View style={styles.pathInputRow}>
-        <Input
-          value={value}
-          onChangeText={onChangeText}
-          onBlur={onBlur}
-          placeholder={placeholder}
-          className="min-h-11 flex-1 rounded-lg"
-          isDisabled={!editable}
-          autoCapitalize="none"
-          autoCorrect={false}
-          textAlignVertical="center"
-        />
-        <Button
-          size="md"
-          variant="secondary"
-          isIconOnly
-          isDisabled={!editable}
-          onPress={onBrowse}
-          className="min-h-11 w-11 rounded-lg"
-        >
-          <StyledIonicons name="folder-open-outline" size={18} className="text-foreground" />
-        </Button>
-      </View>
-    </TextField>
-  );
-}
-
-const styles = StyleSheet.create({
-  appRoot: {
-    flex: 1,
-  },
-  root: {
-    flex: 1,
-    backgroundColor: '#f4f6f8',
-  },
-  screenBackground: {
-    backgroundColor: '#f4f6f8',
-  },
-  chatRoot: {
-    flex: 1,
-    width: '100%',
-    alignSelf: 'stretch',
-    backgroundColor: '#f4f6f8',
-  },
-  loadingScreen: {
-    flex: 1,
-    backgroundColor: '#17202a',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 24,
-  },
-  loadingTitle: {
-    color: '#ffffff',
-    fontSize: 30,
-    fontWeight: '800',
-    marginBottom: 8,
-  },
-  loadingText: {
-    color: '#b9c3cc',
-    fontSize: 15,
-  },
-  headerTitle: {
-    color: '#17202a',
-    fontSize: 17,
-    fontWeight: '800',
-  },
-  conversationHeaderTitle: {
-    width: 230,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  conversationHeaderName: {
-    maxWidth: 230,
-    color: '#17202a',
-    fontSize: 15,
-    fontWeight: '800',
-  },
-  conversationHeaderStatusRow: {
-    maxWidth: 230,
-    marginTop: 3,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 4,
-  },
-  headerStatusChip: {
-    maxWidth: 108,
-    minHeight: 18,
-    borderRadius: 6,
-    backgroundColor: '#eef0f2',
-    paddingHorizontal: 6,
-    justifyContent: 'center',
-  },
-  headerStatusChipAccent: {
-    backgroundColor: '#dcefeb',
-  },
-  headerStatusChipMuted: {
-    backgroundColor: '#eef0f2',
-  },
-  headerStatusText: {
-    color: '#52606b',
-    fontSize: 10,
-    fontWeight: '800',
-  },
-  headerActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  profileRail: {
-    gap: 8,
-    paddingVertical: 2,
-  },
-  headerIconButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  headerIconButtonPressed: {
-    backgroundColor: '#eef0f2',
-    opacity: 0.8,
-  },
-  headerIconText: {
-    color: '#17202a',
-    fontSize: 16,
-    fontWeight: '800',
-  },
-  listContent: {
-    paddingVertical: 10,
-    paddingBottom: 28,
-  },
-  statusRow: {
-    marginHorizontal: 16,
-    marginVertical: 8,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  statusLabel: {
-    color: '#17202a',
-    fontSize: 24,
-    fontWeight: '800',
-  },
-  statusPill: {
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    borderWidth: 1,
-  },
-  statusOpen: {
-    backgroundColor: '#dcf7ea',
-    borderColor: '#65b98d',
-  },
-  statusMuted: {
-    backgroundColor: '#eef0f2',
-    borderColor: '#ccd1d6',
-  },
-  statusText: {
-    color: '#17202a',
-    fontSize: 11,
-    fontWeight: '800',
-    textTransform: 'uppercase',
-  },
-  listItem: {
-    minHeight: 72,
-    backgroundColor: '#ffffff',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#e7ecef',
-  },
-  listItemActive: {
-    backgroundColor: '#edf5ff',
-    borderBottomColor: '#bed7f0',
-  },
-  listItemRunning: {
-    backgroundColor: '#f0fbf5',
-    borderBottomColor: '#bfe8cf',
-  },
-  itemAvatar: {
-    width: 46,
-    height: 46,
-    borderRadius: 8,
-    backgroundColor: '#17202a',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  itemAvatarText: {
-    color: '#ffffff',
-    fontSize: 17,
-    fontWeight: '800',
-  },
-  conversationAvatar: {
-    width: 46,
-    height: 46,
-    borderRadius: 8,
-    backgroundColor: '#e1ebea',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  conversationAvatarActive: {
-    backgroundColor: '#19a463',
-  },
-  conversationAvatarText: {
-    color: '#244641',
-    fontSize: 15,
-    fontWeight: '800',
-  },
-  conversationAvatarTextActive: {
-    color: '#ffffff',
-  },
-  itemMain: {
-    flex: 1,
-    minWidth: 0,
-  },
-  itemHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    gap: 8,
-  },
-  itemTitle: {
-    flex: 1,
-    color: '#17202a',
-    fontSize: 16,
-    fontWeight: '800',
-    minWidth: 0,
-  },
-  itemTitleActive: {
-    color: '#168451',
-  },
-  itemTag: {
-    color: '#7a8391',
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  itemTagActive: {
-    color: '#168451',
-  },
-  itemBody: {
-    color: '#66717c',
-    fontSize: 13,
-    lineHeight: 18,
-    marginTop: 4,
-  },
-  workspaceSummary: {
-    backgroundColor: '#ffffff',
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    borderBottomWidth: 1,
-    borderBottomColor: '#e7ecef',
-    marginBottom: 8,
-  },
-  summaryTitle: {
-    color: '#17202a',
-    fontSize: 18,
-    fontWeight: '800',
-  },
-  summaryPath: {
-    color: '#66717c',
-    fontSize: 13,
-    lineHeight: 18,
-    marginTop: 4,
-  },
-  threadToolbar: {
-    marginTop: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 10,
-  },
-  threadToolbarText: {
-    flex: 1,
-    color: '#52606d',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  centerScreen: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 24,
-  },
-  emptyState: {
-    color: '#66717c',
-    fontSize: 14,
-    lineHeight: 20,
-    paddingHorizontal: 16,
-    paddingVertical: 18,
-  },
-  modalBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(23, 32, 42, 0.32)',
-    justifyContent: 'flex-end',
-  },
-  modalSheet: {
-    backgroundColor: '#ffffff',
-    padding: 18,
-    paddingBottom: 28,
-    borderTopLeftRadius: 8,
-    borderTopRightRadius: 8,
-    gap: 14,
-  },
-  promptSheet: {
-    backgroundColor: '#ffffff',
-    marginHorizontal: 18,
-    borderRadius: 8,
-    padding: 18,
-    gap: 14,
-  },
-  modelPickerSheet: {
-    maxHeight: '92%',
-    backgroundColor: '#ffffff',
-    borderTopLeftRadius: 8,
-    borderTopRightRadius: 8,
-    padding: 18,
-    paddingBottom: 28,
-    gap: 14,
-  },
-  pathPickerSheet: {
-    maxHeight: '88%',
-    backgroundColor: '#ffffff',
-    borderTopLeftRadius: 8,
-    borderTopRightRadius: 8,
-    padding: 18,
-    paddingBottom: 28,
-    gap: 14,
-  },
-  skillPickerSheet: {
-    maxHeight: '92%',
-    backgroundColor: '#ffffff',
-    borderTopLeftRadius: 8,
-    borderTopRightRadius: 8,
-    padding: 18,
-    paddingBottom: 28,
-    gap: 14,
-  },
-  threadInfoSheet: {
-    maxHeight: '88%',
-    backgroundColor: '#ffffff',
-    borderTopLeftRadius: 8,
-    borderTopRightRadius: 8,
-    padding: 18,
-    paddingBottom: 28,
-    gap: 14,
-  },
-  threadInfoScroll: {
-    maxHeight: 420,
-  },
-  threadInfoContent: {
-    gap: 12,
-    paddingBottom: 2,
-  },
-  threadInfoText: {
-    color: '#17202a',
-    fontSize: 13,
-    lineHeight: 19,
-    fontFamily: Platform.select({
-      ios: 'Menlo',
-      android: 'monospace',
-      default: 'monospace',
-    }),
-  },
-  threadRawBlock: {
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#d8e0e7',
-    backgroundColor: '#f7f9fa',
-    padding: 10,
-    gap: 8,
-  },
-  threadRawTitle: {
-    color: '#66717c',
-    fontSize: 11,
-    fontWeight: '800',
-    textTransform: 'uppercase',
-  },
-  threadRawText: {
-    color: '#26323d',
-    fontSize: 12,
-    lineHeight: 17,
-    fontFamily: Platform.select({
-      ios: 'Menlo',
-      android: 'monospace',
-      default: 'monospace',
-    }),
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  modalTitle: {
-    color: '#17202a',
-    fontSize: 18,
-    fontWeight: '800',
-  },
-  modalClose: {
-    color: '#52606d',
-    fontSize: 14,
-    fontWeight: '800',
-  },
-  pathInputRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  pathPickerSubtitle: {
-    color: '#66717c',
-    fontSize: 12,
-    fontWeight: '700',
-    marginTop: 3,
-    maxWidth: 260,
-  },
-  pathPickerCurrent: {
-    color: '#17202a',
-    fontSize: 13,
-    fontWeight: '700',
-    lineHeight: 18,
-  },
-  pathPickerLoading: {
-    minHeight: 36,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  pathPickerStatus: {
-    color: '#52606d',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  pathPickerList: {
-    maxHeight: 380,
-  },
-  pathPickerListContent: {
-    gap: 8,
-    paddingBottom: 4,
-  },
-  pathPickerEmpty: {
-    color: '#66717c',
-    fontSize: 13,
-    fontWeight: '700',
-    paddingVertical: 12,
-    textAlign: 'center',
-  },
-  pathDirectoryItem: {
-    minHeight: 58,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#d8e0e7',
-    backgroundColor: '#f7f9fa',
-    paddingHorizontal: 12,
-    paddingVertical: 9,
-  },
-  pathDirectoryText: {
-    flex: 1,
-    minWidth: 0,
-  },
-  pathDirectoryName: {
-    color: '#17202a',
-    fontSize: 14,
-    fontWeight: '800',
-  },
-  pathDirectoryPath: {
-    color: '#66717c',
-    fontSize: 11,
-    fontWeight: '600',
-    marginTop: 3,
-  },
-  scannerScreen: {
-    flex: 1,
-    backgroundColor: '#111820',
-  },
-  scannerCamera: {
-    flex: 1,
-  },
-  scannerFooter: {
-    backgroundColor: '#ffffff',
-    padding: 18,
-    gap: 12,
-  },
-  scannerTitle: {
-    color: '#17202a',
-    fontSize: 16,
-    fontWeight: '800',
-  },
-  scannerStatus: {
-    color: '#52606d',
-    fontSize: 13,
-    fontWeight: '600',
-    lineHeight: 18,
-  },
-  pageContent: {
-    padding: 18,
-    paddingBottom: 28,
-    gap: 24,
-  },
-  section: {
-    gap: 12,
-  },
-  sectionTitle: {
-    color: '#17202a',
-    fontSize: 18,
-    fontWeight: '800',
-    letterSpacing: 0,
-  },
-  commandPageHeader: {
-    gap: 6,
-  },
-  commandPageTitle: {
-    color: '#17202a',
-    fontSize: 24,
-    fontWeight: '800',
-    letterSpacing: 0,
-  },
-  commandPageSubtitle: {
-    color: '#66717c',
-    fontSize: 13,
-    lineHeight: 18,
-    fontWeight: '700',
-  },
-  commandDetailCommand: {
-    alignSelf: 'flex-start',
-    color: '#17202a',
-    fontSize: 13,
-    fontWeight: '800',
-    backgroundColor: '#edf0f2',
-    borderWidth: 1,
-    borderColor: '#d8e0e7',
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  commandDetailCard: {
-    backgroundColor: '#ffffff',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#d8e0e7',
-    padding: 14,
-    gap: 12,
-  },
-  commandDetailLabel: {
-    color: '#66717c',
-    fontSize: 12,
-    fontWeight: '800',
-  },
-  commandDetailValue: {
-    color: '#17202a',
-    fontSize: 16,
-    fontWeight: '800',
-  },
-  commandDetailHint: {
-    color: '#66717c',
-    fontSize: 12,
-    lineHeight: 17,
-    fontWeight: '600',
-  },
-  commandChoiceItem: {
-    minHeight: 72,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#d8e0e7',
-    backgroundColor: '#f7f9fa',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-  },
-  commandQuickPanel: {
-    backgroundColor: '#ffffff',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#d8e0e7',
-    padding: 12,
-    gap: 12,
-  },
-  commandActionGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  commandSection: {
-    gap: 10,
-  },
-  commandSectionTitle: {
-    color: '#17202a',
-    fontSize: 15,
-    fontWeight: '800',
-    letterSpacing: 0,
-  },
-  commandList: {
-    backgroundColor: '#ffffff',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#d8e0e7',
-    overflow: 'hidden',
-  },
-  commandListItem: {
-    minHeight: 58,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#e7ecef',
-  },
-  commandListText: {
-    flex: 1,
-    minWidth: 0,
-    gap: 3,
-  },
-  commandName: {
-    color: '#17202a',
-    fontSize: 14,
-    fontWeight: '800',
-  },
-  commandDescription: {
-    color: '#66717c',
-    fontSize: 12,
-    lineHeight: 16,
-    fontWeight: '600',
-  },
-  diffToolbar: {
-    minHeight: 62,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#d8e0e7',
-    backgroundColor: '#ffffff',
-  },
-  diffToolbarText: {
-    flex: 1,
-    minWidth: 0,
-    gap: 3,
-  },
-  diffTitle: {
-    color: '#17202a',
-    fontSize: 15,
-    fontWeight: '800',
-  },
-  diffSubtitle: {
-    color: '#66717c',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  diffScroll: {
-    flex: 1,
-  },
-  diffContent: {
-    padding: 14,
-    paddingBottom: 28,
-  },
-  diffText: {
-    color: '#17202a',
-    fontSize: 12,
-    lineHeight: 17,
-    fontFamily: Platform.select({
-      ios: 'Menlo',
-      android: 'monospace',
-      default: 'monospace',
-    }),
-  },
-  diffEmptyState: {
-    minHeight: 180,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 10,
-    padding: 20,
-  },
-  diffEmptyTitle: {
-    color: '#17202a',
-    fontSize: 15,
-    fontWeight: '800',
-    textAlign: 'center',
-  },
-  diffEmptyText: {
-    color: '#66717c',
-    fontSize: 13,
-    lineHeight: 18,
-    fontWeight: '600',
-    textAlign: 'center',
-  },
-  terminalPageContent: {
-    padding: 14,
-    paddingBottom: 24,
-    gap: 14,
-  },
-  terminalHeaderBand: {
-    minHeight: 76,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    backgroundColor: '#ffffff',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#d8e0e7',
-    padding: 14,
-  },
-  terminalHeaderText: {
-    flex: 1,
-    minWidth: 0,
-    gap: 4,
-  },
-  terminalTitle: {
-    color: '#17202a',
-    fontSize: 17,
-    fontWeight: '800',
-  },
-  terminalSubtitle: {
-    color: '#66717c',
-    fontSize: 12,
-    lineHeight: 17,
-    fontWeight: '700',
-  },
-  terminalStatusBadge: {
-    minHeight: 30,
-    minWidth: 70,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 8,
-    borderWidth: 1,
-    paddingHorizontal: 9,
-  },
-  terminalStatusRunning: {
-    backgroundColor: '#dcf7ea',
-    borderColor: '#65b98d',
-  },
-  terminalStatusError: {
-    backgroundColor: '#fff1f1',
-    borderColor: '#d17979',
-  },
-  terminalStatusIdle: {
-    backgroundColor: '#eef0f2',
-    borderColor: '#ccd1d6',
-  },
-  terminalStatusText: {
-    color: '#17202a',
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  terminalControlRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  terminalSizeRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    gap: 10,
-  },
-  terminalSizeField: {
-    flex: 1,
-    minWidth: 0,
-  },
-  terminalMetaRow: {
-    gap: 8,
-  },
-  terminalFrame: {
-    minHeight: 340,
-    overflow: 'hidden',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#111820',
-    backgroundColor: '#111820',
-  },
-  terminalFrameHeader: {
-    minHeight: 44,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#26323d',
-    paddingHorizontal: 12,
-  },
-  terminalFrameTitle: {
-    color: '#e7edf2',
-    fontSize: 12,
-    fontWeight: '800',
-    textTransform: 'uppercase',
-  },
-  terminalFrameActions: {
-    flexDirection: 'row',
-    gap: 6,
-  },
-  terminalOutputScroll: {
-    height: 300,
-  },
-  terminalOutputContent: {
-    padding: 12,
-    paddingBottom: 18,
-  },
-  terminalOutputText: {
-    color: '#d7dde3',
-    fontSize: 12,
-    lineHeight: 17,
-    fontFamily: Platform.select({
-      ios: 'Menlo',
-      android: 'monospace',
-      default: 'monospace',
-    }),
-  },
-  terminalOutputInput: {
-    color: '#8bd4a8',
-  },
-  terminalOutputError: {
-    color: '#ff9a9a',
-  },
-  terminalOutputSystem: {
-    color: '#9aa7b3',
-  },
-  terminalInputBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    borderTopWidth: 1,
-    borderTopColor: '#d8e0e7',
-    backgroundColor: '#ffffff',
-    paddingHorizontal: 14,
-    paddingTop: 12,
-  },
-  terminalCommandInput: {
-    flex: 1,
-    minHeight: 42,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#d7dce0',
-    backgroundColor: '#ffffff',
-    color: '#17202a',
-    paddingHorizontal: 12,
-    paddingVertical: 9,
-    fontSize: 14,
-    fontFamily: Platform.select({
-      ios: 'Menlo',
-      android: 'monospace',
-      default: 'monospace',
-    }),
-  },
-  experimentalSummary: {
-    minHeight: 92,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    backgroundColor: '#ffffff',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#d8e0e7',
-    padding: 14,
-  },
-  experimentalSummaryText: {
-    flex: 1,
-    minWidth: 0,
-    gap: 5,
-  },
-  experimentalSummaryTitle: {
-    color: '#17202a',
-    fontSize: 16,
-    fontWeight: '800',
-  },
-  experimentalSummaryBody: {
-    color: '#66717c',
-    fontSize: 12,
-    lineHeight: 17,
-    fontWeight: '600',
-  },
-  experimentalFeatureItem: {
-    minHeight: 108,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#e7ecef',
-  },
-  experimentalFeatureText: {
-    flex: 1,
-    minWidth: 0,
-    gap: 5,
-  },
-  experimentalFeatureHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  experimentalFeatureTitle: {
-    flex: 1,
-    minWidth: 0,
-    color: '#17202a',
-    fontSize: 14,
-    fontWeight: '800',
-  },
-  experimentalFeatureScope: {
-    maxWidth: 108,
-    color: '#66717c',
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  experimentalFeatureDescription: {
-    color: '#66717c',
-    fontSize: 12,
-    lineHeight: 17,
-    fontWeight: '600',
-  },
-  experimentalFeatureEnabled: {
-    color: '#168451',
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  experimentalFeatureDisabled: {
-    color: '#87909a',
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  formBlock: {
-    backgroundColor: '#ffffff',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#d8e0e7',
-    padding: 14,
-    gap: 12,
-  },
-  encryptionBlock: {
-    gap: 10,
-  },
-  connectionCard: {
-    borderRadius: 8,
-    borderWidth: 1,
-    padding: 12,
-    gap: 10,
-  },
-  connectionCardOnline: {
-    backgroundColor: '#f0fbf5',
-    borderColor: '#65b98d',
-  },
-  connectionCardChecking: {
-    backgroundColor: '#fff8e6',
-    borderColor: '#d6a83d',
-  },
-  connectionCardOffline: {
-    backgroundColor: '#fff1f1',
-    borderColor: '#d17979',
-  },
-  connectionCardIdle: {
-    backgroundColor: '#f7f9fa',
-    borderColor: '#d8e0e7',
-  },
-  connectionHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  connectionDot: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-  },
-  connectionDotOnline: {
-    backgroundColor: '#19a463',
-  },
-  connectionDotChecking: {
-    backgroundColor: '#d89b19',
-  },
-  connectionDotOffline: {
-    backgroundColor: '#c75757',
-  },
-  connectionDotIdle: {
-    backgroundColor: '#9aa3ad',
-  },
-  connectionSummary: {
-    flex: 1,
-    minWidth: 0,
-  },
-  connectionTitle: {
-    color: '#17202a',
-    fontSize: 16,
-    fontWeight: '800',
-  },
-  connectionSubtitle: {
-    marginTop: 2,
-    color: '#52606b',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  connectionLatency: {
-    color: '#17202a',
-    fontSize: 13,
-    fontWeight: '800',
-  },
-  connectionMetaRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-  },
-  connectionMeta: {
-    color: '#66717c',
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  connectionErrorText: {
-    color: '#8a2f2f',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  field: {
-    gap: 6,
-  },
-  fieldLabel: {
-    color: '#66717c',
-    fontSize: 12,
-    fontWeight: '800',
-    letterSpacing: 0,
-  },
-  input: {
-    backgroundColor: '#ffffff',
-    color: '#17202a',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#d7dce0',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 14,
-    minHeight: 42,
-  },
-  inputMultiline: {
-    minHeight: 110,
-    textAlignVertical: 'top',
-  },
-  encryptionKeyInput: {
-    height: 156,
-    fontFamily: Platform.select({
-      ios: 'Menlo',
-      android: 'monospace',
-      default: 'monospace',
-    }),
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  modelControlBlock: {
-    gap: 10,
-  },
-  modelControlHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 10,
-  },
-  modelControlTitleBlock: {
-    flex: 1,
-    minWidth: 0,
-  },
-  modelControlCurrent: {
-    marginTop: 4,
-    color: '#17202a',
-    fontSize: 14,
-    fontWeight: '800',
-  },
-  modelPickerToolbar: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    alignItems: 'center',
-    gap: 10,
-  },
-  modelPickerSubtitle: {
-    marginTop: 4,
-    color: '#66717c',
-    fontSize: 12,
-    fontWeight: '800',
-  },
-  modelPickerList: {
-    maxHeight: 260,
-  },
-  modelPickerListContent: {
-    gap: 8,
-    paddingBottom: 2,
-  },
-  modelOption: {
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#d8e0e7',
-    backgroundColor: '#ffffff',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    gap: 5,
-  },
-  skillOption: {
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#d8e0e7',
-    backgroundColor: '#ffffff',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 10,
-  },
-  skillOptionActive: {
-    borderColor: '#19a463',
-    backgroundColor: '#f0fbf5',
-  },
-  skillOptionDisabled: {
-    opacity: 0.48,
-  },
-  skillOptionIcon: {
-    width: 30,
-    height: 30,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#d8e0e7',
-    backgroundColor: '#f7f9fa',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 1,
-  },
-  skillOptionIconActive: {
-    borderColor: '#19a463',
-    backgroundColor: '#19a463',
-  },
-  modelOptionBody: {
-    flex: 1,
-    minWidth: 0,
-    gap: 5,
-  },
-  modelOptionActive: {
-    borderColor: '#19a463',
-    backgroundColor: '#f0fbf5',
-  },
-  modelOptionHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  modelOptionTitle: {
-    flex: 1,
-    minWidth: 0,
-    color: '#17202a',
-    fontSize: 14,
-    fontWeight: '800',
-  },
-  modelOptionTitleActive: {
-    color: '#168451',
-  },
-  modelDefaultBadge: {
-    color: '#168451',
-    fontSize: 10,
-    fontWeight: '800',
-    textTransform: 'uppercase',
-  },
-  modelOptionDescription: {
-    color: '#66717c',
-    fontSize: 12,
-    lineHeight: 17,
-    fontWeight: '600',
-  },
-  skillOptionPath: {
-    color: '#7a8391',
-    fontSize: 11,
-    lineHeight: 15,
-    fontWeight: '700',
-  },
-  skillPickerStatus: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 10,
-    paddingVertical: 18,
-  },
-  reasoningBlock: {
-    gap: 10,
-  },
-  reasoningDefaultText: {
-    color: '#66717c',
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  reasoningGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  reasoningOption: {
-    width: '48%',
-    minHeight: 74,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#d8e0e7',
-    backgroundColor: '#ffffff',
-    paddingHorizontal: 10,
-    paddingVertical: 9,
-    gap: 4,
-  },
-  reasoningOptionActive: {
-    borderColor: '#17202a',
-    backgroundColor: '#17202a',
-  },
-  reasoningOptionTitle: {
-    color: '#17202a',
-    fontSize: 13,
-    fontWeight: '800',
-  },
-  reasoningOptionTitleActive: {
-    color: '#ffffff',
-  },
-  reasoningOptionDescription: {
-    color: '#66717c',
-    fontSize: 11,
-    lineHeight: 15,
-    fontWeight: '600',
-  },
-  reasoningOptionDescriptionActive: {
-    color: '#d7dde3',
-  },
-  inputDisabled: {
-    opacity: 0.7,
-  },
-  row: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-  },
-  actionButton: {
-    backgroundColor: '#17202a',
-    borderRadius: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    minHeight: 40,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  actionButtonGhost: {
-    backgroundColor: '#ffffff',
-    borderWidth: 1,
-    borderColor: '#cfd5da',
-  },
-  actionButtonDanger: {
-    backgroundColor: '#ffffff',
-    borderWidth: 1,
-    borderColor: '#c75757',
-  },
-  actionButtonDisabled: {
-    opacity: 0.6,
-  },
-  actionButtonText: {
-    color: '#ffffff',
-    fontWeight: '800',
-    fontSize: 13,
-  },
-  actionButtonTextGhost: {
-    color: '#17202a',
-  },
-  actionButtonTextDanger: {
-    color: '#a23b3b',
-  },
-  miniButton: {
-    backgroundColor: '#ffffff',
-    borderWidth: 1,
-    borderColor: '#cfd5da',
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-  },
-  miniButtonText: {
-    color: '#26323d',
-    fontSize: 12,
-    fontWeight: '800',
-  },
-  inlineError: {
-    color: '#a23b3b',
-    fontSize: 12,
-    paddingHorizontal: 16,
-    paddingTop: 8,
-  },
-  warningText: {
-    color: '#a23b3b',
-    fontSize: 12,
-    lineHeight: 17,
-    fontWeight: '700',
-  },
-  messageArea: {
-    flex: 1,
-    position: 'relative',
-  },
-  messageScroller: {
-    flex: 1,
-  },
-  messageList: {
-    paddingHorizontal: 14,
-    paddingTop: 12,
-    paddingBottom: 16,
-    gap: 10,
-  },
-  jumpToLatestButton: {
-    position: 'absolute',
-    alignSelf: 'center',
-    bottom: 14,
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: 'rgba(255, 255, 255, 0.72)',
-    borderWidth: 1,
-    borderColor: 'rgba(38, 50, 61, 0.16)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  jumpToLatestText: {
-    color: '#26323d',
-    fontSize: 24,
-    fontWeight: '800',
-    lineHeight: 28,
-  },
-  bubbleRow: {
-    flexDirection: 'row',
-    width: '100%',
-  },
-  bubbleRowOutgoing: {
-    justifyContent: 'flex-end',
-  },
-  bubblePressable: {
-    maxWidth: '88%',
-    minWidth: 96,
-    flexShrink: 1,
-  },
-  bubble: {
-    width: '100%',
-    backgroundColor: '#ffffff',
-    borderWidth: 1,
-    borderColor: '#d8e0e7',
-    borderRadius: 8,
-    padding: 12,
-    gap: 6,
-  },
-  progressPressable: {
-    maxWidth: '88%',
-  },
-  progressBubble: {
-    maxWidth: '100%',
-  },
-  executionGroupShell: {
-    maxWidth: '88%',
-    backgroundColor: '#edf0f2',
-    borderWidth: 1,
-    borderColor: '#d5dade',
-    borderRadius: 8,
-    padding: 10,
-    gap: 8,
-  },
-  executionGroupHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  executionGroupSummary: {
-    flex: 1,
-    color: '#26323d',
-    fontSize: 13,
-    lineHeight: 18,
-    fontWeight: '700',
-  },
-  executionGroupItems: {
-    gap: 8,
-  },
-  bubbleOutgoing: {
-    backgroundColor: '#17202a',
-    borderColor: '#17202a',
-  },
-  bubbleSystem: {
-    backgroundColor: '#edf0f2',
-    borderColor: '#d5dade',
-  },
-  bubbleMetaRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    flexWrap: 'nowrap',
-  },
-  bubbleTitle: {
-    flex: 1,
-    color: '#17202a',
-    fontSize: 12,
-    fontWeight: '800',
-  },
-  bubbleTitleOutgoing: {
-    color: '#ffffff',
-  },
-  hiddenBubbleTitleSpacer: {
-    flex: 1,
-  },
-  progressChevron: {
-    width: 12,
-    color: '#52606d',
-    fontSize: 16,
-    fontWeight: '800',
-    lineHeight: 18,
-  },
-  bubbleTime: {
-    color: '#87909a',
-    fontSize: 11,
-    fontWeight: '700',
-    flexShrink: 0,
-  },
-  bubbleTimeOutgoing: {
-    color: '#c5ccd3',
-  },
-  bubbleText: {
-    color: '#26323d',
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  bubbleTextOutgoing: {
-    color: '#ffffff',
-  },
-  collapsedProgressText: {
-    color: '#6f7882',
-    fontSize: 12,
-    lineHeight: 17,
-  },
-  approvalActions: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    paddingTop: 4,
-  },
-  composer: {
-    width: '100%',
-    alignSelf: 'stretch',
-    paddingHorizontal: 12,
-    paddingTop: 10,
-    paddingBottom: 12,
-    borderTopWidth: 1,
-    borderTopColor: '#d8e0e7',
-    backgroundColor: '#ffffff',
-    gap: 10,
-  },
-  composerControlRail: {
-    gap: 8,
-    paddingBottom: 2,
-  },
-  composerSticky: {
-    width: '100%',
-    alignSelf: 'stretch',
-  },
-  attachmentRail: {
-    gap: 8,
-    paddingBottom: 2,
-  },
-  attachmentChip: {
-    width: 210,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#d7dce0',
-    backgroundColor: '#f7f9fa',
-    padding: 8,
-  },
-  skillComposerChip: {
-    width: 210,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#bfe8cf',
-    backgroundColor: '#f0fbf5',
-    padding: 8,
-  },
-  skillComposerIcon: {
-    width: 38,
-    height: 38,
-    borderRadius: 6,
-    backgroundColor: '#dff5e8',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  attachmentPreview: {
-    width: 38,
-    height: 38,
-    borderRadius: 6,
-    backgroundColor: '#e9edf1',
-    overflow: 'hidden',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  attachmentPreviewImage: {
-    width: '100%',
-    height: '100%',
-  },
-  attachmentPreviewText: {
-    color: '#52606d',
-    fontSize: 10,
-    fontWeight: '800',
-  },
-  attachmentChipMain: {
-    flex: 1,
-    minWidth: 0,
-    gap: 2,
-  },
-  attachmentChipName: {
-    color: '#17202a',
-    fontSize: 12,
-    fontWeight: '800',
-  },
-  attachmentChipMeta: {
-    color: '#66717c',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  attachmentRemoveButton: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    backgroundColor: '#ffffff',
-    borderWidth: 1,
-    borderColor: '#cfd5da',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  attachmentRemoveText: {
-    color: '#52606d',
-    fontSize: 16,
-    fontWeight: '800',
-    lineHeight: 16,
-  },
-  composerInputRow: {
-    width: '100%',
-    minHeight: 40,
-    flexDirection: 'row',
-    flexWrap: 'nowrap',
-    alignItems: 'flex-end',
-    gap: 8,
-  },
-  attachmentButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#d7dce0',
-    backgroundColor: '#ffffff',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  attachmentButtonText: {
-    color: '#17202a',
-    fontSize: 18,
-    fontWeight: '800',
-    lineHeight: 20,
-  },
-  attachmentMenuSheet: {
-    width: 240,
-    backgroundColor: '#ffffff',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#d8e0e7',
-    overflow: 'hidden',
-  },
-  slashPanel: {
-    width: '100%',
-    backgroundColor: '#f7f9fa',
-    borderWidth: 1,
-    borderColor: '#d8e0e7',
-    borderRadius: 8,
-    overflow: 'hidden',
-  },
-  slashItem: {
-    minHeight: 44,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#e7ecef',
-    gap: 2,
-  },
-  slashCommand: {
-    color: '#17202a',
-    fontSize: 13,
-    fontWeight: '800',
-  },
-  slashDescription: {
-    color: '#66717c',
-    fontSize: 12,
-  },
-  slashSuggestionScroll: {
-    maxHeight: 320,
-  },
-  slashSuggestionContent: {
-    paddingVertical: 2,
-  },
-  mentionPanel: {
-    width: '100%',
-    backgroundColor: '#f7f9fa',
-    borderWidth: 1,
-    borderColor: '#d8e0e7',
-    borderRadius: 8,
-    overflow: 'hidden',
-  },
-  mentionItem: {
-    minHeight: 50,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#e7ecef',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  mentionIcon: {
-    width: 30,
-    height: 30,
-    borderRadius: 8,
-    backgroundColor: '#e1ebea',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  mentionIconText: {
-    color: '#244641',
-    fontSize: 16,
-    fontWeight: '800',
-  },
-  mentionMain: {
-    flex: 1,
-    minWidth: 0,
-  },
-  mentionTitle: {
-    color: '#17202a',
-    fontSize: 13,
-    fontWeight: '800',
-  },
-  mentionDescription: {
-    color: '#66717c',
-    fontSize: 12,
-    marginTop: 2,
-  },
-  composerInput: {
-    flex: 1,
-    flexGrow: 1,
-    flexShrink: 1,
-    minWidth: 0,
-    maxHeight: 96,
-    minHeight: 40,
-    backgroundColor: '#ffffff',
-    borderWidth: 1,
-    borderColor: '#d7dce0',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    color: '#17202a',
-    fontSize: 14,
-    lineHeight: 20,
-    textAlignVertical: 'top',
-  },
-  composerActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexShrink: 0,
-    gap: 8,
-  },
-  sendButton: {
-    width: 40,
-    height: 40,
-    backgroundColor: '#17202a',
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  sendButtonText: {
-    color: '#ffffff',
-    fontSize: 22,
-    fontWeight: '800',
-    lineHeight: 24,
-  },
-  stopButton: {
-    width: 40,
-    height: 40,
-    backgroundColor: '#ffffff',
-    borderWidth: 1,
-    borderColor: '#c75757',
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  stopButtonText: {
-    color: '#a23b3b',
-    fontSize: 16,
-    fontWeight: '800',
-    lineHeight: 18,
-  },
-  menuBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(23, 32, 42, 0.24)',
-    alignItems: 'flex-end',
-    paddingTop: 72,
-    paddingRight: 12,
-  },
-  menuSheet: {
-    width: 220,
-    backgroundColor: '#ffffff',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#d8e0e7',
-    overflow: 'hidden',
-  },
-  menuScroll: {
-    maxHeight: 520,
-  },
-  menuScrollContent: {
-    gap: 4,
-    paddingBottom: 4,
-  },
-  menuTitle: {
-    color: '#17202a',
-    fontSize: 13,
-    fontWeight: '800',
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#e7ecef',
-  },
-  menuItem: {
-    minHeight: 44,
-    paddingHorizontal: 14,
-    justifyContent: 'center',
-    borderBottomWidth: 1,
-    borderBottomColor: '#eef0f2',
-  },
-  menuItemText: {
-    color: '#26323d',
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  menuDangerText: {
-    color: '#a23b3b',
-  },
-  diagnostics: {
-    backgroundColor: '#ffffff',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#d8e0e7',
-    overflow: 'hidden',
-  },
-  diagnosticRow: {
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#e7ecef',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  diagnosticLabel: {
-    width: 92,
-    color: '#66717c',
-    fontSize: 12,
-    fontWeight: '800',
-  },
-  diagnosticValue: {
-    flex: 1,
-    color: '#17202a',
-    fontSize: 13,
-  },
-  errorText: {
-    color: '#a23b3b',
-    fontSize: 13,
-    lineHeight: 18,
-  },
-});
