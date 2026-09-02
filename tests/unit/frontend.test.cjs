@@ -987,7 +987,54 @@ test('provider display names keep Cloud Code out of conversation agents', () => 
   assert.equal(v2.providerDisplayName('codex'), 'Codex CLI');
   assert.equal(v2.providerDisplayName('acp'), 'ACP');
   assert.equal(v2.providerDisplayName('claude-code'), 'Claude Code');
+  assert.equal(v2.providerDisplayName('grok-build'), 'Grok Build');
   assert.equal(Object.values(v2.PROVIDER_DISPLAY_NAMES).includes('Cloud Code'), false);
+});
+
+test('ACP permission options preserve order and exact option ids', () => {
+  const request = todex.classifyPendingRequest({
+    type: 'conversation.permission.request',
+    payload: {
+      requestId: 'perm-1',
+      permissionId: 'perm-1',
+      conversationId: 'conv-v2',
+      options: [
+        { optionId: 'reject-always', name: 'Always reject', kind: 'reject_always' },
+        { optionId: 'allow-always', name: 'Always allow', kind: 'allow_always' },
+        { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+        { optionId: 'reject-once', name: 'Reject once', kind: 'reject_once' },
+      ],
+    },
+  });
+  const options = todex.permissionOptions(request);
+  assert.deepEqual(options.map((option) => option.optionId), [
+    'reject-always', 'allow-always', 'allow-once', 'reject-once',
+  ]);
+  assert.deepEqual(todex.permissionDecision(options[1]), {
+    outcome: 'allow_always',
+    optionId: 'allow-always',
+  });
+});
+
+test('permission actions retain legacy fallback but malformed options cannot widen access', () => {
+  const legacy = todex.classifyPendingRequest({
+    type: 'conversation.permission.request',
+    payload: { requestId: 'legacy', permissionId: 'legacy' },
+  });
+  assert.deepEqual(todex.permissionActions(legacy), [true, false]);
+
+  const malformed = todex.classifyPendingRequest({
+    type: 'conversation.permission.request',
+    payload: {
+      requestId: 'malformed',
+      permissionId: 'malformed',
+      options: [
+        { optionId: 'same', name: 'Allow', kind: 'allow_always' },
+        { optionId: 'same', name: 'Reject', kind: 'reject_once' },
+      ],
+    },
+  });
+  assert.deepEqual(todex.permissionActions(malformed), [false]);
 });
 
 test('connection failure labels are Chinese and classified', () => {

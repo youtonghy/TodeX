@@ -13,7 +13,7 @@
 
 ## Overview
 
-**TodeX Mobile App** is the mobile client for the TodeX ecosystem, connecting to [`todex-agentd`](../TodeX_backend) to let developers monitor, steer, and interact with AI coding assistants (such as **Codex**, **ACP 2.0**, **Pi**, and **Claude Code**) directly from their iOS, Android, or mobile web devices.
+**TodeX Mobile App** is the mobile client for the TodeX ecosystem, connecting to [`todex-agentd`](../TodeX_backend) to let developers monitor, steer, and interact with AI coding assistants (such as **Codex**, **ACP 2.0**, **Pi**, **Claude Code**, and **Grok Build**) directly from their iOS, Android, or mobile web devices.
 
 Built with **React Native 0.86**, **Expo SDK 57**, **Uniwind (Tailwind CSS v4)**, and **HeroUI Native**, the app delivers fluid gesture navigation, in-camera QR code pairing, real-time streaming chat, interactive approval cards, and post-quantum encrypted transport.
 
@@ -30,7 +30,7 @@ Built with **React Native 0.86**, **Expo SDK 57**, **Uniwind (Tailwind CSS v4)**
     - `#` filters active Skills and MCP servers.
 - **Workspace & Conversation Lifecycle**:
   - Manage workspaces: create, rename, fork, and delete directories within the backend sandbox.
-  - Multi-turn conversation management: lock each conversation to a specific agent provider (Codex CLI, ACP profile, Pi, or Claude Code).
+  - Multi-turn conversation management: lock each conversation to a specific agent provider (Codex CLI, ACP profile, Pi, Claude Code, or Grok Build).
 - **Camera Pairing & Instant Configuration**:
   - Integrated camera QR scanner (`expo-camera`) to pair with the `todex-agentd` TUI in seconds.
   - Robust multi-frame segmented QR reconstruction to handle dense payload transfers.

@@ -13,7 +13,7 @@
 
 ## 概述
 
-**TodeX Mobile App** 是 TodeX 生态的移动端客户端应用，用于连接 [`todex-agentd`](../TodeX_backend) 后端服务。开发者可以通过手机随时随地查看、调度并掌控 AI 编程助手（如 **Codex**、**ACP 2.0**、**Pi** 和 **Claude Code**）。
+**TodeX Mobile App** 是 TodeX 生态的移动端客户端应用，用于连接 [`todex-agentd`](../TodeX_backend) 后端服务。开发者可以通过手机随时随地查看、调度并掌控 AI 编程助手（如 **Codex**、**ACP 2.0**、**Pi**、**Claude Code** 和 **Grok Build**）。
 
 应用基于 **React Native 0.86**、**Expo SDK 57**、**Uniwind (Tailwind CSS v4)** 和 **HeroUI Native** 构建，提供丝滑的手势操作体验、摄像头扫码一键配对、流式打字机聊天时间线、交互式审批卡片以及后量子传输层安全加密。
 
@@ -30,7 +30,7 @@
     - 输入 `#`：快速过滤并附加当前 Agent 启用的 Skills 和 MCP Servers。
 - **工作区与会话生命周期管理**：
   - 工作区管理：在后端授权的沙箱根目录下创建、重命名、Fork 与删除项目工作区。
-  - 多轮会话管理：会话独立保存在会话目录中，并在创建时锁定指定 Agent Provider（Codex CLI、ACP Profile、Pi、Claude Code）。
+  - 多轮会话管理：会话独立保存在会话目录中，并在创建时锁定指定 Agent Provider（Codex CLI、ACP Profile、Pi、Claude Code、Grok Build）。
 - **摄像头扫码与一键配对**：
   - 内置相机扫码器（`expo-camera`），扫描后端 TUI 终端生成的二维码即可秒级完成配对。
   - 支持多帧分片二维码重组还原算法，轻松应对高密度凭据传输。

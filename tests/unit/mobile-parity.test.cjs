@@ -239,6 +239,10 @@ test('routes workspace links and validates loopback browser targets', () => {
 
 test('returns stable provider icon metadata for known and unknown agents', () => {
   assert.equal(parity.providerIconMetadata('claude-code').id, 'claude-code');
+  assert.deepEqual(
+    parity.providerIconMetadata('grok'),
+    parity.PROVIDER_ICON_METADATA['grok-build'],
+  );
   assert.equal(parity.providerIconMetadata('my-codex-wrapper').label, 'Codex CLI');
   const unknown = parity.providerIconMetadata('custom-agent');
   assert.equal(unknown.id, 'custom-agent');

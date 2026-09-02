@@ -80,11 +80,14 @@ import {
   FALLBACK_CODEX_MODELS,
   LocalAdapterState,
   PendingRequest,
+  PermissionOption,
   ServerEvent,
   WorkspaceRecord,
   approvalResponsePayload,
   buildHttpUrl,
   classifyPendingRequest,
+  permissionDecision,
+  permissionActions,
   createRequestId,
   displayNameFromPath,
   eventId,
@@ -3798,9 +3801,9 @@ export default function App() {
     const resolved = new Set<string>();
 
     for (const event of events) {
-      if (event.type === 'codex.serverRequest.resolved') {
+      if (event.type === 'codex.serverRequest.resolved' || event.type === 'permission.resolved') {
         const data = eventPayloadData(event);
-        const resolvedId = data.requestId ?? data.request_id;
+        const resolvedId = data.requestId ?? data.request_id ?? data.permissionId;
         if (typeof resolvedId === 'string' && resolvedId) {
           resolved.add(resolvedId);
         }
@@ -4951,6 +4954,8 @@ export default function App() {
                   title: inner.title,
                   kind: inner.kind,
                   details: inner.details,
+                  options: inner.options,
+                  providerRequestId: inner.providerRequestId,
                 },
               });
             }
@@ -7675,7 +7680,7 @@ export default function App() {
   }, [appendTimeline, sendRawProtocolFrame]);
 
   const sendApprovalResponse = useCallback(
-    (accepted: boolean, request: PendingRequest) => {
+    (selection: boolean | PermissionOption, request: PendingRequest) => {
       const data = eventPayloadData(request.event);
       if (request.requestType === 'conversation.permission.request') {
         const conversationId = typeof data.conversationId === 'string' ? data.conversationId : '';
@@ -7692,7 +7697,7 @@ export default function App() {
           payload: {
             conversationId: v2Id,
             permissionId,
-            decision: { outcome: accepted ? 'allow_once' : 'reject_once' },
+            decision: permissionDecision(selection),
           },
         }));
       }
@@ -7713,7 +7718,12 @@ export default function App() {
         tenantId: workspace.tenantId,
         requestId: request.requestId,
         responseType: inferApprovalResponseType(request.requestType),
-        response: approvalResponsePayload(request, accepted),
+        response: approvalResponsePayload(
+          request,
+          typeof selection === 'boolean'
+            ? selection
+            : selection.kind === 'allow_once' || selection.kind === 'allow_always' || selection.kind === 'answer',
+        ),
       }, createRequestId('msg'), {
         workspaceId: workspace.id,
         conversationId: conversation.id,
@@ -10254,7 +10264,7 @@ function ChatScreen({
   setComposerSelection: Dispatch<SetStateAction<TextInputSelectionChangeEventData['selection']>>;
   submitChat: (conversationId: string) => void;
   stopThinking: (conversationId: string) => void;
-  sendApprovalResponse: (accepted: boolean, request: PendingRequest) => boolean;
+  sendApprovalResponse: (selection: boolean | PermissionOption, request: PendingRequest) => boolean;
   selectConversation: (workspaceId: string, conversationId: string) => void;
   attachWorkspaceConversation: (workspace: WorkspaceRecord, conversation: ConversationRecord) => boolean;
   loadNativeThreadHistory: (conversationId: string, force?: boolean) => boolean;
@@ -10871,8 +10881,8 @@ function ChatScreen({
   }, []);
 
   const handleApprovalResponse = useCallback(
-    (accepted: boolean, request: PendingRequest) => {
-      const sent = sendApprovalResponse(accepted, request);
+    (selection: boolean | PermissionOption, request: PendingRequest) => {
+      const sent = sendApprovalResponse(selection, request);
       if (sent) {
         collapseAutoExpandedRequest(request.requestId);
       }
@@ -13097,7 +13107,7 @@ function MessageBubble({
   hideTitle?: boolean;
   pendingRequest?: PendingRequest;
   onToggleProgress?: (entry: TimelineEntry, collapsed: boolean) => void;
-  onApprovalResponse?: (accepted: boolean, request: PendingRequest) => void;
+  onApprovalResponse?: (selection: boolean | PermissionOption, request: PendingRequest) => void;
   onOpenLink?: (href: string) => void;
   onFork?: () => void;
   usage?: MobileContextUsage | null;
@@ -13176,8 +13186,13 @@ function MessageBubble({
       ) : null}
       {pendingRequest ? (
         <View style={styles.approvalActions}>
-          <MiniButton title="同意" onPress={() => onApprovalResponse?.(true, pendingRequest)} />
-          <MiniButton title="拒绝" onPress={() => onApprovalResponse?.(false, pendingRequest)} />
+          {permissionActions(pendingRequest).map((option) => (
+            <MiniButton
+              key={typeof option === 'boolean' ? String(option) : option.optionId}
+              title={typeof option === 'boolean' ? (option ? '同意' : '拒绝') : option.name}
+              onPress={() => onApprovalResponse?.(option, pendingRequest)}
+            />
+          ))}
         </View>
       ) : null}
     </Surface>
@@ -13232,7 +13247,7 @@ function ExecutionGroupBubble({
   pendingRequestById: Map<string, PendingRequest>;
   onToggleGroup: (id: string, collapsed: boolean) => void;
   onToggleProgress: (entry: TimelineEntry, collapsed: boolean) => void;
-  onApprovalResponse?: (accepted: boolean, request: PendingRequest) => void;
+  onApprovalResponse?: (selection: boolean | PermissionOption, request: PendingRequest) => void;
   onOpenLink?: (href: string) => void;
 }) {
   const latestEntry = entries[entries.length - 1];

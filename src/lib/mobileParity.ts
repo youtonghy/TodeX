@@ -329,6 +329,7 @@ function providerLabel(provider: string): string {
   if (id === 'claude-code' || id.includes('claude')) return 'Claude Code';
   if (id === 'pi' || id.startsWith('pi-')) return 'Pi';
   if (id === 'acp') return 'ACP';
+  if (id === 'grok-build' || id === 'grok') return 'Grok Build';
   return provider.trim() || 'Agent';
 }
 
@@ -1038,6 +1039,15 @@ export const PROVIDER_ICON_METADATA: Readonly<Record<string, ProviderIconMetadat
     backgroundColor: '#f9e8e2',
     accessibilityLabel: 'Claude Code',
   },
+  'grok-build': {
+    id: 'grok-build',
+    label: 'Grok Build',
+    icon: 'hammer-outline',
+    iconName: 'hammer-outline',
+    color: '#3d6c8e',
+    backgroundColor: '#e5f0f6',
+    accessibilityLabel: 'Grok Build',
+  },
 });
 
 function canonicalProviderId(value: string): string {
@@ -1046,6 +1056,7 @@ function canonicalProviderId(value: string): string {
   if (id === 'codex' || id.includes('codex')) return 'codex';
   if (id === 'pi' || id.startsWith('pi-')) return 'pi';
   if (id === 'acp') return 'acp';
+  if (id === 'grok-build' || id === 'grok' || id === 'grok_build') return 'grok-build';
   return id;
 }
 

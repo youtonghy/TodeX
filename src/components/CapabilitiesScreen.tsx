@@ -31,6 +31,7 @@ const PROVIDER_LABELS: Record<ProviderKind, string> = {
   codex: 'Codex CLI',
   pi: 'Pi',
   'claude-code': 'Claude Code',
+  'grok-build': 'Grok Build',
 };
 
 function isCommonSource(source: string): boolean {

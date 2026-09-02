@@ -9,13 +9,14 @@ import { MetricsCollector, type ConnectionMetrics } from './connectionMetrics';
  */
 export const MAX_MESSAGE_SIZE = 4 * 1024 * 1024;
 
-export type ProviderKind = 'acp' | 'codex' | 'pi' | 'claude-code';
+export type ProviderKind = 'acp' | 'codex' | 'pi' | 'claude-code' | 'grok-build';
 
 export const PROVIDER_DISPLAY_NAMES: Record<ProviderKind, string> = {
   acp: 'ACP',
   codex: 'Codex CLI',
   pi: 'Pi',
   'claude-code': 'Claude Code',
+  'grok-build': 'Grok Build',
 };
 
 export function providerDisplayName(provider: ProviderKind | string, fallback?: string): string {

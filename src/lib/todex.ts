@@ -206,6 +206,72 @@ export type PendingRequest = {
   data: Record<string, unknown>;
 };
 
+export type PermissionOptionKind =
+  | 'allow_once'
+  | 'allow_always'
+  | 'reject_once'
+  | 'reject_always'
+  | 'answer';
+
+export type PermissionOption = {
+  optionId: string;
+  name: string;
+  kind: PermissionOptionKind;
+};
+
+export type PermissionDecision = {
+  outcome: PermissionOptionKind;
+  optionId?: string;
+  data?: Record<string, unknown>;
+};
+
+const PERMISSION_OPTION_KINDS = new Set<PermissionOptionKind>([
+  'allow_once',
+  'allow_always',
+  'reject_once',
+  'reject_always',
+  'answer',
+]);
+
+export function permissionOptions(request: PendingRequest): PermissionOption[] {
+  const raw = request.data.options;
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const options: PermissionOption[] = [];
+  for (const value of raw) {
+    if (!isObject(value)) return [];
+    const optionId = typeof value.optionId === 'string' ? value.optionId.trim() : '';
+    const name = typeof value.name === 'string' ? value.name.trim() : '';
+    const kind = typeof value.kind === 'string' ? value.kind : '';
+    if (!optionId || !name || seen.has(optionId) || !PERMISSION_OPTION_KINDS.has(kind as PermissionOptionKind)) {
+      return [];
+    }
+    seen.add(optionId);
+    options.push({ optionId, name, kind: kind as PermissionOptionKind });
+  }
+  return options;
+}
+
+export function permissionActions(request: PendingRequest): Array<boolean | PermissionOption> {
+  if (request.data.options === undefined) return [true, false];
+  const options = permissionOptions(request);
+  return options.length ? options : [false];
+}
+
+export function permissionDecision(
+  selection: boolean | PermissionOption,
+  data?: Record<string, unknown>,
+): PermissionDecision {
+  if (typeof selection === 'boolean') {
+    return { outcome: selection ? 'allow_once' : 'reject_once', ...(data ? { data } : {}) };
+  }
+  return {
+    outcome: selection.kind,
+    optionId: selection.optionId,
+    ...(data ? { data } : {}),
+  };
+}
+
 export type CommandContext = {
   settings: ConnectionSettings;
   workspace: WorkspaceRecord | null;
