@@ -95,7 +95,19 @@ jobs:
           java-version: "17"
 
       - name: Install dependencies
-        run: npm ci
+        env:
+          # heroui-native-pro ships its component sources via an authenticated
+          # postinstall; install with scripts disabled, fetch the Pro artifacts
+          # with the license key, then run the remaining native build scripts.
+          HEROUI_KEY: ${{ secrets.HEROUI_KEY }}
+        run: |
+          npm ci --ignore-scripts
+          if [ -z "$HEROUI_KEY" ]; then
+            echo "HEROUI_KEY secret is not configured; heroui-native-pro cannot be installed." >&2
+            exit 1
+          fi
+          npx -y hpsetup@latest "$HEROUI_KEY"
+          npm rebuild
 
       - name: Validate application
         run: |
