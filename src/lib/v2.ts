@@ -46,6 +46,7 @@ export type ProviderModelDescriptor = {
   description: string;
   isDefault: boolean;
   supportedReasoningEfforts: string[];
+  defaultReasoningEffort?: string;
   contextWindow?: number;
 };
 
