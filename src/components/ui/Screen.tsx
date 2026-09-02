@@ -57,6 +57,21 @@ export function SectionHeader({
   );
 }
 
+/**
+ * Intro row for screens whose title already lives in the navigation header:
+ * a muted description on the left and an optional chip/action on the right.
+ */
+export function ScreenIntro({ description, trailing }: { description: string; trailing?: ReactNode }) {
+  return (
+    <View className="flex-row items-center justify-between gap-3 px-1">
+      <Text type="body-sm" color="muted" className="min-w-0 flex-1 leading-5">
+        {description}
+      </Text>
+      {trailing}
+    </View>
+  );
+}
+
 /** Large page heading with optional subtitle and trailing element. */
 export function PageHeader({
   title,

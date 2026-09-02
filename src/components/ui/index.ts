@@ -1,5 +1,5 @@
 export { StyledIonicons } from './StyledIonicons';
-export { Screen, ScreenScrollView, SectionHeader, PageHeader } from './Screen';
+export { Screen, ScreenScrollView, SectionHeader, PageHeader, ScreenIntro } from './Screen';
 export { ListSection, ListRow } from './ListRow';
 export { HeaderIconButton, HeaderActions } from './HeaderIconButton';
 export { AppSheet } from './AppSheet';

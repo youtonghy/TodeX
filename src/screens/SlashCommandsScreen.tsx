@@ -19,8 +19,8 @@ import {
 import {
   ListRow,
   ListSection,
-  PageHeader,
   Screen,
+  ScreenIntro,
   ScreenScrollView,
   SectionHeader,
   StyledIonicons,
@@ -148,9 +148,8 @@ export function SlashCommandsScreen({
   return (
     <Screen>
       <ScreenScrollView>
-        <PageHeader
-          title="Slash Commands"
-          subtitle={workspace?.name || '当前工作区'}
+        <ScreenIntro
+          description={`${workspace?.name || '当前工作区'} · 点选命令直接执行或进入配置页`}
           trailing={
             <Chip size="sm" variant="soft">
               <Chip.Label>{slashCommandItems.length} commands</Chip.Label>

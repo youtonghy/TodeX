@@ -17,8 +17,8 @@ import {
   InlineNotice,
   ListRow,
   ListSection,
-  PageHeader,
   Screen,
+  ScreenIntro,
   ScreenScrollView,
   SectionHeader,
   StyledIonicons,
@@ -47,9 +47,8 @@ export function ExperimentalScreen({
   return (
     <Screen>
       <ScreenScrollView>
-        <PageHeader
-          title="Experimental"
-          subtitle={`${workspace?.name || '当前工作区'} · ${conversation?.title || '当前对话'}`}
+        <ScreenIntro
+          description={`${workspace?.name || '当前工作区'} · ${conversation?.title || '当前对话'}`}
           trailing={
             <Chip size="sm" variant="soft" color={enabledCount > 0 ? 'accent' : 'default'}>
               <Chip.Label>

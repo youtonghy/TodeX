@@ -3,7 +3,7 @@ import { RefreshControl, ScrollView, View } from 'react-native';
 import { Chip, Surface, Text } from 'heroui-native';
 import { BarChart, NumberValue, ProgressBar, TrendChip, Widget } from 'heroui-native-pro';
 
-import { EmptyStateView, ListRow, ListSection, PageHeader, Screen, ScreenScrollView, SectionHeader, StyledIonicons } from '../components/ui';
+import { EmptyStateView, ListRow, ListSection, Screen, ScreenIntro, ScreenScrollView, SectionHeader, StyledIonicons } from '../components/ui';
 
 export type UsageRecord = {
   id?: string;
@@ -209,7 +209,16 @@ export function UsageScreen({ records = [], onRefresh, refreshing = false }: Usa
   return (
     <Screen>
       <ScreenScrollView refreshControl={onRefresh ? <RefreshControl refreshing={refreshing} onRefresh={onRefresh} /> : undefined}>
-        <PageHeader title="使用统计" subtitle="按 Agent 和模型汇总收到的 token usage 事件。" />
+        <ScreenIntro
+          description="按 Agent 和模型汇总收到的 token usage 事件。"
+          trailing={
+            normalizedRecords.length > 0 ? (
+              <Chip size="sm" variant="soft" color="accent">
+                <Chip.Label>{normalizedRecords.length} 条记录</Chip.Label>
+              </Chip>
+            ) : undefined
+          }
+        />
 
         {normalizedRecords.length === 0 ? (
           <EmptyStateView icon="stats-chart-outline" title="还没有用量记录" description="与 Agent 对话后，这里会汇总每次回复的 token 用量。" />

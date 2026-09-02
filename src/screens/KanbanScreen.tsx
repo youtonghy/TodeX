@@ -5,7 +5,7 @@ import { Badge, Segment } from 'heroui-native-pro';
 
 import { ProviderIcon, providerLabel } from '../components/ProviderIcon';
 import type { ProviderKind } from '../lib/v2';
-import { EmptyStateView, PageHeader, Screen, StyledIonicons } from '../components/ui';
+import { EmptyStateView, Screen, ScreenIntro, StyledIonicons } from '../components/ui';
 
 export type KanbanConversation = {
   id: string;
@@ -151,9 +151,8 @@ export function KanbanScreen({ conversations = [], onOpenConversation, onRefresh
         refreshControl={onRefresh ? <RefreshControl refreshing={refreshing} onRefresh={onRefresh} /> : undefined}
         ListHeaderComponent={
           <View className="gap-3 px-4 pb-1">
-            <PageHeader
-              title="看板"
-              subtitle="按工作区查看最近活跃的对话。"
+            <ScreenIntro
+              description="按工作区查看最近活跃的对话。"
               trailing={
                 <Chip size="sm" variant="soft" color="accent">
                   <Chip.Label>{totalCount} 个对话</Chip.Label>
