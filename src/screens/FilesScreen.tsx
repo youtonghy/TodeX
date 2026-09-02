@@ -1,18 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  ActivityIndicator,
-  FlatList,
-  Pressable,
-  RefreshControl,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-  type ListRenderItemInfo,
-} from 'react-native';
-import { Button, Card, Chip, Surface, Text as HeroText } from 'heroui-native';
-import { Ionicons } from '@expo/vector-icons';
+import { FlatList, Pressable, RefreshControl, ScrollView, View, type ListRenderItemInfo } from 'react-native';
+import { Button, Chip, Spinner, Surface, Text } from 'heroui-native';
 import type { V2ApiClient } from '../lib/v2';
+import { EmptyStateView, InlineNotice, LoadingState, Screen, StyledIonicons } from '../components/ui';
 
 export type FilesClient = Pick<V2ApiClient, 'listWorkspaceEntries' | 'readWorkspaceFile'>;
 
@@ -225,72 +215,112 @@ export function FilesScreen({ client, rootPath, initialFilePath, onFileSelected 
   const renderRow = ({ item }: ListRenderItemInfo<FileTreeRow>) => {
     const isSelected = item.entry.path === selectedPath;
     const isLoading = loadingPath === item.entry.path;
+    const isDirectory = item.entry.kind === 'directory';
     return (
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel={`${item.entry.kind === 'directory' ? '目录' : '文件'} ${item.entry.name}`}
-        onPress={() => item.entry.kind === 'directory' ? toggleDirectory(item.entry.path) : void readFile(item.entry.path)}
-        style={({ pressed }) => [styles.treeRow, { paddingLeft: 12 + item.depth * 18 }, isSelected && styles.treeRowSelected, pressed && styles.treeRowPressed]}
+        accessibilityLabel={`${isDirectory ? '目录' : '文件'} ${item.entry.name}`}
+        accessibilityState={{ selected: isSelected, expanded: isDirectory ? item.expanded : undefined }}
+        onPress={() => (isDirectory ? toggleDirectory(item.entry.path) : void readFile(item.entry.path))}
+        className={`min-h-11 flex-row items-center gap-2 rounded-xl pr-3 active:opacity-70 ${isSelected ? 'bg-accent/15' : ''}`}
+        style={{ paddingLeft: 10 + item.depth * 18 }}
       >
-        <Ionicons name={item.entry.kind === 'directory' ? (item.expanded ? 'folder-open-outline' : 'folder-outline') : 'document-text-outline'} size={17} color={item.entry.kind === 'directory' ? '#b27b2b' : '#66717c'} />
-        <Text style={styles.treeName} numberOfLines={1}>{item.entry.name}</Text>
-        {isLoading ? <ActivityIndicator size="small" /> : item.entry.kind === 'directory' ? <Ionicons name={item.expanded ? 'chevron-down' : 'chevron-forward'} size={15} color="#7a8391" /> : null}
+        <StyledIonicons
+          name={isDirectory ? (item.expanded ? 'folder-open' : 'folder') : 'document-text-outline'}
+          size={17}
+          className={isDirectory ? 'text-warning' : isSelected ? 'text-accent' : 'text-muted'}
+        />
+        <Text type="body-sm" weight={isSelected ? 'semibold' : 'medium'} className={`flex-1 ${isSelected ? 'text-accent' : 'text-foreground'}`} numberOfLines={1}>
+          {item.entry.name}
+        </Text>
+        {isLoading ? (
+          <Spinner size="sm" />
+        ) : isDirectory ? (
+          <StyledIonicons name={item.expanded ? 'chevron-down' : 'chevron-forward'} size={14} className="text-muted" />
+        ) : null}
       </Pressable>
     );
   };
 
   return (
-    <Surface className="flex-1 bg-background">
-      <View className="px-4 pb-2 pt-4">
+    <Screen>
+      <View className="gap-2 px-4 pb-2 pt-3">
         <View className="flex-row items-center justify-between gap-3">
           <View className="min-w-0 flex-1">
-            <HeroText className="text-xl font-semibold text-foreground">文件</HeroText>
-            <HeroText className="mt-1 text-xs text-muted" numberOfLines={2}>{normalizedRoot || '未选择工作区'}</HeroText>
+            <Text type="h4" className="text-foreground">
+              文件
+            </Text>
+            <Text type="body-xs" color="muted" numberOfLines={2} className="font-mono">
+              {normalizedRoot || '未选择工作区'}
+            </Text>
           </View>
-          <Button isIconOnly size="sm" variant="ghost" accessibilityLabel="刷新文件树" isDisabled={!normalizedRoot || Boolean(loadingPath)} onPress={() => void loadDirectory(normalizedRoot, true)}>
-            <Ionicons name="refresh-outline" size={18} color="#52606b" />
+          <Button
+            isIconOnly
+            size="sm"
+            variant="secondary"
+            accessibilityLabel="刷新文件树"
+            isDisabled={!normalizedRoot || Boolean(loadingPath)}
+            onPress={() => void loadDirectory(normalizedRoot, true)}
+            className="h-9 w-9 rounded-full"
+          >
+            <StyledIonicons name="refresh-outline" size={16} className="text-foreground" />
           </Button>
         </View>
-        {error ? <HeroText className="mt-2 text-xs text-danger" numberOfLines={3}>{error}</HeroText> : null}
+        {error ? <InlineNotice status="danger" title="读取失败" description={error} /> : null}
       </View>
-      <View style={styles.treePane}>
+
+      <Surface variant="secondary" className="mx-4 max-h-[300px] overflow-hidden rounded-3xl">
         <FlatList
           data={rows}
           keyExtractor={(item) => item.entry.path}
           renderItem={renderRow}
           refreshControl={<RefreshControl refreshing={Boolean(loadingPath === normalizedRoot)} onRefresh={() => void loadDirectory(normalizedRoot, true)} />}
-          ListEmptyComponent={<HeroText className="px-4 py-8 text-center text-xs text-muted">{loadingPath ? '正在读取目录…' : '当前目录没有可显示的文件。'}</HeroText>}
-          contentContainerStyle={styles.treeContent}
+          ListEmptyComponent={
+            loadingPath ? (
+              <LoadingState label="正在读取目录…" className="py-6" />
+            ) : (
+              <EmptyStateView icon="folder-outline" title="目录为空" description="当前目录没有可显示的文件。" className="py-6" />
+            )
+          }
+          contentContainerClassName="p-2"
         />
-      </View>
-      <View style={styles.previewPane}>
-        <View className="flex-row items-center justify-between gap-3 border-b border-separator px-4 py-3">
-          <HeroText className="min-w-0 flex-1 text-sm font-semibold text-foreground" numberOfLines={1}>{file?.name || '选择文件预览'}</HeroText>
-          {file ? <Chip size="sm" variant="secondary"><Text>{fileLanguage(file.path)}</Text></Chip> : null}
+      </Surface>
+
+      <Surface className="mx-4 mb-4 mt-3 min-h-[160px] flex-1 overflow-hidden rounded-3xl">
+        <View className="flex-row items-center justify-between gap-3 border-b border-separator px-4 py-2.5">
+          <View className="min-w-0 flex-1 flex-row items-center gap-2">
+            <StyledIonicons name="document-text-outline" size={16} className="text-muted" />
+            <Text type="body-sm" weight="semibold" className="min-w-0 flex-1 text-foreground" numberOfLines={1}>
+              {file?.name || '选择文件预览'}
+            </Text>
+          </View>
+          {file ? (
+            <Chip size="sm" variant="soft" color="accent">
+              <Chip.Label>{fileLanguage(file.path)}</Chip.Label>
+            </Chip>
+          ) : null}
         </View>
         {fileLoading ? (
-          <View className="flex-1 items-center justify-center"><ActivityIndicator /><HeroText className="mt-2 text-xs text-muted">正在读取文件</HeroText></View>
+          <LoadingState label="正在读取文件" className="flex-1" />
         ) : file ? (
-          <ScrollView contentContainerStyle={styles.previewContent}>
-            <HeroText className="mb-3 text-[11px] text-muted" numberOfLines={2}>{file.path} · {formatBytes(file.sizeBytes)} · {file.mimeType}</HeroText>
-            {file.text ? <Text selectable style={styles.previewText}>{file.text}</Text> : <HeroText className="text-sm text-muted">该文件不可作为文本预览。</HeroText>}
+          <ScrollView contentContainerClassName="p-4 pb-8">
+            <Text type="body-xs" color="muted" numberOfLines={2} className="mb-3 font-mono">
+              {file.path} · {formatBytes(file.sizeBytes)} · {file.mimeType}
+            </Text>
+            {file.text ? (
+              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                <Text selectable type="code" className="bg-transparent px-0 text-[12px] leading-[18px] text-foreground">
+                  {file.text}
+                </Text>
+              </ScrollView>
+            ) : (
+              <InlineNotice status="default" title="该文件不可作为文本预览。" />
+            )}
           </ScrollView>
         ) : (
-          <View className="flex-1 items-center justify-center px-8"><Ionicons name="document-text-outline" size={28} color="#7a8391" /><HeroText className="mt-3 text-center text-sm text-muted">选择一个文件查看内容</HeroText></View>
+          <EmptyStateView icon="document-text-outline" title="选择一个文件查看内容" className="flex-1 justify-center" />
         )}
-      </View>
-    </Surface>
+      </Surface>
+    </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  treePane: { maxHeight: 300, borderTopWidth: 1, borderBottomWidth: 1, borderColor: '#d8e0e7', backgroundColor: '#f7f9fa' },
-  treeContent: { paddingVertical: 6 },
-  treeRow: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 8, paddingRight: 12 },
-  treeRowSelected: { backgroundColor: '#e2f4ef' },
-  treeRowPressed: { opacity: 0.72 },
-  treeName: { flex: 1, color: '#26323d', fontSize: 13, fontWeight: '600' },
-  previewPane: { flex: 1, minHeight: 160 },
-  previewContent: { padding: 16, paddingBottom: 32 },
-  previewText: { color: '#26323d', fontFamily: 'Courier', fontSize: 12, lineHeight: 18 },
-});

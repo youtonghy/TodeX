@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { ActivityIndicator, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { Button, Card, Chip, Input, Surface, Text as HeroText, TextField } from 'heroui-native';
-import { Ionicons } from '@expo/vector-icons';
+import { KeyboardAvoidingView, Platform, ScrollView, View } from 'react-native';
+import { Button, Chip, Input, Surface, Text } from 'heroui-native';
+import { ProgressBar } from 'heroui-native-pro';
+
 import type { V2ApiClient } from '../lib/v2';
 import { validateLoopbackUrl as validateSharedLoopbackUrl } from '../lib/mobileParity';
+import { EmptyStateView, InlineNotice, Screen, StyledIonicons } from '../components/ui';
 
 export type BrowserClient = Pick<V2ApiClient, 'fetchBrowser' | 'readWorkspaceFile'>;
 export type BrowserFetchResult = Awaited<ReturnType<V2ApiClient['fetchBrowser']>>;
@@ -107,70 +109,86 @@ export function BrowserScreen({ client, initialUrl = 'http://127.0.0.1:7345', in
 
   const body = result?.body || '';
   const clippedBody = body.length > MAX_PREVIEW_CHARS ? `${body.slice(0, MAX_PREVIEW_CHARS)}\n\n[预览已截断]` : body;
+  const statusOk = result ? result.status >= 200 && result.status < 400 : false;
 
   return (
-    <Surface className="flex-1 bg-background">
-      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <View className="px-4 pb-3 pt-4">
+    <Screen>
+      <KeyboardAvoidingView className="flex-1" behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <View className="gap-2 px-4 pb-3 pt-3">
           <View className="flex-row items-center gap-2">
-            <Ionicons name="globe-outline" size={20} color="#2b7a70" />
-            <HeroText className="text-xl font-semibold text-foreground">浏览器</HeroText>
-          </View>
-          <HeroText className="mt-1 text-xs text-muted">仅允许访问 localhost、127.0.0.0/8 或 ::1。</HeroText>
-          <View className="mt-3 flex-row items-end gap-2">
-            <TextField className="min-w-0 flex-1" aria-label="本机地址">
-              <Input
-                value={draft}
-                onChangeText={setDraft}
-                placeholder="http://127.0.0.1:7345"
-                autoCapitalize="none"
-                autoCorrect={false}
-                keyboardType="url"
-                onSubmitEditing={() => void load(draft)}
-              />
-            </TextField>
-            <Button size="md" variant="primary" isDisabled={loading} onPress={() => void load(draft)}>
-              {loading ? <ActivityIndicator color="#ffffff" size="small" /> : <Ionicons name="arrow-forward-outline" size={17} color="#ffffff" />}
-              <Button.Label>打开</Button.Label>
+            <View className="flex-row items-center gap-1.5">
+              <View className="h-2.5 w-2.5 rounded-full bg-danger/70" />
+              <View className="h-2.5 w-2.5 rounded-full bg-warning/70" />
+              <View className="h-2.5 w-2.5 rounded-full bg-success/70" />
+            </View>
+            <Input
+              value={draft}
+              onChangeText={setDraft}
+              placeholder="http://127.0.0.1:7345"
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+              returnKeyType="go"
+              onSubmitEditing={() => void load(draft)}
+              accessibilityLabel="本机地址"
+              containerClassName="min-h-11 flex-1 rounded-full"
+              className="px-4 font-mono text-sm"
+            />
+            <Button isIconOnly size="md" variant="primary" accessibilityLabel="打开" isDisabled={loading} onPress={() => void load(draft)} className="h-11 w-11 rounded-full">
+              <StyledIonicons name={loading ? 'hourglass-outline' : 'arrow-forward'} size={18} className="text-accent-foreground" />
             </Button>
           </View>
-          {error ? <HeroText className="mt-2 text-xs text-danger" numberOfLines={3}>{error}</HeroText> : null}
+          {loading ? (
+            <ProgressBar isIndeterminate size="sm" color="accent">
+              <ProgressBar.Track className="h-0.5">
+                <ProgressBar.Fill />
+              </ProgressBar.Track>
+            </ProgressBar>
+          ) : (
+            <Text type="body-xs" color="muted" className="px-1">
+              仅允许访问 localhost、127.0.0.0/8 或 ::1。
+            </Text>
+          )}
+          {error ? <InlineNotice status="danger" title="无法打开" description={error} /> : null}
         </View>
 
         {result ? (
-          <View className="flex-1 px-4 pb-4">
-            <Card variant="transparent" className="flex-1 border border-separator bg-surface px-3 py-3">
-              <View className="flex-row items-center justify-between gap-2 border-b border-separator pb-3">
-                <View className="min-w-0 flex-1">
-                  <HeroText className="text-sm font-semibold text-foreground" numberOfLines={1}>{loadedUrl}</HeroText>
-                  <HeroText className="mt-1 text-[11px] text-muted" numberOfLines={1}>{result.contentType || 'text/html'}</HeroText>
-                </View>
-                <Chip size="sm" color={result.status >= 200 && result.status < 400 ? 'success' : 'danger'} variant="secondary"><Text>{result.status}</Text></Chip>
+          <Surface className="mx-4 mb-4 min-h-0 flex-1 overflow-hidden rounded-3xl">
+            <View className="flex-row items-center justify-between gap-2 border-b border-separator px-4 py-2.5">
+              <View className="min-w-0 flex-1">
+                <Text type="body-sm" weight="semibold" className="font-mono text-foreground" numberOfLines={1}>
+                  {loadedUrl}
+                </Text>
+                <Text type="body-xs" color="muted" numberOfLines={1}>
+                  {result.contentType || 'text/html'}
+                </Text>
               </View>
-              <View className="flex-1 pt-3">
-                {renderWebView ? renderWebView(result) : (
-                  <ScrollView contentContainerStyle={styles.bodyContent}>
-                    <HeroText className="mb-2 text-[11px] text-muted">HTML 文本预览（接入 WebView 时传入 renderWebView 插槽）</HeroText>
-                    <Text selectable style={styles.bodyText}>{clippedBody || '页面没有返回内容。'}</Text>
-                  </ScrollView>
-                )}
-              </View>
-            </Card>
-          </View>
+              <Chip size="sm" variant="soft" color={statusOk ? 'success' : 'danger'}>
+                <Chip.Label>{result.status}</Chip.Label>
+              </Chip>
+            </View>
+            <View className="flex-1 p-3">
+              {renderWebView ? renderWebView(result) : (
+                <ScrollView contentContainerClassName="pb-6">
+                  <Text type="body-xs" color="muted" className="mb-2">
+                    HTML 文本预览（接入 WebView 时传入 renderWebView 插槽）
+                  </Text>
+                  <Text selectable type="code" className="bg-transparent px-0 text-[12px] leading-[18px] text-foreground">
+                    {clippedBody || '页面没有返回内容。'}
+                  </Text>
+                </ScrollView>
+              )}
+            </View>
+          </Surface>
         ) : (
-          <View className="flex-1 items-center justify-center px-8">
-            <Ionicons name="globe-outline" size={32} color="#7a8391" />
-            <HeroText className="mt-3 text-sm font-semibold text-foreground">本机网页预览</HeroText>
-            <HeroText className="mt-1 text-center text-xs text-muted">输入 loopback 地址后查看后端返回的 HTML。</HeroText>
-          </View>
+          <EmptyStateView
+            icon="globe-outline"
+            title="本机网页预览"
+            description="输入 loopback 地址后查看后端返回的 HTML。"
+            className="flex-1 justify-center"
+          />
         )}
       </KeyboardAvoidingView>
-    </Surface>
+    </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  flex: { flex: 1 },
-  bodyContent: { paddingBottom: 24 },
-  bodyText: { color: '#26323d', fontFamily: 'Courier', fontSize: 12, lineHeight: 18 },
-});

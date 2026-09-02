@@ -1,8 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, RefreshControl, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
-import { Button, Card, Chip, Surface, Text as HeroText } from 'heroui-native';
-import { Ionicons } from '@expo/vector-icons';
+import { RefreshControl, ScrollView, View } from 'react-native';
+import { Button, Chip, Spinner, Surface, Switch, Text } from 'heroui-native';
+import { NumberValue } from 'heroui-native-pro';
+
 import type { GitAction, GitRepositorySummary, V2ApiClient } from '../lib/v2';
+import {
+  EmptyStateView,
+  FormTextArea,
+  InlineNotice,
+  ListRow,
+  ListSection,
+  Screen,
+  ScreenScrollView,
+  SectionHeader,
+  StyledIonicons,
+} from '../components/ui';
 
 export type GitClient = Pick<V2ApiClient, 'scanGit' | 'runGit'>;
 
@@ -18,8 +30,8 @@ export type GitScreenProps = {
   onRun: (workspacePath: string, action: GitAction, message?: string, includeUnstaged?: boolean) => Promise<boolean>;
 };
 
-function formatChangeCount(value: number): string {
-  return Number.isFinite(value) ? String(Math.max(0, Math.round(value))) : '0';
+function formatChangeCount(value: number | undefined): number {
+  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
 }
 
 function actionLabel(action: GitAction): string {
@@ -29,6 +41,14 @@ function actionLabel(action: GitAction): string {
     case 'push': return '推送';
     default: return '创建提交';
   }
+}
+
+function fileStatusColor(status: string): 'success' | 'warning' | 'danger' | 'default' {
+  const code = status.trim().toUpperCase();
+  if (code.startsWith('A') || code.startsWith('??')) return 'success';
+  if (code.startsWith('D')) return 'danger';
+  if (code.startsWith('M') || code.startsWith('R')) return 'warning';
+  return 'default';
 }
 
 export function GitScreen({
@@ -88,144 +108,182 @@ export function GitScreen({
   };
 
   return (
-    <Surface className="flex-1 bg-background">
-      <View className="px-4 pb-2 pt-4">
+    <Screen>
+      <View className="gap-2 px-4 pb-1 pt-3">
         <View className="flex-row items-center justify-between gap-3">
           <View className="min-w-0 flex-1">
-            <View className="flex-row items-center gap-2">
-              <Ionicons name="logo-github" size={20} color="#52606b" />
-              <HeroText className="text-xl font-semibold text-foreground">Git 操作</HeroText>
-            </View>
-            <HeroText className="mt-1 text-xs text-muted" numberOfLines={2}>{workspacePath || '未选择工作区'}</HeroText>
+            <Text type="h4" className="text-foreground">
+              Git 操作
+            </Text>
+            <Text type="body-xs" color="muted" numberOfLines={2} className="font-mono">
+              {workspacePath || '未选择工作区'}
+            </Text>
           </View>
-          <Button isIconOnly size="sm" variant="ghost" accessibilityLabel="刷新 Git 状态" isDisabled={busy} onPress={refresh}>
-            {busy ? <ActivityIndicator size="small" /> : <Ionicons name="refresh-outline" size={18} color="#52606b" />}
+          <Button isIconOnly size="sm" variant="secondary" accessibilityLabel="刷新 Git 状态" isDisabled={busy} onPress={refresh} className="h-9 w-9 rounded-full">
+            {busy ? <Spinner size="sm" /> : <StyledIonicons name="refresh-outline" size={16} className="text-foreground" />}
           </Button>
         </View>
-        {error ? <HeroText className="mt-2 text-xs text-danger" numberOfLines={4}>{error}</HeroText> : null}
+        {error ? <InlineNotice status="danger" title="Git 读取失败" description={error} /> : null}
       </View>
 
-      <ScrollView
-        contentContainerStyle={styles.content}
+      <ScreenScrollView
         refreshControl={<RefreshControl refreshing={busy} onRefresh={refresh} />}
-        keyboardShouldPersistTaps="handled"
       >
         {repositories.length > 1 ? (
-          <View className="mb-3">
-            <HeroText className="mb-2 px-1 text-xs font-semibold text-muted">仓库</HeroText>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.repoRail}>
-              {repositories.map((repository) => (
-                <Button
-                  key={repository.path}
-                  size="sm"
-                  variant={activeRepo?.path === repository.path ? 'primary' : 'secondary'}
-                  isDisabled={busy}
-                  onPress={() => setActiveRepoPath(repository.path)}
-                  className="min-h-11 max-w-[240px] rounded-lg"
-                >
-                  <Button.Label numberOfLines={1}>{repository.name} · {repository.branch || '未初始化'}</Button.Label>
-                </Button>
-              ))}
+          <View className="gap-2">
+            <SectionHeader title="仓库" description={`${repositories.length} 个`} />
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerClassName="gap-2">
+              {repositories.map((repository) => {
+                const selected = activeRepo?.path === repository.path;
+                return (
+                  <Chip
+                    key={repository.path}
+                    size="md"
+                    variant={selected ? 'primary' : 'soft'}
+                    color={selected ? 'accent' : 'default'}
+                    onPress={() => setActiveRepoPath(repository.path)}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected }}
+                  >
+                    <Chip.Label numberOfLines={1} className="max-w-[220px]">
+                      {repository.name} · {repository.branch || '未初始化'}
+                    </Chip.Label>
+                  </Chip>
+                );
+              })}
             </ScrollView>
           </View>
         ) : null}
 
         {activeRepo ? (
           <>
-            <Card variant="transparent" className="mb-3 border border-separator bg-surface px-3 py-3">
-              <View className="flex-row items-center justify-between gap-3">
-                <View className="min-w-0 flex-1">
-                  <HeroText className="text-base font-semibold text-foreground" numberOfLines={1}>{activeRepo.name}</HeroText>
-                  <HeroText className="mt-1 text-xs text-muted" numberOfLines={1}>{activeRepo.branch || 'UNINITIALIZED'}</HeroText>
+            <Surface className="gap-4 rounded-3xl p-4">
+              <View className="flex-row items-center gap-3">
+                <View className="h-11 w-11 items-center justify-center rounded-2xl bg-default">
+                  <StyledIonicons name="git-branch-outline" size={22} className="text-foreground" />
                 </View>
-                <Chip size="sm" variant={activeRepo.initialEligible ? 'primary' : 'secondary'}>
-                  {activeRepo.initialEligible ? '未初始化' : `${activeRepo.files.length} 个文件`}
+                <View className="min-w-0 flex-1">
+                  <Text type="h5" className="text-foreground" numberOfLines={1}>
+                    {activeRepo.name}
+                  </Text>
+                  <Text type="body-xs" color="muted" numberOfLines={1} className="font-mono">
+                    {activeRepo.branch || 'UNINITIALIZED'}
+                  </Text>
+                </View>
+                <Chip size="sm" variant="soft" color={activeRepo.initialEligible ? 'warning' : 'default'}>
+                  <Chip.Label>{activeRepo.initialEligible ? '未初始化' : `${activeRepo.files.length} 个文件`}</Chip.Label>
                 </Chip>
               </View>
-              <View className="mt-3 flex-row gap-3">
-                <Surface variant="secondary" className="flex-1 rounded-lg px-3 py-2">
-                  <HeroText className="text-xs text-muted">新增</HeroText>
-                  <HeroText className="mt-1 text-lg font-semibold text-success">+{formatChangeCount(activeRepo.additions)}</HeroText>
+              <View className="flex-row gap-3">
+                <Surface variant="secondary" className="flex-1 gap-1 rounded-2xl px-4 py-3">
+                  <Text type="body-xs" weight="semibold" className="uppercase tracking-wide text-muted">
+                    新增
+                  </Text>
+                  <View className="flex-row items-baseline gap-0.5">
+                    <Text type="h4" className="text-success">
+                      +
+                    </Text>
+                    <NumberValue value={formatChangeCount(activeRepo.additions)} classNames={{ value: 'text-2xl font-semibold text-success' }} />
+                  </View>
                 </Surface>
-                <Surface variant="secondary" className="flex-1 rounded-lg px-3 py-2">
-                  <HeroText className="text-xs text-muted">删除</HeroText>
-                  <HeroText className="mt-1 text-lg font-semibold text-danger">-{formatChangeCount(activeRepo.deletions)}</HeroText>
+                <Surface variant="secondary" className="flex-1 gap-1 rounded-2xl px-4 py-3">
+                  <Text type="body-xs" weight="semibold" className="uppercase tracking-wide text-muted">
+                    删除
+                  </Text>
+                  <View className="flex-row items-baseline gap-0.5">
+                    <Text type="h4" className="text-danger">
+                      -
+                    </Text>
+                    <NumberValue value={formatChangeCount(activeRepo.deletions)} classNames={{ value: 'text-2xl font-semibold text-danger' }} />
+                  </View>
                 </Surface>
               </View>
-            </Card>
+            </Surface>
 
             {activeRepo.files.length > 0 ? (
-              <Card variant="transparent" className="mb-3 border border-separator bg-surface-secondary px-3 py-2">
-                <HeroText className="mb-2 text-xs font-semibold text-muted">变更文件</HeroText>
-                {activeRepo.files.slice(0, 80).map((file) => (
-                  <View key={file.path} style={styles.fileRow}>
-                    <Ionicons name="document-text-outline" size={16} color="#66717c" />
-                    <Text style={styles.filePath} numberOfLines={1}>{file.path}</Text>
-                    <Text style={styles.fileStatus}>{file.status.trim() || '--'}</Text>
-                  </View>
-                ))}
-                {activeRepo.files.length > 80 ? <HeroText className="px-1 py-2 text-[11px] text-muted">还有 {activeRepo.files.length - 80} 个文件未显示</HeroText> : null}
-              </Card>
+              <View className="gap-2">
+                <SectionHeader title="变更文件" description={`${activeRepo.files.length} 个`} />
+                <ListSection>
+                  {activeRepo.files.slice(0, 80).map((file) => (
+                    <ListRow
+                      key={file.path}
+                      title={file.path}
+                      description={`+${formatChangeCount(file.additions)} / -${formatChangeCount(file.deletions)}`}
+                      icon="document-text-outline"
+                      className="min-h-12 py-2"
+                      suffix={
+                        <Chip size="sm" variant="soft" color={fileStatusColor(file.status)}>
+                          <Chip.Label className="font-mono">{file.status.trim() || '--'}</Chip.Label>
+                        </Chip>
+                      }
+                    />
+                  ))}
+                </ListSection>
+                {activeRepo.files.length > 80 ? (
+                  <Text type="body-xs" color="muted" className="px-1">
+                    还有 {activeRepo.files.length - 80} 个文件未显示
+                  </Text>
+                ) : null}
+              </View>
             ) : null}
 
-            <Card variant="transparent" className="mb-3 border border-separator bg-surface px-3 py-3">
-              <HeroText className="mb-2 text-sm font-semibold text-foreground">提交</HeroText>
-              <TextInput
-                value={message}
-                onChangeText={setMessage}
-                placeholder="提交信息（留空将自动生成）"
-                placeholderTextColor="#7a8391"
-                multiline
-                editable={!busy}
-                style={styles.messageInput}
-              />
-              <View className="mt-3 min-h-11 flex-row items-center justify-between rounded-lg bg-surface-secondary px-3">
-                <View className="flex-row items-center gap-2">
-                  <Ionicons name="layers-outline" size={17} color="#52606b" />
-                  <HeroText className="text-sm text-foreground">包含未暂存的更改</HeroText>
+            <View className="gap-2">
+              <SectionHeader title="提交" />
+              <Surface className="gap-4 rounded-3xl p-4">
+                <FormTextArea
+                  value={message}
+                  onChangeText={setMessage}
+                  placeholder="提交信息（留空将自动生成）"
+                  editable={!busy}
+                  minHeightClassName="min-h-24"
+                />
+                <ListSection variant="secondary">
+                  <ListRow
+                    title="包含未暂存的更改"
+                    description="提交前自动 git add 工作区改动"
+                    icon="layers-outline"
+                    suffix={<Switch isDisabled={busy} isSelected={includeUnstaged} onSelectedChange={setIncludeUnstaged} />}
+                  />
+                </ListSection>
+                <View className="gap-2">
+                  <Button size="lg" variant="primary" isDisabled={busy} onPress={() => run(activeRepo.initialEligible ? 'initial' : 'commit')} className="rounded-2xl">
+                    <StyledIonicons name="git-commit-outline" size={18} className="text-accent-foreground" />
+                    <Button.Label>{actionLabel(activeRepo.initialEligible ? 'initial' : 'commit')}</Button.Label>
+                  </Button>
+                  <View className="flex-row gap-2">
+                    <Button size="md" variant="secondary" isDisabled={busy || activeRepo.initialEligible} onPress={() => run('commit-push')} className="flex-1 rounded-2xl">
+                      <StyledIonicons name="cloud-upload-outline" size={16} className="text-foreground" />
+                      <Button.Label>{actionLabel('commit-push')}</Button.Label>
+                    </Button>
+                    <Button size="md" variant="ghost" isDisabled={busy || activeRepo.initialEligible} onPress={() => run('push')} className="flex-1 rounded-2xl">
+                      <StyledIonicons name="arrow-up-circle-outline" size={16} className="text-foreground" />
+                      <Button.Label>{actionLabel('push')}</Button.Label>
+                    </Button>
+                  </View>
                 </View>
-                <Switch disabled={busy} value={includeUnstaged} onValueChange={setIncludeUnstaged} />
-              </View>
-              <View className="mt-3 gap-2">
-                <Button size="lg" variant="primary" isDisabled={busy} onPress={() => run(activeRepo.initialEligible ? 'initial' : 'commit')} className="min-h-12 justify-start rounded-lg">
-                  <Ionicons name="git-commit-outline" size={18} color="#ffffff" />
-                  <Button.Label>{actionLabel(activeRepo.initialEligible ? 'initial' : 'commit')}</Button.Label>
-                </Button>
-                <Button size="lg" variant="secondary" isDisabled={busy || activeRepo.initialEligible} onPress={() => run('commit-push')} className="min-h-12 justify-start rounded-lg">
-                  <Ionicons name="cloud-upload-outline" size={18} color="#52606b" />
-                  <Button.Label>{actionLabel('commit-push')}</Button.Label>
-                </Button>
-                <Button size="lg" variant="ghost" isDisabled={busy || activeRepo.initialEligible} onPress={() => run('push')} className="min-h-12 justify-start rounded-lg">
-                  <Ionicons name="arrow-up-circle-outline" size={18} color="#52606b" />
-                  <Button.Label>{actionLabel('push')}</Button.Label>
-                </Button>
-              </View>
-            </Card>
+              </Surface>
+            </View>
           </>
         ) : (
-          <View className="items-center px-8 py-12">
-            <Ionicons name="git-branch-outline" size={34} color="#7a8391" />
-            <HeroText className="mt-3 text-sm font-semibold text-foreground">没有检测到 Git 仓库</HeroText>
-            <HeroText className="mt-1 text-center text-xs text-muted">请确认工作区路径可访问，或下拉刷新。</HeroText>
-          </View>
+          <EmptyStateView
+            icon="git-branch-outline"
+            title="没有检测到 Git 仓库"
+            description="请确认工作区路径可访问，或下拉刷新。"
+            actionLabel="重新扫描"
+            onAction={refresh}
+          />
         )}
         {output ? (
-          <Card variant="transparent" className="border border-separator bg-surface-secondary px-3 py-3">
-            <HeroText className="text-xs font-semibold text-muted">最近一次 Git 输出</HeroText>
-            <Text selectable style={styles.output}>{output}</Text>
-          </Card>
+          <View className="gap-2">
+            <SectionHeader title="最近一次 Git 输出" />
+            <Surface variant="secondary" className="rounded-3xl p-4">
+              <Text selectable type="code" className="bg-transparent px-0 text-[11px] leading-[17px] text-foreground">
+                {output}
+              </Text>
+            </Surface>
+          </View>
         ) : null}
-      </ScrollView>
-    </Surface>
+      </ScreenScrollView>
+    </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  content: { paddingHorizontal: 16, paddingBottom: 32 },
-  repoRail: { gap: 8, paddingBottom: 2 },
-  fileRow: { minHeight: 42, flexDirection: 'row', alignItems: 'center', gap: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#d8e0e7' },
-  filePath: { flex: 1, minWidth: 0, color: '#26323d', fontSize: 12 },
-  fileStatus: { minWidth: 24, color: '#66717c', fontSize: 11, fontVariant: ['tabular-nums'], textAlign: 'right' },
-  messageInput: { minHeight: 88, maxHeight: 150, borderWidth: 1, borderColor: '#d7dce0', borderRadius: 8, backgroundColor: '#ffffff', paddingHorizontal: 12, paddingVertical: 10, color: '#17202a', fontSize: 14, textAlignVertical: 'top' },
-  output: { marginTop: 8, color: '#26323d', fontFamily: 'Courier', fontSize: 11, lineHeight: 17 },
-});

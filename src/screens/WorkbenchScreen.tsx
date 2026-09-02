@@ -1,7 +1,10 @@
 import { useCallback, useMemo, useState, type ReactNode } from 'react';
-import { StyleSheet, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { Button, Surface, Tabs, Text as HeroText } from 'heroui-native';
+import { View } from 'react-native';
+import type { Ionicons } from '@expo/vector-icons';
+import { Button, Text } from 'heroui-native';
+import { Segment } from 'heroui-native-pro';
+
+import { EmptyStateView, Screen, StyledIonicons } from '../components/ui';
 
 export type WorkbenchTab = 'terminal' | 'browser' | 'files' | 'git-diff';
 
@@ -57,15 +60,13 @@ function resolveRenderer(renderer: WorkbenchContentRenderer | undefined): ReactN
 }
 
 function EmptyWorkbenchTab({ tab, label }: { tab: WorkbenchTab; label: string }) {
-  const icon = TAB_DEFINITIONS[tab].icon;
   return (
-    <View className="flex-1 items-center justify-center px-8" accessibilityLabel={`${label}面板`}>
-      <View style={styles.emptyIcon}>
-        <Ionicons name={icon} size={25} color="#66717c" />
-      </View>
-      <HeroText className="mt-3 text-sm font-semibold text-foreground">{label}面板</HeroText>
-      <HeroText className="mt-1 text-center text-xs text-muted">暂无可显示内容</HeroText>
-    </View>
+    <EmptyStateView
+      icon={TAB_DEFINITIONS[tab].icon}
+      title={`${label}面板`}
+      description="暂无可显示内容"
+      className="flex-1 justify-center"
+    />
   );
 }
 
@@ -125,68 +126,50 @@ export function WorkbenchScreen({
   const labelFor = (tab: WorkbenchTab) => tabLabels?.[tab] || TAB_DEFINITIONS[tab].label;
 
   return (
-    <Surface className="flex-1 bg-background">
-      <Tabs value={selectedTab} onValueChange={handleTabChange} variant="primary" className="flex-1">
-        <View className="border-b border-separator px-4 pb-2 pt-4">
-          <View className="flex-row items-center justify-between gap-3">
-            <View className="min-w-0 flex-1">
-              <HeroText className="text-xl font-semibold text-foreground" numberOfLines={1}>{title}</HeroText>
-              {subtitle ? <HeroText className="mt-1 text-xs text-muted" numberOfLines={2}>{subtitle}</HeroText> : null}
-            </View>
-            {action ? (
-              <Button
-                size="sm"
-                variant="secondary"
-                isDisabled={action.isDisabled}
-                onPress={action.onPress}
-                className="min-h-11"
-              >
-                {action.icon ? <Ionicons name={action.icon} size={16} color="#52606b" /> : null}
-                <Button.Label>{action.label}</Button.Label>
-              </Button>
+    <Screen>
+      <View className="gap-3 px-4 pb-3 pt-3">
+        <View className="flex-row items-center justify-between gap-3">
+          <View className="min-w-0 flex-1">
+            <Text type="h4" className="text-foreground" numberOfLines={1}>
+              {title}
+            </Text>
+            {subtitle ? (
+              <Text type="body-xs" color="muted" numberOfLines={2} className="mt-0.5">
+                {subtitle}
+              </Text>
             ) : null}
           </View>
-          <Tabs.List className="mt-3">
-            <Tabs.ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              scrollAlign="start"
-              contentContainerClassName="gap-1"
-            >
-              <Tabs.Indicator />
+          {action ? (
+            <Button size="sm" variant="primary" isDisabled={action.isDisabled} onPress={action.onPress} className="h-9 rounded-full">
+              {action.icon ? <StyledIonicons name={action.icon} size={15} className="text-accent-foreground" /> : null}
+              <Button.Label>{action.label}</Button.Label>
+            </Button>
+          ) : null}
+        </View>
+        <Segment value={selectedTab} onValueChange={handleTabChange} size="sm">
+          <Segment.Group>
+            <Segment.ScrollView horizontal showsHorizontalScrollIndicator={false} scrollAlign="start">
+              <Segment.Indicator />
               {tabs.map((tab) => {
                 const definition = TAB_DEFINITIONS[tab];
                 return (
-                  <Tabs.Trigger key={tab} value={tab} className="min-h-11 min-w-[88px] flex-row items-center justify-center gap-2 px-3">
+                  <Segment.Item key={tab} value={tab} className="flex-row items-center gap-1.5 px-3">
                     {({ isSelected }) => (
                       <>
-                        <Ionicons name={definition.icon} size={17} color={isSelected ? '#ffffff' : '#52606b'} />
-                        <Tabs.Label className={isSelected ? 'text-white' : 'text-muted'}>{labelFor(tab)}</Tabs.Label>
+                        <StyledIonicons name={definition.icon} size={14} className={isSelected ? 'text-foreground' : 'text-muted'} />
+                        <Segment.Label>{labelFor(tab)}</Segment.Label>
                       </>
                     )}
-                  </Tabs.Trigger>
+                  </Segment.Item>
                 );
               })}
-            </Tabs.ScrollView>
-          </Tabs.List>
-        </View>
-        <View className="flex-1" key={selectedTab}>
-          <Tabs.Content value={selectedTab} className="flex-1">
-            {rendererFor(selectedTab)}
-          </Tabs.Content>
-        </View>
-      </Tabs>
-    </Surface>
+            </Segment.ScrollView>
+          </Segment.Group>
+        </Segment>
+      </View>
+      <View className="flex-1" key={selectedTab}>
+        {rendererFor(selectedTab)}
+      </View>
+    </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  emptyIcon: {
-    width: 52,
-    height: 52,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 16,
-    backgroundColor: '#edf0f2',
-  },
-});
