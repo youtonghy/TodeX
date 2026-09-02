@@ -1,16 +1,9 @@
 import { useMemo, useState } from 'react';
-import {
-  FlatList,
-  RefreshControl,
-  SectionList,
-  StyleSheet,
-  Text,
-  View,
-  Pressable,
-  type ListRenderItemInfo,
-} from 'react-native';
-import { Button, Card, Chip, Surface, Text as HeroText } from 'heroui-native';
-import { Ionicons } from '@expo/vector-icons';
+import { RefreshControl, ScrollView, View } from 'react-native';
+import { Chip, Surface, Text } from 'heroui-native';
+import { BarChart, NumberValue, ProgressBar, TrendChip, Widget } from 'heroui-native-pro';
+
+import { EmptyStateView, ListRow, ListSection, PageHeader, Screen, ScreenScrollView, SectionHeader, StyledIonicons } from '../components/ui';
 
 export type UsageRecord = {
   id?: string;
@@ -41,11 +34,6 @@ type UsageRow = {
   id: string;
   label: string;
   totals: UsageTotals;
-};
-
-type UsageSection = {
-  title: string;
-  data: UsageRow[];
 };
 
 const EMPTY_TOTALS: UsageTotals = {
@@ -91,55 +79,75 @@ function displayName(value: string): string {
   return value === 'unknown' ? '未知' : value;
 }
 
-function FilterPill({ label, selected, onPress }: { label: string; selected: boolean; onPress: () => void }) {
+function FilterChips({
+  items,
+  value,
+  onChange,
+}: {
+  items: string[];
+  value: string;
+  onChange: (value: string) => void;
+}) {
   return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityState={{ selected }}
-      onPress={onPress}
-      style={[styles.filterPill, selected && styles.filterPillSelected]}
-    >
-      <Text style={[styles.filterPillText, selected && styles.filterPillTextSelected]} numberOfLines={1}>{label}</Text>
-    </Pressable>
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerClassName="gap-2">
+      {items.map((item) => {
+        const selected = value === item;
+        return (
+          <Chip
+            key={item}
+            size="md"
+            variant={selected ? 'primary' : 'soft'}
+            color={selected ? 'accent' : 'default'}
+            onPress={() => onChange(item)}
+            accessibilityRole="button"
+            accessibilityState={{ selected }}
+          >
+            <Chip.Label numberOfLines={1} className="max-w-[180px]">
+              {item === 'all' ? '全部' : displayName(item)}
+            </Chip.Label>
+          </Chip>
+        );
+      })}
+    </ScrollView>
   );
 }
 
-function MetricCard({ label, value, detail, icon, tint }: {
+function MetricTile({
+  label,
+  value,
+  detail,
+  icon,
+  tone,
+}: {
   label: string;
   value: number;
   detail: string;
-  icon: keyof typeof Ionicons.glyphMap;
-  tint: string;
+  icon: React.ComponentProps<typeof StyledIonicons>['name'];
+  tone: 'accent' | 'success' | 'warning' | 'default';
 }) {
+  const iconBg = tone === 'accent' ? 'bg-accent/15' : tone === 'success' ? 'bg-success/15' : tone === 'warning' ? 'bg-warning/15' : 'bg-default';
+  const iconColor = tone === 'accent' ? 'text-accent' : tone === 'success' ? 'text-success' : tone === 'warning' ? 'text-warning' : 'text-foreground';
   return (
-    <Card variant="transparent" className="min-w-0 flex-1 border border-separator bg-surface px-3 py-3">
-      <View className="flex-row items-start justify-between gap-2">
-        <View className="min-w-0 flex-1">
-          <HeroText className="text-xs text-muted" numberOfLines={1}>{label}</HeroText>
-          <HeroText className="mt-1 text-xl font-semibold text-foreground" numberOfLines={1}>{formatTokens(value)}</HeroText>
-          <HeroText className="mt-1 text-[11px] text-muted" numberOfLines={1}>{detail}</HeroText>
-        </View>
-        <View style={[styles.metricIcon, { backgroundColor: `${tint}18` }]}>
-          <Ionicons name={icon} size={16} color={tint} />
+    <Surface className="min-w-0 flex-1 gap-2 rounded-3xl p-4">
+      <View className="flex-row items-center justify-between gap-2">
+        <Text type="body-xs" weight="semibold" className="uppercase tracking-wide text-muted" numberOfLines={1}>
+          {label}
+        </Text>
+        <View className={`h-7 w-7 items-center justify-center rounded-full ${iconBg}`}>
+          <StyledIonicons name={icon} size={14} className={iconColor} />
         </View>
       </View>
-    </Card>
-  );
-}
-
-function UsageBar({ totals, max }: { totals: UsageTotals; max: number }) {
-  const total = totalTokens(totals);
-  const width = max > 0 ? Math.max(4, Math.min(100, (total / max) * 100)) : 0;
-  const segment = (value: number) => `${total > 0 ? (value / total) * 100 : 0}%` as `${number}%`;
-  return (
-    <View className="mt-2 h-2 overflow-hidden rounded-full bg-surface-tertiary" style={{ width: `${width}%` }}>
-      <View className="h-full flex-row">
-        <View className="h-full bg-success" style={{ width: segment(totals.inputTokens) }} />
-        <View className="h-full bg-accent" style={{ width: segment(totals.outputTokens) }} />
-        <View className="h-full bg-warning" style={{ width: segment(totals.cachedInputTokens) }} />
-        <View className="h-full bg-muted" style={{ width: segment(totals.cacheWriteTokens) }} />
-      </View>
-    </View>
+      <NumberValue value={value} classNames={{ value: 'text-2xl font-semibold text-foreground' }}>
+        {(formatted) => (
+          <Text type="h3" className="text-foreground" numberOfLines={1}>
+            {value >= 1_000 ? formatTokens(value) : formatted}
+          </Text>
+        )}
+      </NumberValue>
+      <Text type="body-xs" color="muted" numberOfLines={1}>
+        {detail}
+      </Text>
+    </Surface>
   );
 }
 
@@ -186,91 +194,140 @@ export function UsageScreen({ records = [], onRefresh, refreshing = false }: Usa
   const maxRowTotal = Math.max(0, ...groupedRows.map((row) => totalTokens(row.totals)));
   const cacheBase = totals.inputTokens + totals.cachedInputTokens;
   const cacheRate = cacheBase > 0 ? Math.round((totals.cachedInputTokens / cacheBase) * 100) : 0;
-  const sections = useMemo<UsageSection[]>(() => [{
-    title: provider === 'all' ? '按 Agent' : '按模型',
-    data: groupedRows,
-  }], [groupedRows, provider]);
-
-  const renderRow = ({ item }: ListRenderItemInfo<UsageRow>) => (
-    <Card variant="transparent" className="mb-2 border border-separator bg-surface-secondary px-3 py-3">
-      <View className="flex-row items-center justify-between gap-3">
-        <HeroText className="min-w-0 flex-1 text-sm font-semibold text-foreground" numberOfLines={1}>{item.label}</HeroText>
-        <Chip size="sm" variant="secondary"><Text>{formatTokens(totalTokens(item.totals))}</Text></Chip>
-      </View>
-      <UsageBar totals={item.totals} max={maxRowTotal} />
-      <HeroText className="mt-2 text-[11px] text-muted" numberOfLines={1}>
-        输入 {formatTokens(item.totals.inputTokens)} · 输出 {formatTokens(item.totals.outputTokens)} · 缓存 {formatTokens(item.totals.cachedInputTokens)}
-      </HeroText>
-    </Card>
+  const outputRatio = totalTokens(totals) > 0 ? Math.round((totals.outputTokens / totalTokens(totals)) * 100) : 0;
+  const chartData = useMemo(
+    () => groupedRows.slice(0, 6).map((row, index) => ({
+      index,
+      label: row.label,
+      input: row.totals.inputTokens,
+      output: row.totals.outputTokens,
+    })),
+    [groupedRows],
   );
+  const groupTitle = provider === 'all' ? '按 Agent' : '按模型';
 
   return (
-    <Surface className="flex-1 bg-background">
-      <SectionList<UsageRow, UsageSection>
-        sections={sections}
-        keyExtractor={(item) => item.id}
-        renderItem={renderRow}
-        renderSectionHeader={({ section }) => <HeroText className="mb-2 mt-4 px-4 text-sm font-semibold text-foreground">{section.title}</HeroText>}
-        stickySectionHeadersEnabled={false}
-        contentContainerStyle={styles.listContent}
-        refreshControl={onRefresh ? <RefreshControl refreshing={refreshing} onRefresh={onRefresh} /> : undefined}
-        ListHeaderComponent={(
-          <View>
-            <View className="px-4 pb-1 pt-4">
-              <HeroText className="text-xl font-semibold text-foreground">使用统计</HeroText>
-              <HeroText className="mt-1 text-xs text-muted">按 Agent 和模型汇总收到的 token usage 事件。</HeroText>
-            </View>
-            <View className="mt-3 px-4">
-              <HeroText className="mb-2 text-xs font-semibold text-muted">Agent</HeroText>
-              <FlatList
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                data={['all', ...providers]}
-                keyExtractor={(item) => `provider:${item}`}
-                renderItem={({ item }) => <FilterPill label={item === 'all' ? '全部' : displayName(item)} selected={provider === item} onPress={() => { setProvider(item); setModel('all'); }} />}
-                ItemSeparatorComponent={() => <View style={{ width: 8 }} />}
+    <Screen>
+      <ScreenScrollView refreshControl={onRefresh ? <RefreshControl refreshing={refreshing} onRefresh={onRefresh} /> : undefined}>
+        <PageHeader title="使用统计" subtitle="按 Agent 和模型汇总收到的 token usage 事件。" />
+
+        {normalizedRecords.length === 0 ? (
+          <EmptyStateView icon="stats-chart-outline" title="还没有用量记录" description="与 Agent 对话后，这里会汇总每次回复的 token 用量。" />
+        ) : (
+          <>
+            <View className="gap-2">
+              <SectionHeader title="Agent" />
+              <FilterChips
+                items={['all', ...providers]}
+                value={provider}
+                onChange={(next) => {
+                  setProvider(next);
+                  setModel('all');
+                }}
               />
-              <HeroText className="mb-2 mt-3 text-xs font-semibold text-muted">模型</HeroText>
-              <FlatList
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                data={['all', ...models]}
-                keyExtractor={(item) => `model:${item}`}
-                renderItem={({ item }) => <FilterPill label={item === 'all' ? '全部' : displayName(item)} selected={model === item} onPress={() => setModel(item)} />}
-                ItemSeparatorComponent={() => <View style={{ width: 8 }} />}
-              />
+              {models.length > 1 ? (
+                <>
+                  <SectionHeader title="模型" className="mt-1" />
+                  <FilterChips items={['all', ...models]} value={model} onChange={setModel} />
+                </>
+              ) : null}
             </View>
-            <View className="mt-4 flex-row gap-2 px-4">
-              <MetricCard label="总用量" value={totalTokens(totals)} detail={`${filteredRecords.length} 条记录`} icon="bar-chart-outline" tint="#2b7a70" />
-              <MetricCard label="输入" value={totals.inputTokens} detail="Input tokens" icon="download-outline" tint="#1e8e62" />
+
+            <View className="gap-2">
+              <View className="flex-row gap-2">
+                <MetricTile label="总用量" value={totalTokens(totals)} detail={`${filteredRecords.length} 条记录`} icon="bar-chart-outline" tone="accent" />
+                <MetricTile label="输入" value={totals.inputTokens} detail="Input tokens" icon="download-outline" tone="success" />
+              </View>
+              <View className="flex-row gap-2">
+                <MetricTile label="输出" value={totals.outputTokens} detail={`${outputRatio}% 占比`} icon="cloud-upload-outline" tone="default" />
+                <MetricTile label="缓存命中" value={totals.cachedInputTokens} detail={`${cacheRate}% 命中率`} icon="flash-outline" tone="warning" />
+              </View>
             </View>
-            <View className="mt-2 flex-row gap-2 px-4">
-              <MetricCard label="输出" value={totals.outputTokens} detail="Output tokens" icon="cloud-upload-outline" tint="#5477b5" />
-              <MetricCard label="缓存命中" value={totals.cachedInputTokens} detail={`${cacheRate}% 命中率`} icon="flash-outline" tint="#b27b2b" />
+
+            {chartData.length > 0 ? (
+              <Widget>
+                <Widget.Header>
+                  <View>
+                    <Widget.Title>{groupTitle}分布</Widget.Title>
+                    <Widget.Description>输入与输出 token（前 {chartData.length} 项）</Widget.Description>
+                  </View>
+                  <Widget.Legend>
+                    <Widget.LegendItem colorClassName="bg-chart-2">输入</Widget.LegendItem>
+                    <Widget.LegendItem colorClassName="bg-chart-1">输出</Widget.LegendItem>
+                  </Widget.Legend>
+                </Widget.Header>
+                <Widget.Content>
+                  <BarChart data={chartData} xKey="index" yKeys={['input', 'output']} wrapperClassName="h-44">
+                    {({ points, chartBounds }) => (
+                      <BarChart.BarGroup chartBounds={chartBounds} barWidth={12}>
+                        <BarChart.BarGroupItem points={points.input} colorClassName="accent-chart-2" />
+                        <BarChart.BarGroupItem points={points.output} colorClassName="accent-chart-1" />
+                      </BarChart.BarGroup>
+                    )}
+                  </BarChart>
+                  <View className="mt-2 flex-row flex-wrap gap-1.5">
+                    {chartData.map((item) => (
+                      <Chip key={item.label} size="sm" variant="soft">
+                        <Chip.Label numberOfLines={1} className="max-w-[140px]">
+                          {item.index + 1}. {item.label}
+                        </Chip.Label>
+                      </Chip>
+                    ))}
+                  </View>
+                </Widget.Content>
+                <Widget.Footer>
+                  <Widget.Description>缓存读取 {formatTokens(totals.cachedInputTokens)} · 缓存写入 {formatTokens(totals.cacheWriteTokens)}</Widget.Description>
+                </Widget.Footer>
+              </Widget>
+            ) : null}
+
+            <View className="gap-2">
+              <SectionHeader title={groupTitle} description={`${groupedRows.length} 项`} />
+              <ListSection>
+                {groupedRows.map((row) => {
+                  const total = totalTokens(row.totals);
+                  const share = maxRowTotal > 0 ? Math.round((total / maxRowTotal) * 100) : 0;
+                  const rowCacheBase = row.totals.inputTokens + row.totals.cachedInputTokens;
+                  const rowCacheRate = rowCacheBase > 0 ? Math.round((row.totals.cachedInputTokens / rowCacheBase) * 100) : 0;
+                  return (
+                    <ListRow
+                      key={row.id}
+                      title={row.label}
+                      description={
+                        <View className="mt-1 gap-1.5">
+                          <ProgressBar value={share} size="sm" color="accent">
+                            <ProgressBar.Track className="h-1.5">
+                              <ProgressBar.Fill />
+                            </ProgressBar.Track>
+                          </ProgressBar>
+                          <Text type="body-xs" color="muted" numberOfLines={1}>
+                            输入 {formatTokens(row.totals.inputTokens)} · 输出 {formatTokens(row.totals.outputTokens)} · 缓存 {formatTokens(row.totals.cachedInputTokens)}
+                          </Text>
+                        </View>
+                      }
+                      descriptionLines={3}
+                      suffix={
+                        <View className="items-end gap-1">
+                          <Text type="body-sm" weight="semibold" className="font-mono text-foreground">
+                            {formatTokens(total)}
+                          </Text>
+                          {rowCacheRate > 0 ? (
+                            <TrendChip trend={rowCacheRate >= 50 ? 'up' : 'neutral'} size="sm">
+                              <TrendChip.Value>{rowCacheRate}%</TrendChip.Value>
+                              <TrendChip.Suffix> 缓存</TrendChip.Suffix>
+                            </TrendChip>
+                          ) : null}
+                        </View>
+                      }
+                      className="py-3.5"
+                    />
+                  );
+                })}
+              </ListSection>
             </View>
-          </View>
+          </>
         )}
-        ListEmptyComponent={<HeroText className="px-4 py-10 text-center text-sm text-muted">还没有用量记录。</HeroText>}
-      />
-    </Surface>
+      </ScreenScrollView>
+    </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  listContent: { paddingBottom: 28 },
-  filterPill: {
-    minHeight: 36,
-    maxWidth: 180,
-    justifyContent: 'center',
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: '#d7dce0',
-    backgroundColor: '#f7f9fa',
-    paddingHorizontal: 14,
-  },
-  filterPillSelected: { borderColor: '#2b7a70', backgroundColor: '#2b7a70' },
-  filterPillText: { color: '#52606b', fontSize: 12, fontWeight: '700' },
-  filterPillTextSelected: { color: '#ffffff' },
-  metricIcon: { width: 30, height: 30, alignItems: 'center', justifyContent: 'center', borderRadius: 8 },
-});
-

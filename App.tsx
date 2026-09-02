@@ -6922,9 +6922,8 @@ export default function App() {
                   workspacePath={activeWorkspace?.path}
                   dataDirectory={serverVersion?.data_dir}
                   connectionState={connectionState}
-                  onCopy={async (value, label) => {
+                  onCopy={async (value) => {
                     await Clipboard.setStringAsync(value);
-                    Alert.alert('已复制', label);
                   }}
                 />
               )}

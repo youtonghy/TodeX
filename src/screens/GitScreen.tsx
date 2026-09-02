@@ -31,7 +31,7 @@ export type GitScreenProps = {
 };
 
 function formatChangeCount(value: number | undefined): number {
-  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
 }
 
 function actionLabel(action: GitAction): string {

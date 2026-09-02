@@ -1,8 +1,11 @@
 import { useMemo, useState } from 'react';
-import { ActivityIndicator, FlatList, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { Button, Card, Surface, Text as HeroText } from 'heroui-native';
+import { FlatList, RefreshControl, ScrollView, View } from 'react-native';
+import { Button, Chip, Surface, Switch, Text } from 'heroui-native';
+import { Segment } from 'heroui-native-pro';
+
 import type { McpCatalog, McpServerCatalogDescriptor, ProviderDescriptor, ProviderKind, SkillCatalog, SkillCatalogDescriptor } from '../lib/v2';
+import { ProviderIcon } from './ProviderIcon';
+import { EmptyStateView, InlineNotice, LoadingState, Screen, StyledIonicons } from './ui';
 
 export type CatalogState = {
   status: 'idle' | 'loading' | 'ready' | 'error';
@@ -38,11 +41,11 @@ function isCommonSource(source: string): boolean {
   return source.toLowerCase().includes('shared') || source.toLowerCase().includes('common');
 }
 
-function providerStatus(provider: ProviderDescriptor | undefined): { label: string; color: string } {
-  if (!provider) return { label: '未加载', color: '#7a8391' };
+function providerStatus(provider: ProviderDescriptor | undefined): { label: string; color: 'default' | 'success' | 'danger' } {
+  if (!provider) return { label: '未加载', color: 'default' };
   return provider.available
-    ? { label: '可用', color: '#1e8e62' }
-    : { label: provider.unavailableReason || '不可用', color: '#b04a4a' };
+    ? { label: '可用', color: 'success' }
+    : { label: provider.unavailableReason || '不可用', color: 'danger' };
 }
 
 function SkillRow({
@@ -56,29 +59,44 @@ function SkillRow({
   canSelect: boolean;
   onToggle?: () => void;
 }) {
-  const status = selected ? '已附加' : item.active && item.valid ? '当前启用' : item.shadowedBy ? '被覆盖' : item.valid ? '未启用' : '无效';
+  const enabled = item.active && item.valid;
+  const status = selected ? '已附加' : enabled ? '当前启用' : item.shadowedBy ? '被覆盖' : item.valid ? '未启用' : '无效';
+  const statusColor: 'accent' | 'success' | 'default' | 'danger' = selected ? 'accent' : enabled ? 'success' : item.valid ? 'default' : 'danger';
   return (
-    <Card variant="transparent" className="mb-2 border border-separator bg-surface-secondary px-3 py-3">
+    <Surface className="mb-2 gap-2.5 rounded-3xl p-4">
       <View className="flex-row items-start gap-3">
-        <View className="h-9 w-9 items-center justify-center rounded-lg bg-accent-soft">
-          <Ionicons name="flash-outline" size={18} color="#2b7a70" />
+        <View className={`h-10 w-10 items-center justify-center rounded-2xl ${selected ? 'bg-accent' : 'bg-accent/15'}`}>
+          <StyledIonicons name="flash" size={18} className={selected ? 'text-accent-foreground' : 'text-accent'} />
         </View>
-        <View className="min-w-0 flex-1">
+        <View className="min-w-0 flex-1 gap-1">
           <View className="flex-row items-center justify-between gap-2">
-            <HeroText className="flex-1 font-semibold text-foreground" numberOfLines={1}>{item.name}</HeroText>
-            <HeroText style={{ color: selected || (item.active && item.valid) ? '#1e8e62' : '#7a8391' }} className="text-xs font-semibold">{status}</HeroText>
+            <Text type="body" weight="semibold" className="min-w-0 flex-1 text-foreground" numberOfLines={1}>
+              {item.name}
+            </Text>
+            <Chip size="sm" variant="soft" color={statusColor}>
+              <Chip.Label>{status}</Chip.Label>
+            </Chip>
           </View>
-          {item.description ? <HeroText className="mt-1 text-xs text-muted" numberOfLines={3}>{item.description}</HeroText> : null}
-          <HeroText className="mt-2 text-[11px] text-muted">{item.scope} · {item.source}</HeroText>
-          {item.error ? <HeroText className="mt-1 text-xs text-danger" numberOfLines={2}>{item.error}</HeroText> : null}
-          {canSelect ? (
-            <Button size="sm" variant={selected ? 'secondary' : 'primary'} className="mt-2 self-start" onPress={onToggle}>
-              <Button.Label>{selected ? '取消附加' : '附加到下一条消息'}</Button.Label>
-            </Button>
+          {item.description ? (
+            <Text type="body-sm" color="muted" numberOfLines={3}>
+              {item.description}
+            </Text>
           ) : null}
+          <Text type="body-xs" color="muted" numberOfLines={1} className="font-mono">
+            {item.scope} · {item.source}
+          </Text>
+          {item.error ? <InlineNotice status="danger" title={item.error} className="mt-1" /> : null}
         </View>
       </View>
-    </Card>
+      {canSelect ? (
+        <View className="flex-row items-center justify-between gap-3 rounded-2xl bg-surface-secondary px-3 py-2 pl-[52px]">
+          <Text type="body-sm" className="text-foreground">
+            附加到下一条消息
+          </Text>
+          <Switch isSelected={selected} onSelectedChange={() => onToggle?.()} isDisabled={!item.valid} />
+        </View>
+      ) : null}
+    </Surface>
   );
 }
 
@@ -91,27 +109,39 @@ function McpRow({
   canInvoke: boolean;
   onCall?: (toolName: string) => void;
 }) {
-  const status = item.enabled && item.active ? '当前启用' : item.shadowedBy ? '被覆盖' : item.enabled ? '可用' : '已禁用';
+  const active = item.enabled && item.active;
+  const status = active ? '当前启用' : item.shadowedBy ? '被覆盖' : item.enabled ? '可用' : '已禁用';
   return (
-    <Card variant="transparent" className="mb-2 border border-separator bg-surface-secondary px-3 py-3">
+    <Surface className="mb-2 gap-2.5 rounded-3xl p-4">
       <View className="flex-row items-start gap-3">
-        <View className="h-9 w-9 items-center justify-center rounded-lg bg-success-soft">
-          <Ionicons name="git-network-outline" size={18} color="#1e8e62" />
+        <View className="h-10 w-10 items-center justify-center rounded-2xl bg-success/15">
+          <StyledIonicons name="git-network-outline" size={18} className="text-success" />
         </View>
-        <View className="min-w-0 flex-1">
+        <View className="min-w-0 flex-1 gap-1">
           <View className="flex-row items-center justify-between gap-2">
-            <HeroText className="flex-1 font-semibold text-foreground" numberOfLines={1}>{item.name}</HeroText>
-            <HeroText style={{ color: item.enabled && item.active ? '#1e8e62' : '#7a8391' }} className="text-xs font-semibold">{status}</HeroText>
+            <Text type="body" weight="semibold" className="min-w-0 flex-1 text-foreground" numberOfLines={1}>
+              {item.name}
+            </Text>
+            <Chip size="sm" variant="soft" color={active ? 'success' : 'default'}>
+              <Chip.Label>{status}</Chip.Label>
+            </Chip>
           </View>
-          <HeroText className="mt-2 text-[11px] text-muted">{item.transport} · {item.scope} · {item.source}</HeroText>
-          {item.tools?.length && canInvoke ? item.tools.map((tool) => (
-            <Button key={tool.name} size="sm" variant="secondary" className="mt-2 self-start" onPress={() => onCall?.(tool.name)}>
-              <Button.Label>调用 {tool.name}</Button.Label>
-            </Button>
-          )) : null}
+          <Text type="body-xs" color="muted" numberOfLines={1} className="font-mono">
+            {item.transport} · {item.scope} · {item.source}
+          </Text>
         </View>
       </View>
-    </Card>
+      {item.tools?.length && canInvoke ? (
+        <View className="flex-row flex-wrap gap-2 pl-[52px]">
+          {item.tools.map((tool) => (
+            <Button key={tool.name} size="sm" variant="secondary" className="h-9 rounded-full" onPress={() => onCall?.(tool.name)}>
+              <StyledIonicons name="play-outline" size={13} className="text-foreground" />
+              <Button.Label>{tool.name}</Button.Label>
+            </Button>
+          ))}
+        </View>
+      ) : null}
+    </Surface>
   );
 }
 
@@ -153,70 +183,107 @@ export function CapabilitiesScreen({
   }, [providerChoice, selectedCatalogs]);
   const isLoading = state?.status === 'loading';
   const error = state?.error;
+  const refreshControl = (
+    <RefreshControl refreshing={false} onRefresh={() => providerChoice !== 'common' && onRefresh(providerChoice)} />
+  );
 
   return (
-    <Surface className="flex-1 bg-background">
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.providerRail}>
-        <Pressable onPress={() => setProviderChoice('common')} style={[styles.providerPill, providerChoice === 'common' && styles.providerPillActive]}>
-          <Text style={[styles.providerPillText, providerChoice === 'common' && styles.providerPillTextActive]}>通用</Text>
-        </Pressable>
-        {providers.map((item) => {
-          const status = providerStatus(item);
-          const selected = providerChoice === item.id;
-          return (
-            <Pressable key={item.id} onPress={() => setProviderChoice(item.id)} style={[styles.providerPill, selected && styles.providerPillActive]}>
-              <Text style={[styles.providerPillText, selected && styles.providerPillTextActive]}>{PROVIDER_LABELS[item.id]}</Text>
-              <Text style={{ color: selected ? '#ffffff' : status.color, fontSize: 10 }}>{item.available ? '●' : '○'}</Text>
-            </Pressable>
-          );
-        })}
-      </ScrollView>
-      <View className="px-4 pb-2 pt-3">
-        <View className="flex-row items-center justify-between">
+    <Screen>
+      <View className="gap-3 px-4 pb-2 pt-3">
+        <View className="flex-row items-center justify-between gap-3">
           <View className="min-w-0 flex-1">
-            <HeroText className="text-xl font-semibold text-foreground">Skills 和 MCPs</HeroText>
-            <HeroText className="mt-1 text-xs text-muted" numberOfLines={1}>{provider ? `${provider.displayName} · ${providerStatus(provider).label} · ${workspacePath}` : `通用能力 · ${workspacePath}`}</HeroText>
+            <Text type="h4" className="text-foreground">
+              Skills 和 MCPs
+            </Text>
+            <Text type="body-xs" color="muted" numberOfLines={1}>
+              {provider ? `${provider.displayName} · ${providerStatus(provider).label}` : '通用能力'} · {workspacePath}
+            </Text>
           </View>
           {providerChoice !== 'common' ? (
-            <Button isIconOnly size="sm" variant="ghost" accessibilityLabel="刷新能力目录" onPress={() => onRefresh(providerChoice)}>
-              <Ionicons name="refresh-outline" size={18} color="#52606b" />
+            <Button isIconOnly size="sm" variant="secondary" accessibilityLabel="刷新能力目录" onPress={() => onRefresh(providerChoice)} className="h-9 w-9 rounded-full">
+              <StyledIonicons name="refresh-outline" size={16} className="text-foreground" />
             </Button>
           ) : null}
         </View>
-        <View className="mt-3 flex-row rounded-lg bg-surface-secondary p-1">
-          {(['skills', 'mcp'] as const).map((mode) => (
-            <Button key={mode} variant={viewMode === mode ? 'primary' : 'ghost'} className="flex-1 rounded-md" onPress={() => setViewMode(mode)}>
-              <Button.Label>{mode === 'skills' ? 'Skills' : 'MCPs'}</Button.Label>
-            </Button>
-          ))}
-        </View>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerClassName="gap-2">
+          <Chip
+            size="md"
+            variant={providerChoice === 'common' ? 'primary' : 'soft'}
+            color={providerChoice === 'common' ? 'accent' : 'default'}
+            onPress={() => setProviderChoice('common')}
+            accessibilityRole="button"
+            accessibilityState={{ selected: providerChoice === 'common' }}
+          >
+            <StyledIonicons name="layers-outline" size={13} className={providerChoice === 'common' ? 'text-accent-foreground' : 'text-foreground'} />
+            <Chip.Label>通用</Chip.Label>
+          </Chip>
+          {providers.map((item) => {
+            const status = providerStatus(item);
+            const selected = providerChoice === item.id;
+            return (
+              <Chip
+                key={item.id}
+                size="md"
+                variant={selected ? 'primary' : 'soft'}
+                color={selected ? 'accent' : 'default'}
+                onPress={() => setProviderChoice(item.id)}
+                accessibilityRole="button"
+                accessibilityState={{ selected }}
+              >
+                <ProviderIcon provider={item.id} size={10} />
+                <Chip.Label>{PROVIDER_LABELS[item.id]}</Chip.Label>
+                <View className={`h-1.5 w-1.5 rounded-full ${status.color === 'success' ? 'bg-success' : status.color === 'danger' ? 'bg-danger' : 'bg-muted'}`} />
+              </Chip>
+            );
+          })}
+        </ScrollView>
+        <Segment value={viewMode} onValueChange={(value) => setViewMode(value as ViewMode)} size="sm">
+          <Segment.Group>
+            <Segment.Indicator />
+            <Segment.Item value="skills" className="flex-1">
+              <Segment.Label>Skills{skills.length ? ` · ${skills.length}` : ''}</Segment.Label>
+            </Segment.Item>
+            <Segment.Item value="mcp" className="flex-1">
+              <Segment.Label>MCPs{mcpServers.length ? ` · ${mcpServers.length}` : ''}</Segment.Label>
+            </Segment.Item>
+          </Segment.Group>
+        </Segment>
       </View>
-      {isLoading ? <View className="items-center py-10"><ActivityIndicator /><HeroText className="mt-2 text-xs text-muted">正在读取目录…</HeroText></View> : null}
-      {error ? <View className="mx-4 rounded-lg border border-danger-soft bg-danger-soft px-3 py-3"><HeroText className="text-sm text-danger">{error}</HeroText></View> : null}
+      {isLoading ? <LoadingState label="正在读取目录…" /> : null}
+      {error ? (
+        <View className="px-4">
+          <InlineNotice status="danger" title="目录读取失败" description={error} />
+        </View>
+      ) : null}
       {!isLoading && !error && viewMode === 'skills' ? (
-        <FlatList data={skills} keyExtractor={(item) => `${item.skill.resourceId}:${item.skill.name}`} renderItem={({ item }) => (
-          <SkillRow
-            item={item.skill}
-            selected={selectedSkills.some((skill) => skill.resourceId === item.skill.resourceId || skill.name === item.skill.name)}
-            canSelect={Boolean(canInvoke && onToggleSkill)}
-            onToggle={() => onToggleSkill?.(item.skill, item.provider)}
-          />
-        )} contentContainerStyle={styles.list} refreshControl={<RefreshControl refreshing={false} onRefresh={() => providerChoice !== 'common' && onRefresh(providerChoice)} />} ListEmptyComponent={<HeroText className="px-4 py-10 text-center text-sm text-muted">没有找到 Skill。</HeroText>} />
+        <FlatList
+          data={skills}
+          keyExtractor={(item) => `${item.skill.resourceId}:${item.skill.name}`}
+          renderItem={({ item }) => (
+            <SkillRow
+              item={item.skill}
+              selected={selectedSkills.some((skill) => skill.resourceId === item.skill.resourceId || skill.name === item.skill.name)}
+              canSelect={Boolean(canInvoke && onToggleSkill)}
+              onToggle={() => onToggleSkill?.(item.skill, item.provider)}
+            />
+          )}
+          contentContainerClassName="px-4 pb-10 pt-2"
+          refreshControl={refreshControl}
+          ListEmptyComponent={<EmptyStateView icon="flash-outline" title="没有找到 Skill" description="切换 Provider 或刷新目录后再试。" />}
+        />
       ) : null}
       {!isLoading && !error && viewMode === 'mcp' ? (
-        <FlatList data={mcpServers} keyExtractor={(item) => `${item.resourceId}:${item.name}`} renderItem={({ item }) => (
-          <McpRow item={item} canInvoke={canInvoke} onCall={(toolName) => onCallMcp?.(item.resourceId, toolName)} />
-        )} contentContainerStyle={styles.list} refreshControl={<RefreshControl refreshing={false} onRefresh={() => providerChoice !== 'common' && onRefresh(providerChoice)} />} ListEmptyComponent={<HeroText className="px-4 py-10 text-center text-sm text-muted">没有找到 MCP Server。</HeroText>} />
+        <FlatList
+          data={mcpServers}
+          keyExtractor={(item) => `${item.resourceId}:${item.name}`}
+          renderItem={({ item }) => (
+            <McpRow item={item} canInvoke={canInvoke} onCall={(toolName) => onCallMcp?.(item.resourceId, toolName)} />
+          )}
+          contentContainerClassName="px-4 pb-10 pt-2"
+          refreshControl={refreshControl}
+          ListEmptyComponent={<EmptyStateView icon="git-network-outline" title="没有找到 MCP Server" description="切换 Provider 或刷新目录后再试。" />}
+        />
       ) : null}
-    </Surface>
+    </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  providerRail: { gap: 8, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 4 },
-  providerPill: { minHeight: 34, flexDirection: 'row', alignItems: 'center', gap: 6, borderRadius: 8, backgroundColor: '#eef0f2', paddingHorizontal: 12 },
-  providerPillActive: { backgroundColor: '#2b7a70' },
-  providerPillText: { color: '#52606b', fontSize: 12, fontWeight: '700' },
-  providerPillTextActive: { color: '#ffffff' },
-  list: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 28 },
-});

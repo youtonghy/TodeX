@@ -87,8 +87,10 @@ export function ListRow({
       ) : null}
       <ListGroup.ItemContent className="min-w-0">
         <ListGroup.ItemTitle numberOfLines={titleLines}>{title}</ListGroup.ItemTitle>
-        {description ? (
+        {typeof description === 'string' || typeof description === 'number' ? (
           <ListGroup.ItemDescription numberOfLines={descriptionLines}>{description}</ListGroup.ItemDescription>
+        ) : description ? (
+          <View>{description}</View>
         ) : null}
       </ListGroup.ItemContent>
       {suffix ? <ListGroup.ItemSuffix>{suffix}</ListGroup.ItemSuffix> : showChevron ? <ListGroup.ItemSuffix /> : null}
