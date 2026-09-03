@@ -12,6 +12,7 @@ import {
 import {
   FlatList,
   Image,
+  Modal,
   type ListRenderItemInfo,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
@@ -25,9 +26,9 @@ import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import * as Clipboard from 'expo-clipboard';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
-import { KeyboardStickyView, useKeyboardState } from 'react-native-keyboard-controller';
+import { KeyboardAvoidingView, KeyboardStickyView, useKeyboardState } from 'react-native-keyboard-controller';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Button, Surface, Text, TextArea } from 'heroui-native';
+import { Button, Input, Surface, Text, TextArea } from 'heroui-native';
 import { ProgressBar } from 'heroui-native-pro';
 
 import {
@@ -221,6 +222,7 @@ export function ChatScreen({
   const [expandedProgressIds, setExpandedProgressIds] = useState<Set<string>>(() => new Set());
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [attachmentMenuVisible, setAttachmentMenuVisible] = useState(false);
+  const [composerExpanded, setComposerExpanded] = useState(false);
   const [historyLoadReady, setHistoryLoadReady] = useState(false);
   const [visibleRenderItemCount, setVisibleRenderItemCount] = useState(INITIAL_RENDER_ITEM_COUNT);
   const messageScrollRef = useRef<FlatList<ConversationRenderItem> | null>(null);
@@ -229,6 +231,7 @@ export function ChatScreen({
   const pendingScrollFrameRef = useRef<number | null>(null);
   const attachedSessionKeyRef = useRef('');
   const composerInputRef = useRef<TextInput | null>(null);
+  const expandedComposerInputRef = useRef<TextInput | null>(null);
   const autoExpandedProgressIdsRef = useRef<Set<string>>(new Set());
   const autoExpandedRequestIdsRef = useRef<Map<string, string[]>>(new Map());
   const insets = useSafeAreaInsets();
@@ -488,6 +491,7 @@ export function ChatScreen({
 
   useEffect(() => {
     setHistoryLoadReady(false);
+    setComposerExpanded(false);
     setVisibleRenderItemCount(INITIAL_RENDER_ITEM_COUNT);
     initialLatestScrollRef.current = true;
     shouldFollowLatestRef.current = true;
@@ -1308,27 +1312,40 @@ export function ChatScreen({
             </ScrollView>
           ) : null}
 
-          <View className="flex-row items-end gap-2">
+          <View className="h-11 flex-row items-center gap-2">
             <Button isIconOnly size="md" variant="ghost" accessibilityLabel="添加附件" onPress={() => setAttachmentMenuVisible(true)} className="h-11 w-11 rounded-full">
               <StyledIonicons name="add" size={22} className="text-foreground" />
             </Button>
-            <TextArea
-              ref={composerInputRef}
-              value={chatDraft}
-              onChangeText={setChatDraft}
-              onSelectionChange={(event) => setComposerSelection(event.nativeEvent.selection)}
-              onKeyPress={(event) => {
-                if (event.nativeEvent.key === 'Escape' && isThinking) {
-                  stopThinking(route.params.conversationId);
-                }
-              }}
-              selection={composerSelection}
-              placeholder="输入消息，#能力，@文件，/命令"
-              autoCapitalize="none"
-              autoCorrect={false}
-              containerClassName="max-h-32 min-h-11 flex-1 rounded-2xl"
-              className="text-[15px] leading-5"
-            />
+            <View className="relative h-11 min-w-0 flex-1">
+              <Input
+                ref={composerInputRef}
+                value={chatDraft}
+                onChangeText={setChatDraft}
+                onSelectionChange={(event) => setComposerSelection(event.nativeEvent.selection)}
+                onKeyPress={(event) => {
+                  if (event.nativeEvent.key === 'Escape' && isThinking) {
+                    stopThinking(route.params.conversationId);
+                  }
+                }}
+                selection={composerSelection}
+                placeholder="输入消息，#能力，@文件，/命令"
+                autoCapitalize="none"
+                autoCorrect={false}
+                multiline={false}
+                containerClassName="h-11 min-h-11 rounded-2xl"
+                className="h-11 min-h-11 pr-11 text-[15px] leading-5"
+              />
+              <Button
+                isIconOnly
+                size="sm"
+                variant="ghost"
+                accessibilityLabel="全屏编辑消息"
+                onPress={() => setComposerExpanded(true)}
+                className="absolute right-1.5 top-1.5 h-8 w-8 rounded-full"
+              >
+                <StyledIonicons name="expand-outline" size={16} className="text-muted" />
+              </Button>
+            </View>
             {turnId ? (
               <Button isIconOnly size="md" variant="danger-soft" accessibilityLabel="中断当前任务" onPress={() => stopThinking(route.params.conversationId)} className="h-11 w-11 rounded-full">
                 <StyledIonicons name="stop" size={18} className="text-danger" />
@@ -1348,6 +1365,62 @@ export function ChatScreen({
           </View>
         </Surface>
       </KeyboardStickyView>
+
+      <Modal
+        visible={composerExpanded}
+        animationType="slide"
+        presentationStyle="fullScreen"
+        statusBarTranslucent
+        navigationBarTranslucent
+        onShow={() => expandedComposerInputRef.current?.focus()}
+        onRequestClose={() => setComposerExpanded(false)}
+      >
+        <Surface variant="secondary" className="flex-1 bg-background" style={{ paddingTop: insets.top }}>
+          <View className="h-14 flex-row items-center justify-between border-b border-separator px-4">
+            <Text type="h5" className="text-foreground">编辑消息</Text>
+            <Button
+              isIconOnly
+              size="md"
+              variant="ghost"
+              accessibilityLabel="退出全屏编辑"
+              onPress={() => setComposerExpanded(false)}
+              className="h-10 w-10 rounded-full"
+            >
+              <StyledIonicons name="contract-outline" size={20} className="text-foreground" />
+            </Button>
+          </View>
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} className="flex-1">
+            <TextArea
+              ref={expandedComposerInputRef}
+              value={chatDraft}
+              onChangeText={setChatDraft}
+              onSelectionChange={(event) => setComposerSelection(event.nativeEvent.selection)}
+              onKeyPress={(event) => {
+                if (event.nativeEvent.key === 'Escape' && isThinking) {
+                  stopThinking(route.params.conversationId);
+                }
+              }}
+              selection={composerSelection}
+              placeholder="输入消息，#能力，@文件，/命令"
+              autoCapitalize="none"
+              autoCorrect={false}
+              multiline
+              textAlignVertical="top"
+              containerClassName="m-4 flex-1 rounded-2xl"
+              className="h-full min-h-0 flex-1 p-4 text-[16px] leading-6"
+            />
+            <View
+              className="flex-row items-center justify-end border-t border-separator px-4 pt-3"
+              style={{ paddingBottom: Math.max(insets.bottom, 12) }}
+            >
+              <Button variant="primary" onPress={() => setComposerExpanded(false)} className="min-w-28 rounded-xl">
+                <StyledIonicons name="contract-outline" size={16} className="text-accent-foreground" />
+                <Button.Label>完成</Button.Label>
+              </Button>
+            </View>
+          </KeyboardAvoidingView>
+        </Surface>
+      </Modal>
 
       <AppSheet
         isOpen={menuVisible}
