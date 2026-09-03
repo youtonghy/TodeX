@@ -370,6 +370,7 @@ export function ConversationListScreen({
         onOpenChange={setCreateVisible}
         title="新建对话"
         description={`${workspace.name} · ${workspace.path}`}
+        snapPoints={['72%', '94%']}
         footer={
           <View className="flex-row gap-2">
             <Button variant="secondary" onPress={() => setCreateVisible(false)} className="rounded-xl">

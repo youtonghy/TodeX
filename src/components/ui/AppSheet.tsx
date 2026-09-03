@@ -1,6 +1,12 @@
-import type { ReactNode } from 'react';
+import { useCallback, type ReactNode } from 'react';
 import { View } from 'react-native';
-import { BottomSheetScrollView, BottomSheetView } from '@gorhom/bottom-sheet';
+import {
+  BottomSheetFooter,
+  BottomSheetScrollView,
+  BottomSheetView,
+  type BottomSheetFooterProps,
+} from '@gorhom/bottom-sheet';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BottomSheet } from 'heroui-native';
 
 /**
@@ -26,12 +32,18 @@ export function AppSheet({
   scrollable?: boolean;
   footer?: ReactNode;
 }) {
+  const { bottom: bottomInset } = useSafeAreaInsets();
   const header = title || description ? (
     <View className="mb-4 gap-1 pr-10">
       {title ? <BottomSheet.Title>{title}</BottomSheet.Title> : null}
       {description ? <BottomSheet.Description>{description}</BottomSheet.Description> : null}
     </View>
   ) : null;
+  const renderFooter = useCallback((props: BottomSheetFooterProps) => (
+    <BottomSheetFooter {...props} bottomInset={bottomInset}>
+      <View className="bg-background px-5 pb-4 pt-2">{footer}</View>
+    </BottomSheetFooter>
+  ), [bottomInset, footer]);
 
   return (
     <BottomSheet isOpen={isOpen} onOpenChange={onOpenChange}>
@@ -44,20 +56,24 @@ export function AppSheet({
           keyboardBehavior="interactive"
           keyboardBlurBehavior="restore"
           android_keyboardInputMode="adjustResize"
+          footerComponent={footer ? renderFooter : undefined}
         >
           <BottomSheet.Close className="absolute right-4 top-4 z-10" />
           {scrollable ? (
-            <BottomSheetScrollView keyboardShouldPersistTaps="handled" contentContainerClassName="px-1 pb-6">
+            <BottomSheetScrollView
+              keyboardShouldPersistTaps="handled"
+              enableFooterMarginAdjustment={Boolean(footer)}
+              contentContainerClassName="px-1 pb-6"
+            >
               {header}
               {children}
             </BottomSheetScrollView>
           ) : (
-            <BottomSheetView className="px-1 pb-6">
+            <BottomSheetView enableFooterMarginAdjustment={Boolean(footer)} className="px-1 pb-6">
               {header}
               {children}
             </BottomSheetView>
           )}
-          {footer ? <View className="px-1 pb-4 pt-2">{footer}</View> : null}
         </BottomSheet.Content>
       </BottomSheet.Portal>
     </BottomSheet>
