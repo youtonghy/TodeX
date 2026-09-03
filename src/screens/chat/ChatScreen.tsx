@@ -28,7 +28,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import { KeyboardAvoidingView, KeyboardStickyView, useKeyboardState } from 'react-native-keyboard-controller';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Button, Input, Surface, Text, TextArea } from 'heroui-native';
+import { Button, InputGroup, Surface, Text, TextArea } from 'heroui-native';
 import { ProgressBar } from 'heroui-native-pro';
 
 import {
@@ -1316,8 +1316,8 @@ export function ChatScreen({
             <Button isIconOnly size="md" variant="ghost" accessibilityLabel="添加附件" onPress={() => setAttachmentMenuVisible(true)} className="h-11 w-11 rounded-full">
               <StyledIonicons name="add" size={22} className="text-foreground" />
             </Button>
-            <View className="relative h-11 min-w-0 flex-1">
-              <Input
+            <InputGroup className="h-11 min-w-0 flex-1">
+              <InputGroup.Input
                 ref={composerInputRef}
                 value={chatDraft}
                 onChangeText={setChatDraft}
@@ -1333,19 +1333,21 @@ export function ChatScreen({
                 autoCorrect={false}
                 multiline={false}
                 containerClassName="h-11 min-h-11 rounded-2xl"
-                className="h-11 min-h-11 pr-11 text-[15px] leading-5"
+                className="h-11 min-h-11 text-[15px] leading-5"
               />
-              <Button
-                isIconOnly
-                size="sm"
-                variant="ghost"
-                accessibilityLabel="全屏编辑消息"
-                onPress={() => setComposerExpanded(true)}
-                className="absolute right-1.5 top-1.5 h-8 w-8 rounded-full"
-              >
-                <StyledIonicons name="expand-outline" size={16} className="text-muted" />
-              </Button>
-            </View>
+              <InputGroup.Suffix className="px-1.5">
+                <Button
+                  isIconOnly
+                  size="sm"
+                  variant="ghost"
+                  accessibilityLabel="全屏编辑消息"
+                  onPress={() => setComposerExpanded(true)}
+                  className="h-8 w-8 rounded-full"
+                >
+                  <StyledIonicons name="expand-outline" size={16} className="text-muted" />
+                </Button>
+              </InputGroup.Suffix>
+            </InputGroup>
             {turnId ? (
               <Button isIconOnly size="md" variant="danger-soft" accessibilityLabel="中断当前任务" onPress={() => stopThinking(route.params.conversationId)} className="h-11 w-11 rounded-full">
                 <StyledIonicons name="stop" size={18} className="text-danger" />
