@@ -23,6 +23,7 @@ Built with **React Native 0.86**, **Expo SDK 57**, **Uniwind (Tailwind CSS v4)**
 
 - **Mobile-First Agent Chat**:
   - Full streaming conversation timeline with auto-scroll and jump-to-latest button.
+  - Agent reasoning and tool activity stay collapsed and unmounted by default; final answers remain separate from context and execution details.
   - Interactive approval cards for shell commands, file modifications, tool calls, and permission elevation.
   - Rich mention auto-complete:
     - `@` retrieves workspace files and directories directly from the backend sandbox.

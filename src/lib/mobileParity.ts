@@ -556,7 +556,8 @@ export function contextUsageFromV2Event(
   const eventType = readString(eventRecord, ['type', 'eventType', 'event_type']);
   const normalizedUsage = objectAt(payload, ['usage']);
   const normalizedLast = objectAt(normalizedUsage, ['last']);
-  if (eventType === 'usage.updated' && normalizedLast) {
+  const normalizedBlock = conversationBlock(payload, '');
+  if ((eventType === 'usage.updated' || normalizedBlock?.category === 'usage') && normalizedLast) {
     const inputTokens = usageField(normalizedLast, ['input']);
     const outputTokens = usageField(normalizedLast, ['output']);
     const cachedInputTokens = usageField(normalizedLast, ['cacheRead']);
@@ -564,7 +565,7 @@ export function contextUsageFromV2Event(
     const total = usageField(normalizedLast, ['total']);
     const model = readString(payload, ['model', 'modelId', 'model_id']);
     return {
-      usedTokens: total || inputTokens + outputTokens + cachedInputTokens + cacheWriteTokens,
+      usedTokens: total || inputTokens + outputTokens,
       contextWindow: usageField(payload, ['contextWindow', 'context_window']) || undefined,
       inputTokens,
       outputTokens,
@@ -582,7 +583,7 @@ export function contextUsageFromV2Event(
     const total = usageField(last, ['totalTokens', 'total_tokens', 'total']);
     const model = readString(payload, ['model', 'modelId', 'model_id']);
     return {
-      usedTokens: total || inputTokens + outputTokens + cachedInputTokens + cacheWriteTokens,
+      usedTokens: total || inputTokens + outputTokens,
       contextWindow: usageField(tokenUsage, ['modelContextWindow', 'model_context_window', 'contextWindow', 'context_window']) || undefined,
       inputTokens,
       outputTokens,
@@ -605,7 +606,7 @@ export function contextUsageFromV2Event(
   const cacheWriteTokens = usageField(usage, ['cacheWrite', 'cache_write', 'cacheWriteInputTokens', 'cache_write_input_tokens', 'cacheCreationInputTokens', 'cache_creation_input_tokens']);
   const total = usageField(usage, ['totalTokens', 'total_tokens', 'total']);
   return {
-    usedTokens: total || inputTokens + outputTokens + cachedInputTokens + cacheWriteTokens,
+    usedTokens: total || inputTokens + outputTokens,
     inputTokens,
     outputTokens,
     cachedInputTokens,
@@ -648,6 +649,18 @@ export function usageRecordFromV2Event(
 
 export const usageRecordFromEvent = usageRecordFromV2Event;
 
+export type ConversationBlockCategory =
+  | 'assistant_final'
+  | 'assistant_progress'
+  | 'reasoning'
+  | 'tool'
+  | 'approval'
+  | 'status'
+  | 'error'
+  | 'usage';
+
+export type ConversationBlockPhase = 'started' | 'delta' | 'completed' | 'failed';
+
 export type TimelineEntry = {
   id: string;
   kind: 'incoming' | 'outgoing' | 'system';
@@ -658,7 +671,43 @@ export type TimelineEntry = {
   workspaceId?: string;
   conversationId?: string;
   requestId?: string;
+  category?: ConversationBlockCategory;
+  phase?: ConversationBlockPhase;
+  turnId?: string;
+  blockId?: string;
+  contentIndex?: number;
+  sequence?: number;
 };
+
+type NormalizedConversationBlock = {
+  category: ConversationBlockCategory;
+  id: string;
+  phase: ConversationBlockPhase;
+  turnId: string;
+  contentIndex?: number;
+};
+
+const BLOCK_CATEGORIES = new Set<ConversationBlockCategory>([
+  'assistant_final', 'assistant_progress', 'reasoning', 'tool',
+  'approval', 'status', 'error', 'usage',
+]);
+const BLOCK_PHASES = new Set<ConversationBlockPhase>(['started', 'delta', 'completed', 'failed']);
+
+function conversationBlock(payload: JsonRecord, fallbackTurnId: string): NormalizedConversationBlock | null {
+  const block = asRecord(payload.block);
+  const category = readString(block, ['category']) as ConversationBlockCategory;
+  const phase = readString(block, ['phase']) as ConversationBlockPhase;
+  const id = readString(block, ['id']);
+  if (!id || !BLOCK_CATEGORIES.has(category) || !BLOCK_PHASES.has(phase)) return null;
+  const contentIndex = readNumber(block, ['contentIndex', 'content_index'], -1);
+  return {
+    category,
+    id,
+    phase,
+    turnId: readString(block, ['turnId', 'turn_id']) || fallbackTurnId,
+    ...(contentIndex >= 0 ? { contentIndex } : {}),
+  };
+}
 
 function shortJsonValue(value: unknown): string {
   try {
@@ -705,6 +754,67 @@ function conversationContent(payload: JsonRecord, message: JsonRecord | null, de
   return '';
 }
 
+function textContent(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (!Array.isArray(value)) return '';
+  return value.map((part) => {
+    if (typeof part === 'string') return part;
+    const record = asRecord(part);
+    if (!record) return '';
+    const type = readString(record, ['type']).toLowerCase();
+    if (type && !['text', 'output_text', 'input_text'].includes(type)) return '';
+    return readString(record, ['text', 'content', 'output_text', 'outputText']);
+  }).filter(Boolean).join('');
+}
+
+function blockContent(
+  category: ConversationBlockCategory,
+  payload: JsonRecord,
+  message: JsonRecord | null,
+  delta: JsonRecord | null,
+): string {
+  if (category === 'assistant_final' || category === 'assistant_progress') {
+    return readString(payload, ['text', 'content'])
+      || (typeof payload.delta === 'string' ? payload.delta : '')
+      || readString(delta, ['text', 'delta', 'content'])
+      || textContent(message?.content)
+      || readString(message, ['text']);
+  }
+  if (category === 'reasoning') {
+    return readString(payload, ['thought', 'thoughtText', 'thought_text', 'reasoning', 'thinking', 'analysis'])
+      || readString(delta, ['thinking', 'reasoning', 'analysis', 'text', 'delta', 'content']);
+  }
+  if (category === 'tool') {
+    const toolCall = asRecord(delta?.toolCall);
+    if (payload.toolCallId || payload.tool_call_id) {
+      return shortJsonValue({
+        toolName: payload.toolName ?? payload.tool_name,
+        arguments: payload.arguments,
+        partialResult: payload.partialResult ?? payload.partial_result,
+        result: payload.result,
+        isError: payload.isError ?? payload.is_error,
+      });
+    }
+    const deltaText = readString(delta, ['delta']);
+    if (deltaText) return deltaText;
+    const value = payload.partialResult ?? payload.partial_result ?? payload.result
+      ?? payload.arguments ?? payload.item ?? payload.tool ?? payload.toolCall ?? payload.tool_call
+      ?? toolCall ?? delta;
+    return typeof value === 'string' ? value : shortJsonValue(value);
+  }
+  if (category === 'approval') {
+    return readString(payload, ['title', 'question', 'message'])
+      || (payload.details === undefined ? '' : shortJsonValue(payload.details));
+  }
+  if (category === 'error') {
+    return readString(payload, ['message', 'error', 'reason']) || shortJsonValue(payload.error ?? payload);
+  }
+  if (category === 'status') {
+    return readString(payload, ['status', 'message', 'text']);
+  }
+  return '';
+}
+
 function normalizeEventType(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
@@ -719,6 +829,8 @@ export function shouldAppendV2ConversationEvent(event: ConversationEvent): boole
   const delta = asRecord(payload?.delta);
   const type = readString(eventRecord, ['type', 'eventType', 'event_type']);
   const deltaType = readString(delta, ['type', 'deltaType', 'delta_type']);
+  const block = payload ? conversationBlock(payload, '') : null;
+  if (block) return block.phase === 'delta';
   return type === 'message.delta'
     || type === 'thought.delta'
     || /(?:thinking|text|toolcall)_delta$/i.test(deltaType);
@@ -748,6 +860,7 @@ export function classifyV2ConversationEvent(
   const messageRole = readString(message, ['role']).toLowerCase();
   const at = eventTime(event, now);
   const base = { raw: '', at, workspaceId, conversationId };
+  const block = conversationBlock(payload, turnId);
 
   if (type === 'provider.event' && isProviderLifecycleMethod(providerMethod)) {
     return null;
@@ -758,6 +871,55 @@ export function classifyV2ConversationEvent(
   }
   if (type === 'message.completed' && (role === 'user' || role === 'human')) {
     return null;
+  }
+  if (
+    type === 'message.completed'
+    && (
+      readString(message, ['stopReason', 'stop_reason']) === 'toolUse'
+      || (messageRole && messageRole !== 'assistant')
+    )
+  ) {
+    return null;
+  }
+
+  if (block) {
+    if (block.category === 'usage') return null;
+    const subtitle = blockContent(block.category, payload, message, delta);
+    const id = `v2-block-${conversationId}-${block.turnId || 'turnless'}-${block.category}-${block.id}`;
+    const semantic = {
+      id,
+      subtitle,
+      category: block.category,
+      phase: block.phase,
+      turnId: block.turnId,
+      blockId: block.id,
+      contentIndex: block.contentIndex,
+      sequence: readNumber(eventRecord, ['sequence'], 0),
+      ...base,
+    };
+    switch (block.category) {
+      case 'assistant_final':
+        return subtitle ? { ...semantic, kind: 'incoming', title: 'Agent' } : null;
+      case 'assistant_progress':
+        return null;
+      case 'reasoning':
+        return subtitle ? { ...semantic, kind: 'system', title: '思考中' } : null;
+      case 'tool':
+        return { ...semantic, kind: 'system', title: '工具调用' };
+      case 'approval':
+        return {
+          ...semantic,
+          kind: 'system',
+          title: '请求权限批准',
+          requestId: readString(payload, ['permissionId', 'requestId', 'providerRequestId']),
+        };
+      case 'error':
+        return { ...semantic, kind: 'system', title: '运行异常' };
+      case 'status':
+        return subtitle ? { ...semantic, kind: 'system', title: '正在工作' } : null;
+      default:
+        return null;
+    }
   }
 
   const thoughtPayload = ['thought', 'thoughtText', 'thought_text', 'reasoning', 'thinking', 'analysis']
@@ -817,9 +979,6 @@ export function classifyV2ConversationEvent(
       ...base,
     };
   }
-  if (content) {
-    return { id: eventId, kind: 'incoming', title: 'Agent', subtitle: content, ...base };
-  }
   return null;
 }
 
@@ -835,8 +994,27 @@ export function isChatReminderEntry(entry: Pick<TimelineEntry, 'subtitle' | 'tit
     || /^codex\.local\.(?:start|turn|attach|status|stop|interrupt)$/i.test(subtitle.trim());
 }
 
+function isLegacyPiNonFinalEntry(entry: TimelineEntry): boolean {
+  if (entry.kind !== 'incoming' || !entry.raw || !/"provider"\s*:\s*"pi"/.test(entry.raw)) return false;
+  try {
+    const event = asRecord(JSON.parse(entry.raw));
+    const payload = asRecord(event?.payload);
+    const message = asRecord(payload?.message);
+    const role = readString(message, ['role']);
+    return readString(message, ['stopReason', 'stop_reason']) === 'toolUse'
+      || Boolean(role && role !== 'assistant');
+  } catch {
+    // Older desktop snapshots may contain bounded JSON. The discriminators
+    // occur before large tool results, so they remain safe to inspect.
+    return /"stopReason"\s*:\s*"toolUse"/.test(entry.raw)
+      || /"role"\s*:\s*"toolResult"/.test(entry.raw);
+  }
+}
+
 export function isVisibleConversationEntry(entry: TimelineEntry): boolean {
   if (isChatReminderEntry(entry)) return false;
+  if (entry.category === 'assistant_progress') return false;
+  if (isLegacyPiNonFinalEntry(entry)) return false;
   if (entry.kind === 'outgoing' || entry.kind === 'incoming') return true;
   if (/^sent codex\./i.test(entry.title)) return false;
   if (entry.title === '协议指令' || entry.title === '已开始思考') return false;
@@ -845,7 +1023,11 @@ export function isVisibleConversationEntry(entry: TimelineEntry): boolean {
 }
 
 export function isStepProgressEntry(entry: TimelineEntry): boolean {
-  return entry.kind === 'system' && (
+  if (entry.kind !== 'system') return false;
+  if (entry.category) {
+    return ['reasoning', 'tool', 'approval', 'status'].includes(entry.category);
+  }
+  return (
     entry.title === '执行步骤'
     || entry.title === '步骤完成'
     || entry.title === '请求权限批准'
@@ -855,7 +1037,20 @@ export function isStepProgressEntry(entry: TimelineEntry): boolean {
 }
 
 export function isThinkingProgressEntry(entry: TimelineEntry): boolean {
-  return entry.kind === 'system' && entry.title === '思考中';
+  return entry.kind === 'system' && (entry.category ? entry.category === 'reasoning' : entry.title === '思考中');
+}
+
+export function progressGroupLabel(
+  entries: readonly TimelineEntry[],
+  active: boolean,
+  pendingCount = 0,
+): string {
+  if (pendingCount > 0) return '等待批准';
+  if (!active) return '工作过程';
+  const latestCategory = entries[entries.length - 1]?.category;
+  if (latestCategory === 'reasoning') return '正在思考';
+  if (latestCategory === 'tool' || latestCategory === 'approval') return '正在执行';
+  return '正在工作';
 }
 
 export function isCollapsibleProgressEntry(entry: TimelineEntry): boolean {
@@ -868,8 +1063,8 @@ export type ConversationRenderItem =
 
 export function executionGroupId(entries: TimelineEntry[]): string {
   const first = entries[0]?.id || 'empty';
-  const last = entries[entries.length - 1]?.id || first;
-  return `execution-group-${first}-${last}`;
+  const conversationId = entries[0]?.conversationId || 'conversation';
+  return `execution-group-${conversationId}-${entries[0]?.turnId || first}`;
 }
 
 export function buildConversationRenderItems(entries: TimelineEntry[]): ConversationRenderItem[] {
@@ -882,7 +1077,12 @@ export function buildConversationRenderItems(entries: TimelineEntry[]): Conversa
       continue;
     }
     const group: TimelineEntry[] = [];
-    while (index < entries.length && isStepProgressEntry(entries[index])) {
+    const turnId = entries[index].turnId;
+    while (
+      index < entries.length
+      && isStepProgressEntry(entries[index])
+      && (!turnId || !entries[index].turnId || entries[index].turnId === turnId)
+    ) {
       group.push(entries[index]);
       index += 1;
     }

@@ -234,8 +234,6 @@ export function ChatScreen({
   const attachedSessionKeyRef = useRef('');
   const composerInputRef = useRef<TextInput | null>(null);
   const expandedComposerInputRef = useRef<TextInput | null>(null);
-  const autoExpandedProgressIdsRef = useRef<Set<string>>(new Set());
-  const autoExpandedRequestIdsRef = useRef<Map<string, string[]>>(new Map());
   const chatDraftRef = useRef(persistedChatDraft);
   const composerSelectionRef = useRef(persistedComposerSelection);
   const insets = useSafeAreaInsets();
@@ -361,25 +359,12 @@ export function ChatScreen({
     pendingRequests.forEach((request) => result.set(request.requestId, request));
     return result;
   }, [pendingRequests]);
-  const pendingRequestExpansionTargets = useMemo(() => {
-    const result = new Map<string, string[]>();
-
-    for (const item of conversationRenderItems) {
-      if (item.type === 'executionGroup') {
-        for (const entry of item.entries) {
-          if (entry.requestId) {
-            result.set(entry.requestId, [item.id, entry.id]);
-          }
-        }
-        continue;
-      }
-
-      if (item.entry.requestId) {
-        result.set(item.entry.requestId, [item.entry.id]);
-      }
+  const latestProgressGroupId = useMemo(() => {
+    for (let index = conversationRenderItems.length - 1; index >= 0; index -= 1) {
+      const item = conversationRenderItems[index];
+      if (item.type === 'executionGroup') return item.id;
     }
-
-    return result;
+    return '';
   }, [conversationRenderItems]);
   const slashQuery = chatDraft.startsWith('/') ? chatDraft.slice(1).trim().toLowerCase() : '';
   const providerSlashCommands = currentProviderCommands.map((item) => ({
@@ -914,103 +899,11 @@ export function ChatScreen({
     toggleProgressId(entry.id, collapsed);
   }, [toggleProgressId]);
 
-  useEffect(() => {
-    const activeTargets = new Map<string, string[]>();
-    for (const request of pendingRequests) {
-      const targetIds = pendingRequestExpansionTargets.get(request.requestId);
-      if (targetIds?.length) {
-        activeTargets.set(request.requestId, targetIds);
-      }
-    }
-
-    setExpandedProgressIds((current) => {
-      let next = current;
-      const ensureNext = () => {
-        if (next === current) {
-          next = new Set(current);
-        }
-      };
-
-      for (const [requestId, expandedIds] of Array.from(autoExpandedRequestIdsRef.current.entries())) {
-        const targetIds = activeTargets.get(requestId) ?? [];
-        const targetIdSet = new Set(targetIds);
-        const keptIds: string[] = [];
-
-        for (const id of expandedIds) {
-          if (targetIdSet.has(id)) {
-            keptIds.push(id);
-            continue;
-          }
-
-          if (autoExpandedProgressIdsRef.current.has(id)) {
-            ensureNext();
-            next.delete(id);
-            autoExpandedProgressIdsRef.current.delete(id);
-          }
-        }
-
-        if (targetIds.length) {
-          autoExpandedRequestIdsRef.current.set(requestId, keptIds);
-        } else {
-          autoExpandedRequestIdsRef.current.delete(requestId);
-        }
-      }
-
-      for (const [requestId, targetIds] of activeTargets) {
-        const trackedIds = new Set(autoExpandedRequestIdsRef.current.get(requestId) ?? []);
-
-        for (const id of targetIds) {
-          if (!next.has(id)) {
-            ensureNext();
-            next.add(id);
-            autoExpandedProgressIdsRef.current.add(id);
-            trackedIds.add(id);
-          } else if (autoExpandedProgressIdsRef.current.has(id)) {
-            trackedIds.add(id);
-          }
-        }
-
-        if (trackedIds.size) {
-          autoExpandedRequestIdsRef.current.set(requestId, [...trackedIds]);
-        }
-      }
-
-      return next === current ? current : next;
-    });
-  }, [pendingRequestExpansionTargets, pendingRequests]);
-
-  const collapseAutoExpandedRequest = useCallback((requestId: string) => {
-    const expandedIds = autoExpandedRequestIdsRef.current.get(requestId) ?? [];
-    autoExpandedRequestIdsRef.current.delete(requestId);
-
-    if (!expandedIds.length) {
-      return;
-    }
-
-    setExpandedProgressIds((current) => {
-      const next = new Set(current);
-      let changed = false;
-
-      for (const id of expandedIds) {
-        if (!autoExpandedProgressIdsRef.current.has(id)) {
-          continue;
-        }
-        autoExpandedProgressIdsRef.current.delete(id);
-        changed = next.delete(id) || changed;
-      }
-
-      return changed ? next : current;
-    });
-  }, []);
-
   const handleApprovalResponse = useCallback(
     (selection: boolean | PermissionOption, request: PendingRequest) => {
-      const sent = sendApprovalResponse(selection, request);
-      if (sent) {
-        collapseAutoExpandedRequest(request.requestId);
-      }
+      sendApprovalResponse(selection, request);
     },
-    [collapseAutoExpandedRequest, sendApprovalResponse],
+    [sendApprovalResponse],
   );
 
   const openMessageLink = useCallback((href: string) => {
@@ -1042,7 +935,8 @@ export function ChatScreen({
           id={item.id}
           entries={item.entries}
           collapsed={collapsed}
-          compactItems
+          active={isThinking && item.id === latestProgressGroupId}
+          compactItems={false}
           expandedProgressIds={expandedProgressIds}
           pendingRequestById={pendingRequestById}
           onToggleGroup={toggleProgressId}
@@ -1080,6 +974,7 @@ export function ChatScreen({
     forkCurrentConversation,
     isThinking,
     latestIncomingEntryId,
+    latestProgressGroupId,
     openMessageLink,
     pendingRequestById,
     toggleProgressEntry,

@@ -5,12 +5,12 @@ const { test } = require('node:test');
 const path = require('node:path');
 
 const compiledDir = path.join(__dirname, '..', '..', 'dist', 'unit');
-const todex = require(path.join(compiledDir, 'todex.js'));
-const transport = require(path.join(compiledDir, 'transport.js'));
-const transportCrypto = require(path.join(compiledDir, 'transportCrypto.js'));
-const v2 = require(path.join(compiledDir, 'v2.js'));
-const connectionError = require(path.join(compiledDir, 'connectionError.js'));
-const connectionProbe = require(path.join(compiledDir, 'connectionProbe.js'));
+const todex = require(path.join(compiledDir, 'lib', 'todex.js'));
+const transport = require(path.join(compiledDir, 'lib', 'transport.js'));
+const transportCrypto = require(path.join(compiledDir, 'lib', 'transportCrypto.js'));
+const v2 = require(path.join(compiledDir, 'lib', 'v2.js'));
+const connectionError = require(path.join(compiledDir, 'lib', 'connectionError.js'));
+const connectionProbe = require(path.join(compiledDir, 'lib', 'connectionProbe.js'));
 
 function baseSettings(overrides = {}) {
   return {

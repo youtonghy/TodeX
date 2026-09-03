@@ -8,6 +8,7 @@ import {
   compactTokenCount,
   extractMessageLinks,
   nowLabel,
+  progressGroupLabel,
   type MobileContextUsage,
   type TimelineEntry,
 } from '../../lib/appCore';
@@ -58,7 +59,7 @@ function UsageDialog({
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const total = usage ? usage.inputTokens + usage.outputTokens + usage.cachedInputTokens + usage.cacheWriteTokens : 0;
+  const total = usage ? usage.inputTokens + usage.outputTokens : 0;
   const elapsedSeconds = usage ? Math.max(0.001, (usage.updatedAt - entry.at) / 1000) : 0;
   const outputTps = usage ? usage.outputTokens / elapsedSeconds : 0;
   const rows = usage
@@ -180,17 +181,16 @@ export const MessageBubble = memo(function MessageBubble({
               {timeLabel}
             </Text>
           </View>
-          {entry.subtitle ? (
+          {!collapsed && entry.subtitle ? (
             <Text
-              selectable={!collapsed}
+              selectable
               type="body-xs"
-              className={`${collapsed ? 'text-muted' : 'leading-5 text-foreground'} ${hideTitle ? '' : 'pl-5'}`}
-              numberOfLines={collapsed ? 1 : undefined}
+              className={`leading-5 text-foreground ${hideTitle ? '' : 'pl-5'}`}
             >
               {entry.subtitle}
             </Text>
           ) : null}
-          {pendingRequest ? <ApprovalActions request={pendingRequest} onApprovalResponse={onApprovalResponse} /> : null}
+          {!collapsed && pendingRequest ? <ApprovalActions request={pendingRequest} onApprovalResponse={onApprovalResponse} /> : null}
         </Pressable>
       </View>
     );
@@ -267,6 +267,7 @@ export const ExecutionGroupBubble = memo(function ExecutionGroupBubble({
   id,
   entries,
   collapsed,
+  active,
   compactItems,
   expandedProgressIds,
   pendingRequestById,
@@ -278,6 +279,7 @@ export const ExecutionGroupBubble = memo(function ExecutionGroupBubble({
   id: string;
   entries: TimelineEntry[];
   collapsed: boolean;
+  active: boolean;
   compactItems: boolean;
   expandedProgressIds: Set<string>;
   pendingRequestById: Map<string, PendingRequest>;
@@ -287,10 +289,8 @@ export const ExecutionGroupBubble = memo(function ExecutionGroupBubble({
   onOpenLink?: (href: string) => void;
 }) {
   const latestEntry = entries[entries.length - 1];
-  const summary = entries
-    .map((entry) => entry.subtitle)
-    .find(Boolean) ?? `${entries.length} 个执行`;
   const pendingCount = entries.filter((entry) => entry.requestId && pendingRequestById.has(entry.requestId)).length;
+  const summary = progressGroupLabel(entries, active, pendingCount);
 
   return (
     <View className="mb-3 items-stretch px-1">

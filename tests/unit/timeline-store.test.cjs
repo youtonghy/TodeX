@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const path = require('node:path');
 
 const compiledDir = path.join(__dirname, '..', '..', 'dist', 'unit');
-const { ConversationReplayTracker, TimelineStore } = require(path.join(compiledDir, 'timelineStore.js'));
+const { ConversationReplayTracker, TimelineStore } = require(path.join(compiledDir, 'lib', 'timelineStore.js'));
 
 function entry(id, workspaceId, conversationId, subtitle = id) {
   return {
@@ -71,6 +71,29 @@ test('timeline store ignores raw-only changes from legacy persisted entries', ()
 
   assert.equal(store.getConversationSnapshot('w1', 'c1'), before);
   assert.equal(updates, 0);
+});
+
+test('timeline store applies semantic changes even when text and time are unchanged', () => {
+  const store = new TimelineStore(20);
+  const progress = {
+    ...entry('a1', 'w1', 'c1', 'same text'),
+    category: 'assistant_progress',
+    phase: 'delta',
+  };
+  store.replace([progress]);
+  let updates = 0;
+  store.subscribeConversation('w1', 'c1', () => { updates += 1; });
+
+  store.upsertBatch([{ entry: {
+    ...progress,
+    kind: 'incoming',
+    category: 'assistant_final',
+    phase: 'completed',
+  }, appendSubtitle: false }]);
+
+  assert.equal(updates, 1);
+  assert.equal(store.getConversationSnapshot('w1', 'c1')[0].kind, 'incoming');
+  assert.equal(store.getConversationSnapshot('w1', 'c1')[0].category, 'assistant_final');
 });
 
 test('timeline store enforces its global retention limit', () => {

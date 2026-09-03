@@ -3,10 +3,10 @@ const path = require('node:path');
 const { test } = require('node:test');
 
 const compiledDir = path.join(__dirname, '..', '..', 'dist', 'unit');
-const parity = require(path.join(compiledDir, 'mobileParity.js'));
-const { TimelineStore } = require(path.join(compiledDir, 'timelineStore.js'));
-const todex = require(path.join(compiledDir, 'todex.js'));
-const v2 = require(path.join(compiledDir, 'v2.js'));
+const parity = require(path.join(compiledDir, 'lib', 'mobileParity.js'));
+const { TimelineStore } = require(path.join(compiledDir, 'lib', 'timelineStore.js'));
+const todex = require(path.join(compiledDir, 'lib', 'todex.js'));
+const v2 = require(path.join(compiledDir, 'lib', 'v2.js'));
 
 function event(overrides = {}) {
   return {
@@ -241,6 +241,92 @@ test('classifies nested Pi thought, tool, and assistant events', () => {
   assert.equal(user.subtitle, 'prompt');
 });
 
+test('uses normalized block semantics before misleading payload fields', () => {
+  const normalized = (category, id, phase, extra = {}) => event({
+    type: category === 'tool' ? 'tool.updated' : 'message.completed',
+    payload: {
+      block: { category, id, turnId: 'turn-1', phase },
+      ...extra,
+    },
+  });
+
+  const firstTool = parity.classifyV2ConversationEvent(normalized('tool', 'tool-1', 'started', {
+    arguments: { command: 'pwd' },
+    thinking: 'must not become reasoning',
+  }), 'workspace-1');
+  const secondTool = parity.classifyV2ConversationEvent(normalized('tool', 'tool-2', 'completed', {
+    result: { ok: true },
+  }), 'workspace-1');
+  assert.equal(firstTool.category, 'tool');
+  assert.equal(firstTool.title, '工具调用');
+  assert.notEqual(firstTool.id, secondTool.id);
+  assert.equal(parity.shouldAppendV2ConversationEvent(normalized('tool', 'tool-1', 'started')), false);
+  assert.equal(parity.shouldAppendV2ConversationEvent(normalized('tool', 'tool-1', 'delta')), true);
+  assert.equal(parity.shouldAppendV2ConversationEvent(normalized('tool', 'tool-1', 'completed')), false);
+
+  const final = parity.classifyV2ConversationEvent(normalized('assistant_final', 'answer-1', 'completed', {
+    message: {
+      role: 'assistant',
+      content: [
+        { type: 'thinking', thinking: 'hidden' },
+        { type: 'text', text: 'final answer' },
+        { type: 'toolCall', name: 'read' },
+      ],
+    },
+    tool: { name: 'misleading' },
+  }), 'workspace-1');
+  assert.equal(final.category, 'assistant_final');
+  assert.equal(final.kind, 'incoming');
+  assert.equal(final.subtitle, 'final answer');
+
+  const progress = parity.classifyV2ConversationEvent(normalized('assistant_progress', 'progress-1', 'delta', {
+    delta: { text: 'intermediate' },
+  }), 'workspace-1');
+  assert.equal(progress, null);
+});
+
+test('does not promote unknown context content into an assistant answer', () => {
+  const unknown = parity.classifyV2ConversationEvent(event({
+    type: 'context.updated',
+    payload: { content: 'internal context, not a response' },
+  }), 'workspace-1');
+  assert.equal(unknown, null);
+});
+
+test('ignores legacy Pi tool-use and tool-result message completions', () => {
+  const toolUse = parity.classifyV2ConversationEvent(event({
+    type: 'message.completed',
+    payload: { message: { role: 'assistant', stopReason: 'toolUse', content: [{ type: 'text', text: 'draft' }] } },
+  }), 'workspace-1');
+  const toolResult = parity.classifyV2ConversationEvent(event({
+    type: 'message.completed',
+    payload: { message: { role: 'toolResult', content: [{ type: 'text', text: 'internal output' }] } },
+  }), 'workspace-1');
+  assert.equal(toolUse, null);
+  assert.equal(toolResult, null);
+  assert.equal(parity.isVisibleConversationEntry({
+    id: 'legacy-pi-tool-result',
+    kind: 'incoming',
+    title: 'Agent',
+    subtitle: 'internal output',
+    raw: JSON.stringify({ payload: { provider: 'pi', message: { role: 'toolResult', content: 'internal output' } } }),
+    at: 1,
+  }), false);
+});
+
+test('usage fallback does not double count cached input tokens', () => {
+  const usage = parity.contextUsageFromV2Event(event({
+    type: 'provider.event',
+    payload: {
+      block: { category: 'usage', id: 'usage-1', turnId: 'turn-1', phase: 'completed' },
+      usage: { last: { input: 100, output: 20, cacheRead: 80, cacheWrite: 5 } },
+      model: 'model-1',
+    },
+  }));
+  assert.equal(usage.usedTokens, 120);
+  assert.equal(usage.model, 'model-1');
+});
+
 test('appends normalized Grok Build streams and hides provider lifecycle noise', () => {
   const firstChunk = event({
     type: 'message.delta',
@@ -295,6 +381,31 @@ test('filters startup reminders and groups progress entries', () => {
   assert.equal(items[0].type, 'executionGroup');
   assert.equal(items[0].entries.length, 2);
   assert.equal(items[1].type, 'entry');
+});
+
+test('keeps process group ids stable and separates adjacent turns', () => {
+  const step = (id, turnId, at) => ({
+    id,
+    kind: 'system',
+    title: '工具调用',
+    subtitle: id,
+    raw: '',
+    at,
+    conversationId: 'conversation-1',
+    category: 'tool',
+    phase: 'completed',
+    turnId,
+  });
+  const first = parity.buildConversationRenderItems([step('a', 'turn-1', 1)]);
+  const extended = parity.buildConversationRenderItems([step('a', 'turn-1', 1), step('b', 'turn-1', 2)]);
+  assert.equal(first[0].id, extended[0].id);
+
+  const split = parity.buildConversationRenderItems([
+    step('a', 'turn-1', 1),
+    step('b', 'turn-2', 2),
+  ]);
+  assert.equal(split.length, 2);
+  assert.notEqual(split[0].id, split[1].id);
 });
 
 test('routes workspace links and validates loopback browser targets', () => {

@@ -77,9 +77,17 @@ export class TimelineStore {
           : update.entry.subtitle,
       };
       if (
-        merged.title === previous.title
+        merged.kind === previous.kind
+        && merged.title === previous.title
         && merged.subtitle === previous.subtitle
         && merged.at === previous.at
+        && merged.category === previous.category
+        && merged.phase === previous.phase
+        && merged.turnId === previous.turnId
+        && merged.blockId === previous.blockId
+        && merged.contentIndex === previous.contentIndex
+        && merged.sequence === previous.sequence
+        && merged.requestId === previous.requestId
       ) {
         continue;
       }

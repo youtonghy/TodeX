@@ -2613,6 +2613,7 @@ export default function App() {
             const nextUsage: MobileContextUsage = {
               usedTokens: contextUsage.usedTokens,
               contextWindow: contextUsage.contextWindow,
+              model: contextUsage.model,
               inputTokens: contextUsage.inputTokens,
               outputTokens: contextUsage.outputTokens,
               cachedInputTokens: contextUsage.cachedInputTokens,
@@ -5014,12 +5015,16 @@ export default function App() {
       const model = conversation.model || (conversation.provider === 'codex' ? workspace.model || settings.defaultModel : undefined);
       const reasoningEffort = normalizeReasoningEffort(conversation.reasoningEffort || (conversation.provider === 'codex' ? workspace.reasoningEffort || settings.defaultReasoningEffort : null));
       setConversationThinking(conversation.id, true);
-      appendTimeline(makeSystemEntry(
-        '正在思考',
-        skillRefs.length ? `已附带 ${skillRefs.length} 个 Skill，由后端注入。` : '请求已发给 Backend。',
-        workspace.id,
-        conversation.id,
-      ));
+      appendTimeline({
+        ...makeSystemEntry(
+          '正在工作',
+          skillRefs.length ? `已附带 ${skillRefs.length} 个 Skill，由后端注入。` : '请求已发给 Backend。',
+          workspace.id,
+          conversation.id,
+        ),
+        category: 'status',
+        phase: 'started',
+      });
       const sent = sendRawProtocolFrame({
         id: createRequestId('prompt'),
         type: 'conversation.prompt',

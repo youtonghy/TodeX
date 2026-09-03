@@ -64,6 +64,7 @@ import {
   isStepProgressEntry as sharedIsStepProgressEntry,
   isThinkingProgressEntry as sharedIsThinkingProgressEntry,
   isVisibleConversationEntry as sharedIsVisibleConversationEntry,
+  progressGroupLabel as sharedProgressGroupLabel,
   normalizeBackendConnectionProfile as sharedNormalizeBackendConnectionProfile,
   profileFromSettings as sharedProfileFromSettings,
   settingsFromProfile as sharedSettingsFromProfile,
@@ -841,6 +842,12 @@ export type TimelineEntry = {
   workspaceId?: string;
   conversationId?: string;
   requestId?: string;
+  category?: import('./mobileParity').ConversationBlockCategory;
+  phase?: import('./mobileParity').ConversationBlockPhase;
+  turnId?: string;
+  blockId?: string;
+  contentIndex?: number;
+  sequence?: number;
 };
 
 export type ConversationRenderItem =
@@ -2466,6 +2473,10 @@ export function isThinkingProgressEntry(entry: TimelineEntry): boolean {
 
 export function isCollapsibleProgressEntry(entry: TimelineEntry): boolean {
   return sharedIsCollapsibleProgressEntry(entry);
+}
+
+export function progressGroupLabel(entries: readonly TimelineEntry[], active: boolean, pendingCount = 0): string {
+  return sharedProgressGroupLabel(entries, active, pendingCount);
 }
 
 export function executionGroupId(entries: TimelineEntry[]): string {
