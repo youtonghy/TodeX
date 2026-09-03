@@ -554,6 +554,26 @@ export function contextUsageFromV2Event(
   const providerMethod = readString(payload, ['providerMethod', 'provider_method', 'method'])
     || readString(eventRecord, ['providerMethod', 'provider_method']);
   const eventType = readString(eventRecord, ['type', 'eventType', 'event_type']);
+  const normalizedUsage = objectAt(payload, ['usage']);
+  const normalizedLast = objectAt(normalizedUsage, ['last']);
+  if (eventType === 'usage.updated' && normalizedLast) {
+    const inputTokens = usageField(normalizedLast, ['input']);
+    const outputTokens = usageField(normalizedLast, ['output']);
+    const cachedInputTokens = usageField(normalizedLast, ['cacheRead']);
+    const cacheWriteTokens = usageField(normalizedLast, ['cacheWrite']);
+    const total = usageField(normalizedLast, ['total']);
+    const model = readString(payload, ['model', 'modelId', 'model_id']);
+    return {
+      usedTokens: total || inputTokens + outputTokens + cachedInputTokens + cacheWriteTokens,
+      contextWindow: usageField(payload, ['contextWindow', 'context_window']) || undefined,
+      inputTokens,
+      outputTokens,
+      cachedInputTokens,
+      cacheWriteTokens,
+      ...(model ? { model } : {}),
+      updatedAt: eventTime(event, now),
+    };
+  }
   if (last && (providerMethod === 'thread/tokenUsage/updated' || /tokenusage[./:_-]*updated/i.test(eventType))) {
     const inputTokens = usageField(last, ['inputTokens', 'input_tokens', 'input']);
     const outputTokens = usageField(last, ['outputTokens', 'output_tokens', 'output']);

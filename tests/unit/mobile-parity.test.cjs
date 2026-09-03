@@ -91,6 +91,27 @@ test('normalizes conversation records and manifests into the shared shape', () =
 });
 
 test('extracts token usage from protocol and provider completion events', () => {
+  const normalizedEvent = event({
+    type: 'usage.updated',
+    payload: {
+      provider: 'codex',
+      contextWindow: 200000,
+      usage: {
+        cumulative: { total: 300, input: 180, output: 80, cacheRead: 40, cacheWrite: 0 },
+        last: { total: 90, input: 50, output: 30, cacheRead: 10, cacheWrite: 0 },
+      },
+    },
+  });
+  assert.deepEqual(parity.contextUsageFromV2Event(normalizedEvent, 42), {
+    usedTokens: 90,
+    contextWindow: 200000,
+    inputTokens: 50,
+    outputTokens: 30,
+    cachedInputTokens: 10,
+    cacheWriteTokens: 0,
+    updatedAt: Date.parse(normalizedEvent.time),
+  });
+
   const tokenEvent = event({
     type: 'provider.event',
     payload: {
