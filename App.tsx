@@ -193,6 +193,7 @@ import {
   conversationFromManifest,
   mergeManifestConversations,
   classifyV2ConversationEvent,
+  shouldAppendV2ConversationEvent,
   conversationTitleFromNativeThread,
   conversationPatchFromNativeThread,
   resultThreadFromValue,
@@ -2488,11 +2489,7 @@ export default function App() {
             payloadTurnId || turnIdsRef.current[conversation.id] || '',
           );
           if (entry) {
-            const delta = eventPayload.delta && typeof eventPayload.delta === 'object' && !Array.isArray(eventPayload.delta)
-              ? eventPayload.delta as Record<string, unknown>
-              : {};
-            const deltaType = typeof delta.type === 'string' ? delta.type : '';
-            upsertChatTimeline(entry, /(?:thinking|text|toolcall)_delta$/i.test(deltaType));
+            upsertChatTimeline(entry, shouldAppendV2ConversationEvent(event));
           }
           if (event.type === 'turn.started') {
             setConversationThinking(conversation.id, true);

@@ -45,6 +45,7 @@ import type { WorkbenchTab } from '../screens/WorkbenchScreen';
 import {
   buildConversationRenderItems as sharedBuildConversationRenderItems,
   classifyV2ConversationEvent as sharedClassifyV2ConversationEvent,
+  shouldAppendV2ConversationEvent as sharedShouldAppendV2ConversationEvent,
   isCollapsibleProgressEntry as sharedIsCollapsibleProgressEntry,
   isStepProgressEntry as sharedIsStepProgressEntry,
   isThinkingProgressEntry as sharedIsThinkingProgressEntry,
@@ -1782,6 +1783,10 @@ export function mergeManifestConversations(
 
 export function classifyV2ConversationEvent(event: ConversationEvent, workspaceId: string, activeTurnId = ''): TimelineEntry | null {
   return sharedClassifyV2ConversationEvent(event, workspaceId, activeTurnId) as TimelineEntry | null;
+}
+
+export function shouldAppendV2ConversationEvent(event: ConversationEvent): boolean {
+  return sharedShouldAppendV2ConversationEvent(event);
 }
 
 export function modeLabelOf(mode: ConversationRecord['mode']): string {

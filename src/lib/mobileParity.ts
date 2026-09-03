@@ -709,6 +709,21 @@ function normalizeEventType(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
+function isProviderLifecycleMethod(value: string): boolean {
+  return /(?:^|[\/._-])mcp(?:[\/._-])(?:initialized|server(?:[\/._-])?status)$/i.test(value);
+}
+
+export function shouldAppendV2ConversationEvent(event: ConversationEvent): boolean {
+  const eventRecord = asRecord(event);
+  const payload = asRecord(eventRecord?.payload);
+  const delta = asRecord(payload?.delta);
+  const type = readString(eventRecord, ['type', 'eventType', 'event_type']);
+  const deltaType = readString(delta, ['type', 'deltaType', 'delta_type']);
+  return type === 'message.delta'
+    || type === 'thought.delta'
+    || /(?:thinking|text|toolcall)_delta$/i.test(deltaType);
+}
+
 /** Convert a v2 event into a render-neutral timeline entry. */
 export function classifyV2ConversationEvent(
   event: ConversationEvent,
@@ -733,6 +748,10 @@ export function classifyV2ConversationEvent(
   const messageRole = readString(message, ['role']).toLowerCase();
   const at = eventTime(event, now);
   const base = { raw: shortJsonValue(event), at, workspaceId, conversationId };
+
+  if (type === 'provider.event' && isProviderLifecycleMethod(providerMethod)) {
+    return null;
+  }
 
   if (type === 'message.created' && (role === 'user' || role === 'human')) {
     return { id: eventId, kind: 'outgoing', title: 'You', subtitle: content, ...base };
