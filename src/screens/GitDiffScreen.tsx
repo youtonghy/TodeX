@@ -1,33 +1,50 @@
-import { useCallback, useEffect } from 'react';
-import { ScrollView, View } from 'react-native';
-import type { NativeStackScreenProps } from '@react-navigation/native-stack';
+import { memo, useCallback, useEffect, useMemo } from 'react';
+import { FlatList, Platform, View } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { Button, Chip, Surface, Text } from 'heroui-native';
 
 import type { WorkspaceRecord } from '../lib/todex';
-import type { ConversationRecord, GitDiffState, RootStackParamList } from '../lib/appCore';
+import type { ConversationRecord, GitDiffState } from '../lib/appCore';
+import { buildGitDiffViewModel, type GitDiffLine, type GitDiffLineKind } from '../lib/outputModels';
 import { EmptyStateView, InlineNotice, LoadingState, Screen, StyledIonicons, useAppToast } from '../components/ui';
 
-function diffLineClassName(line: string): string {
-  if (line.startsWith('+++') || line.startsWith('---')) return 'text-muted';
-  if (line.startsWith('@@')) return 'text-accent';
-  if (line.startsWith('+')) return 'text-success';
-  if (line.startsWith('-')) return 'text-danger';
-  if (line.startsWith('diff ') || line.startsWith('index ')) return 'font-semibold text-foreground';
+function diffLineClassName(kind: GitDiffLineKind): string {
+  if (kind === 'meta') return 'font-semibold text-muted';
+  if (kind === 'hunk') return 'text-accent';
+  if (kind === 'addition') return 'text-success';
+  if (kind === 'deletion') return 'text-danger';
   return 'text-foreground';
 }
+
+const GitDiffLineRow = memo(function GitDiffLineRow({ line }: { line: GitDiffLine }) {
+  return (
+    <Text selectable type="code" className={`bg-transparent px-0 text-[12px] leading-[18px] ${diffLineClassName(line.kind)}`}>
+      {line.text || ' '}
+    </Text>
+  );
+});
+
+function renderGitDiffLine({ item }: { item: GitDiffLine }) {
+  return <GitDiffLineRow line={item} />;
+}
+
+function keyGitDiffLine(item: GitDiffLine): string {
+  return String(item.index);
+}
+
+export type GitDiffScreenProps = {
+  workspace: WorkspaceRecord | null;
+  conversation: ConversationRecord | null;
+  diffState: GitDiffState | null;
+  requestGitDiff: (conversationId?: string) => Promise<boolean>;
+};
 
 export function GitDiffScreen({
   workspace,
   conversation,
   diffState,
   requestGitDiff,
-}: Partial<NativeStackScreenProps<RootStackParamList, 'GitDiff'>> & {
-  workspace: WorkspaceRecord | null;
-  conversation: ConversationRecord | null;
-  diffState: GitDiffState | null;
-  requestGitDiff: (conversationId?: string) => Promise<boolean>;
-}) {
+}: GitDiffScreenProps) {
   const toast = useAppToast();
   const status = diffState?.status ?? 'idle';
   const diff = diffState?.diff ?? '';
@@ -50,9 +67,8 @@ export function GitDiffScreen({
     }
   }, [conversation?.id, diffState?.status, requestGitDiff]);
 
-  const diffLines = diff ? diff.split('\n') : [];
-  const additions = diffLines.filter((line) => line.startsWith('+') && !line.startsWith('+++')).length;
-  const deletions = diffLines.filter((line) => line.startsWith('-') && !line.startsWith('---')).length;
+  const diffView = useMemo(() => buildGitDiffViewModel(diff), [diff]);
+  const { additions, deletions } = diffView;
 
   return (
     <Screen>
@@ -90,22 +106,27 @@ export function GitDiffScreen({
             <InlineNotice status="danger" title="读取失败" description={diffState?.error || 'gitDiffToRemote 请求失败'} />
           </View>
         ) : diff ? (
-          <ScrollView className="flex-1" contentContainerClassName="px-4 py-3">
-            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-              <View>
-                {diffLines.map((line, index) => (
-                  <Text
-                    key={`${index}-${line.slice(0, 12)}`}
-                    selectable
-                    type="code"
-                    className={`bg-transparent px-0 text-[12px] leading-[18px] ${diffLineClassName(line)}`}
-                  >
-                    {line || ' '}
-                  </Text>
-                ))}
+          <FlatList
+            data={diffView.lines}
+            renderItem={renderGitDiffLine}
+            keyExtractor={keyGitDiffLine}
+            className="flex-1"
+            contentContainerClassName="px-4 py-3"
+            initialNumToRender={24}
+            maxToRenderPerBatch={16}
+            updateCellsBatchingPeriod={40}
+            windowSize={9}
+            removeClippedSubviews={Platform.OS === 'android'}
+            ListFooterComponent={diffView.truncated ? (
+              <View className="py-4">
+                <InlineNotice
+                  status="warning"
+                  title="差异过大，已限制显示"
+                  description={`显示 ${diffView.lines.length} / ${diffView.totalLines} 行；复制仍包含完整 diff。`}
+                />
               </View>
-            </ScrollView>
-          </ScrollView>
+            ) : null}
+          />
         ) : (
           <EmptyStateView
             icon="git-compare-outline"

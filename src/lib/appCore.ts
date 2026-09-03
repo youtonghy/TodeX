@@ -263,6 +263,7 @@ export type TerminalClientState = {
   cols: number;
   status: TerminalLifecycleState;
   output: TerminalOutputEntry[];
+  outputTruncated?: boolean;
   error: string;
   pid?: number | null;
   exitCode?: number | null;

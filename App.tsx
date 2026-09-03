@@ -72,6 +72,7 @@ import { createTransportCryptoSession, type TransportCryptoSession } from './src
 import { MAX_LEGACY_MESSAGE_BYTES } from './src/lib/transport';
 import { ConnectionError } from './src/lib/connectionError';
 import { ConversationReplayTracker, TimelineStore } from './src/lib/timelineStore';
+import { retainTerminalOutput } from './src/lib/outputModels';
 import {
   probeBackendConnection,
   nextReconnectDelayMs,
@@ -276,8 +277,6 @@ import { WorkspaceListScreen } from './src/screens/WorkspaceListScreen';
 import { ConversationListScreen } from './src/screens/ConversationListScreen';
 import { ChatScreen } from './src/screens/chat/ChatScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
-import { GitDiffScreen } from './src/screens/GitDiffScreen';
-import { TerminalScreen } from './src/screens/TerminalScreen';
 import { ExperimentalScreen } from './src/screens/ExperimentalScreen';
 import { SlashCommandsScreen } from './src/screens/SlashCommandsScreen';
 import { SlashCommandActionScreen } from './src/screens/SlashCommandActionScreen';
@@ -287,6 +286,17 @@ import {
   SkillPickerModal,
   ThreadInfoModal,
 } from './src/components/modals';
+import {
+  AppRuntimeProvider,
+  createAppRuntime,
+  syncRuntimeEntities,
+} from './src/runtime/appRuntime';
+import {
+  GitDiffRouteScreen,
+  GitDiffRuntimePanel,
+  TerminalRouteScreen,
+  TerminalRuntimePanel,
+} from './src/runtime/OutputRuntimeScreens';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 const navigationRef = createNavigationContainerRef<RootStackParamList>();
@@ -315,8 +325,23 @@ function sameConnectionHealthSignal(left: ConnectionHealth, right: ConnectionHea
     && left.code === right.code;
 }
 
+function appendBoundedTerminalEntry(
+  output: readonly TerminalOutputEntry[],
+  entry: TerminalOutputEntry,
+  wasTruncated = false,
+): Pick<TerminalClientState, 'output' | 'outputTruncated'> {
+  const retained = retainTerminalOutput([...output, entry], TERMINAL_MAX_OUTPUT_ENTRIES);
+  return {
+    output: retained.entries,
+    outputTruncated: wasTruncated || retained.truncated,
+  };
+}
+
 export default function App() {
   const { statusBarStyle, navigationTheme, screenOptions } = useAppNavigationTheme();
+  const appRuntimeRef = useRef<ReturnType<typeof createAppRuntime> | null>(null);
+  if (!appRuntimeRef.current) appRuntimeRef.current = createAppRuntime();
+  const appRuntime = appRuntimeRef.current;
   const socketRef = useRef<WebSocket | null>(null);
   const socketCryptoRef = useRef<TransportCryptoSession | null>(null);
   const activeWorkspaceRef = useRef('');
@@ -325,7 +350,6 @@ export default function App() {
   const conversationsRef = useRef<ConversationRecord[]>([]);
   const turnIdsRef = useRef<Record<string, string>>({});
   const thinkingConversationsRef = useRef<Record<string, boolean>>({});
-  const terminalByIdRef = useRef<Record<string, TerminalClientState>>({});
   const pendingLocalStartsRef = useRef(new Map<string, PendingLocalStart>());
   const pendingThreadStartsRef = useRef(new Map<string, PendingThreadStart>());
   const pendingThreadListsRef = useRef(new Map<string, PendingThreadList>());
@@ -405,13 +429,11 @@ export default function App() {
   const [thinkingConversations, setThinkingConversations] = useState<Record<string, boolean>>({});
   const [threadListStatusByWorkspace, setThreadListStatusByWorkspace] = useState<Record<string, 'idle' | 'loading' | 'ready' | 'error'>>({});
   const [threadListErrorByWorkspace, setThreadListErrorByWorkspace] = useState<Record<string, string>>({});
-  const [gitDiffByConversation, setGitDiffByConversation] = useState<Record<string, GitDiffState>>({});
   const [mcpInventoryByConversation, setMcpInventoryByConversation] = useState<Record<string, McpInventoryState>>({});
   const [permissionProfilesByConversation, setPermissionProfilesByConversation] = useState<Record<string, PermissionProfilesState>>({});
   const [hooksCatalogByConversation, setHooksCatalogByConversation] = useState<Record<string, HooksCatalogState>>({});
   const [pluginsCatalogByConversation, setPluginsCatalogByConversation] = useState<Record<string, PluginsCatalogState>>({});
   const [memorySettingsByConversation, setMemorySettingsByConversation] = useState<Record<string, MemorySettingsState>>({});
-  const [terminalById, setTerminalById] = useState<Record<string, TerminalClientState>>({});
   const [v2Providers, setV2Providers] = useState<ProviderDescriptor[]>([]);
   const [v2Conversations, setV2Conversations] = useState<ConversationManifest[]>([]);
   const [capabilityCatalogs, setCapabilityCatalogs] = useState<Partial<Record<ProviderKind, CatalogState>>>({});
@@ -428,6 +450,18 @@ export default function App() {
   const [gitRepositoryOutput, setGitRepositoryOutput] = useState('');
   const [gitRepositoryOutputTarget, setGitRepositoryOutputTarget] = useState('');
   const [gitRepositoryActionTarget, setGitRepositoryActionTarget] = useState('');
+
+  const setTerminalById = useCallback<Dispatch<SetStateAction<Record<string, TerminalClientState>>>>((value) => {
+    const current = appRuntime.terminals.getAllSnapshot() as Record<string, TerminalClientState>;
+    const next = typeof value === 'function' ? value(current) : value;
+    appRuntime.terminals.replace(next);
+  }, [appRuntime]);
+
+  const setGitDiffByConversation = useCallback<Dispatch<SetStateAction<Record<string, GitDiffState>>>>((value) => {
+    const current = appRuntime.gitDiffs.getAllSnapshot() as Record<string, GitDiffState>;
+    const next = typeof value === 'function' ? value(current) : value;
+    appRuntime.gitDiffs.replace(next);
+  }, [appRuntime]);
 
   useEffect(() => {
     if (!hydrated || !settings.serverUrl.trim()) {
@@ -889,11 +923,13 @@ export default function App() {
 
   useEffect(() => {
     workspacesRef.current = workspaces;
-  }, [workspaces]);
+    conversationsRef.current = conversations;
+    syncRuntimeEntities(appRuntime, workspaces, conversations);
+  }, [appRuntime, conversations, workspaces]);
 
   useEffect(() => {
-    conversationsRef.current = conversations;
-  }, [conversations]);
+    appRuntime.connectionState.set(connectionState);
+  }, [appRuntime, connectionState]);
 
   useEffect(() => {
     turnIdsRef.current = turnIds;
@@ -902,10 +938,6 @@ export default function App() {
   useEffect(() => {
     thinkingConversationsRef.current = thinkingConversations;
   }, [thinkingConversations]);
-
-  useEffect(() => {
-    terminalByIdRef.current = terminalById;
-  }, [terminalById]);
 
   useEffect(() => {
     backendProfilesRef.current = backendProfiles;
@@ -1770,7 +1802,7 @@ export default function App() {
         ...current,
         [terminalId]: {
           ...existing,
-          output: [...existing.output, entry].slice(-TERMINAL_MAX_OUTPUT_ENTRIES),
+          ...appendBoundedTerminalEntry(existing.output, entry, existing.outputTruncated),
           updatedAt: Date.now(),
         },
       };
@@ -1851,6 +1883,7 @@ export default function App() {
         cols: DEFAULT_TERMINAL_COLS,
         status: 'idle',
         output: [],
+        outputTruncated: false,
         error: '',
         pid: null,
         exitCode: null,
@@ -1859,40 +1892,36 @@ export default function App() {
       let status: TerminalLifecycleState = base.status;
       let error = base.error;
       let output = base.output;
+      let outputTruncated = base.outputTruncated ?? false;
       let exitCode = base.exitCode;
+
+      const appendOutput = (entry: TerminalOutputEntry) => {
+        const retained = appendBoundedTerminalEntry(output, entry, outputTruncated);
+        output = retained.output;
+        outputTruncated = retained.outputTruncated ?? false;
+      };
 
       if (event.type === 'terminal.started') {
         status = 'running';
         error = '';
-        output = [
-          ...output,
-          terminalOutputLine('system', `terminal started: ${cwd || base.cwd}`),
-        ].slice(-TERMINAL_MAX_OUTPUT_ENTRIES);
+        appendOutput(terminalOutputLine('system', `terminal started: ${cwd || base.cwd}`));
       } else if (event.type === 'terminal.stopping') {
         status = 'stopping';
-        output = [
-          ...output,
-          terminalOutputLine('system', 'terminal stopping'),
-        ].slice(-TERMINAL_MAX_OUTPUT_ENTRIES);
+        appendOutput(terminalOutputLine('system', 'terminal stopping'));
       } else if (event.type === 'terminal.exited') {
         status = 'exited';
         exitCode = typeof data.exitCode === 'number' ? data.exitCode : null;
-        output = [
-          ...output,
-          terminalOutputLine('system', `terminal exited${exitCode === null ? '' : ` with code ${exitCode}`}`),
-        ].slice(-TERMINAL_MAX_OUTPUT_ENTRIES);
+        appendOutput(terminalOutputLine('system', `terminal exited${exitCode === null ? '' : ` with code ${exitCode}`}`));
       } else if (event.type === 'terminal.error') {
         status = 'error';
         error = typeof data.error === 'string' ? data.error : 'terminal error';
-        output = [
-          ...output,
-          terminalOutputLine('error', error),
-        ].slice(-TERMINAL_MAX_OUTPUT_ENTRIES);
+        appendOutput(terminalOutputLine('error', error));
       } else if (event.type === 'terminal.resized') {
-        output = [
-          ...output,
-          terminalOutputLine('system', `size ${typeof data.cols === 'number' ? data.cols : base.cols}x${typeof data.rows === 'number' ? data.rows : base.rows}`),
-        ].slice(-TERMINAL_MAX_OUTPUT_ENTRIES);
+        appendOutput(terminalOutputLine('system', `size ${typeof data.cols === 'number' ? data.cols : base.cols}x${typeof data.rows === 'number' ? data.rows : base.rows}`));
+      } else if (event.type === 'terminal.output') {
+        const stream = data.stream === 'stderr' ? 'stderr' : 'stdout';
+        const text = typeof data.data === 'string' ? data.data : '';
+        if (text) appendOutput(terminalOutputLine(stream, text));
       }
 
       return {
@@ -1910,21 +1939,15 @@ export default function App() {
           exitCode,
           status,
           output,
+          outputTruncated,
           error,
           updatedAt: Date.now(),
         },
       };
     });
 
-    if (event.type === 'terminal.output') {
-      const stream = data.stream === 'stderr' ? 'stderr' : 'stdout';
-      const text = typeof data.data === 'string' ? data.data : '';
-      if (text) {
-        appendTerminalOutput(terminalId, terminalOutputLine(stream, text));
-      }
-    }
     return true;
-  }, [appendTerminalOutput, settings.tenantId]);
+  }, [settings.tenantId]);
 
   const appendEvent = useCallback(
     (event: ServerEvent) => {
@@ -2994,6 +3017,7 @@ export default function App() {
         cols: DEFAULT_TERMINAL_COLS,
         status: 'idle',
         output: [],
+        outputTruncated: false,
         error: '',
         pid: null,
         exitCode: null,
@@ -3027,6 +3051,7 @@ export default function App() {
       output: [
         terminalOutputLine('system', `starting terminal in ${cwd}`),
       ],
+      outputTruncated: false,
     });
     const sent = sendProtocolMessage('terminal.start', {
       terminalId,
@@ -3049,10 +3074,11 @@ export default function App() {
             ...existing,
             status: 'error',
             error: '请先在设置里连接后端。',
-            output: [
-              ...existing.output,
+            ...appendBoundedTerminalEntry(
+              existing.output,
               terminalOutputLine('error', '请先在设置里连接后端。'),
-            ].slice(-TERMINAL_MAX_OUTPUT_ENTRIES),
+              existing.outputTruncated,
+            ),
             updatedAt: Date.now(),
           },
         };
@@ -3063,7 +3089,7 @@ export default function App() {
   }, [seedTerminalState, sendProtocolMessage, settings.tenantId]);
 
   const sendTerminalInput = useCallback((terminalId: string, tenantId: string, data: string) => {
-    const terminal = terminalById[terminalId];
+    const terminal = appRuntime.terminals.getSnapshot(terminalId);
     const sent = sendProtocolMessage('terminal.input', {
       terminalId,
       tenantId,
@@ -3077,7 +3103,7 @@ export default function App() {
       appendTerminalOutput(terminalId, terminalOutputLine('error', '请先在设置里连接后端。'));
     }
     return false;
-  }, [appendTerminalOutput, sendProtocolMessage, terminalById]);
+  }, [appRuntime, appendTerminalOutput, sendProtocolMessage]);
 
   const stopTerminalSession = useCallback((terminalId: string, tenantId: string, force = false) => {
     setTerminalById((current) => {
@@ -3090,10 +3116,11 @@ export default function App() {
         [terminalId]: {
           ...existing,
           status: 'stopping',
-          output: [
-            ...existing.output,
+          ...appendBoundedTerminalEntry(
+            existing.output,
             terminalOutputLine('system', force ? 'force stopping terminal' : 'stopping terminal'),
-          ].slice(-TERMINAL_MAX_OUTPUT_ENTRIES),
+            existing.outputTruncated,
+          ),
           updatedAt: Date.now(),
         },
       };
@@ -3151,6 +3178,7 @@ export default function App() {
         [terminalId]: {
           ...existing,
           output: [],
+          outputTruncated: false,
           updatedAt: Date.now(),
         },
       };
@@ -6191,7 +6219,7 @@ export default function App() {
         if (hasPendingThreadAction) {
           return;
         }
-        const hasActiveTerminal = Object.values(terminalByIdRef.current).some(
+        const hasActiveTerminal = Object.values(appRuntime.terminals.getAllSnapshot()).some(
           (terminal) =>
             terminal.conversationId === conversation.id &&
             (terminal.status === 'starting' || terminal.status === 'running' || terminal.status === 'stopping'),
@@ -6210,7 +6238,7 @@ export default function App() {
     };
     const intervalId = setInterval(suspendIdleSessions, LOCAL_SESSION_IDLE_SWEEP_MS);
     return () => clearInterval(intervalId);
-  }, [connectionState, hydrated, sendWorkspaceCommand, updateConversation]);
+  }, [appRuntime, connectionState, hydrated, sendWorkspaceCommand, updateConversation]);
 
   const stopThinking = useCallback((conversationId: string) => {
     const conversation = conversationsRef.current.find((item) => item.id === conversationId) ?? null;
@@ -6527,6 +6555,16 @@ export default function App() {
     }
   }, [sendNativeThreadAction, sendTrackedLocalMethod]);
 
+  appRuntime.bindOutputActions({
+    startTerminalSession,
+    stopTerminalSession,
+    sendTerminalInput,
+    resizeTerminalSession,
+    requestTerminalStatus,
+    clearTerminalOutput,
+    requestGitDiff,
+  });
+
   if (!hydrated) {
     return (
       <GestureHandlerRootView style={{ flex: 1 }}>
@@ -6554,6 +6592,7 @@ export default function App() {
       <SafeAreaProvider>
         <KeyboardProvider>
           <HeroUINativeProvider>
+            <AppRuntimeProvider runtime={appRuntime}>
             <ToastBridge />
             <NavigationContainer ref={navigationRef} theme={navigationTheme}>
             <StatusBar style={statusBarStyle} />
@@ -6718,43 +6757,8 @@ export default function App() {
                 );
               }}
             </Stack.Screen>
-            <Stack.Screen name="GitDiff" options={{ title: 'Git Diff' }}>
-              {(props) => {
-                const conversation = conversations.find((item) => item.id === props.route.params.conversationId) ?? null;
-                const workspace = workspaces.find((item) => item.id === props.route.params.workspaceId) ?? null;
-                return (
-                  <GitDiffScreen
-                    {...props}
-                    workspace={workspace}
-                    conversation={conversation}
-                    diffState={gitDiffByConversation[props.route.params.conversationId] ?? null}
-                    requestGitDiff={requestGitDiff}
-                  />
-                );
-              }}
-            </Stack.Screen>
-            <Stack.Screen name="Terminal" options={{ title: '终端' }}>
-              {(props) => {
-                const conversation = conversations.find((item) => item.id === props.route.params.conversationId) ?? null;
-                const workspace = workspaces.find((item) => item.id === props.route.params.workspaceId) ?? null;
-                const terminalId = terminalIdForConversation(props.route.params.conversationId);
-                return (
-                  <TerminalScreen
-                    {...props}
-                    workspace={workspace}
-                    conversation={conversation}
-                    terminal={terminalById[terminalId] ?? null}
-                    connectionState={connectionState}
-                    startTerminalSession={startTerminalSession}
-                    stopTerminalSession={stopTerminalSession}
-                    sendTerminalInput={sendTerminalInput}
-                    resizeTerminalSession={resizeTerminalSession}
-                    requestTerminalStatus={requestTerminalStatus}
-                    clearTerminalOutput={clearTerminalOutput}
-                  />
-                );
-              }}
-            </Stack.Screen>
+            <Stack.Screen name="GitDiff" component={GitDiffRouteScreen} options={{ title: 'Git Diff' }} />
+            <Stack.Screen name="Terminal" component={TerminalRouteScreen} options={{ title: '终端' }} />
             <Stack.Screen name="Experimental" options={{ title: 'Experimental' }}>
               {(props) => {
                 const conversation = conversations.find((item) => item.id === props.route.params.conversationId) ?? null;
@@ -6937,23 +6941,13 @@ export default function App() {
                           },
                         }
                       : { label: 'Git', icon: 'git-branch-outline', onPress: () => openGit(props.route.params.conversationId) }}
-                    renderTerminal={<TerminalScreen
-                      workspace={workspace}
-                      conversation={conversation}
-                      terminal={conversation ? terminalById[terminalIdForConversation(conversation.id)] ?? null : null}
-                      connectionState={connectionState}
-                      startTerminalSession={startTerminalSession}
-                      stopTerminalSession={stopTerminalSession}
-                      sendTerminalInput={sendTerminalInput}
-                      resizeTerminalSession={resizeTerminalSession}
-                      requestTerminalStatus={requestTerminalStatus}
-                      clearTerminalOutput={clearTerminalOutput}
+                    renderTerminal={<TerminalRuntimePanel
+                      workspaceId={props.route.params.workspaceId}
+                      conversationId={props.route.params.conversationId}
                     />}
-                    renderGitDiff={<GitDiffScreen
-                      workspace={workspace}
-                      conversation={conversation}
-                      diffState={conversation ? gitDiffByConversation[conversation.id] ?? null : null}
-                      requestGitDiff={requestGitDiff}
+                    renderGitDiff={<GitDiffRuntimePanel
+                      workspaceId={props.route.params.workspaceId}
+                      conversationId={props.route.params.conversationId}
                     />}
                     renderBrowser={<BrowserScreen
                       client={apiClientForConnection(settings, profile)}
@@ -7128,6 +7122,7 @@ export default function App() {
             }
           }}
             />
+            </AppRuntimeProvider>
           </HeroUINativeProvider>
         </KeyboardProvider>
       </SafeAreaProvider>

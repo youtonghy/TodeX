@@ -1,6 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { ScrollView, View } from 'react-native';
-import type { NativeStackScreenProps } from '@react-navigation/native-stack';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import {
+  FlatList,
+  Platform,
+  ScrollView,
+  View,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
+} from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Button, Chip, Input, Surface, Text } from 'heroui-native';
@@ -13,11 +19,13 @@ import {
   terminalStatusLabel,
   type ConnectionState,
   type ConversationRecord,
-  type RootStackParamList,
   type TerminalClientState,
   type TerminalOutputEntry,
 } from '../lib/appCore';
 import { EmptyStateView, FormField, InlineNotice, Screen, SectionHeader, StyledIonicons, useAppToast } from '../components/ui';
+
+const EMPTY_TERMINAL_OUTPUT: TerminalOutputEntry[] = [];
+const TERMINAL_BOTTOM_FOLLOW_THRESHOLD = 72;
 
 function terminalEntryDisplayText(entry: TerminalOutputEntry): string {
   if (entry.kind === 'input') {
@@ -46,6 +54,35 @@ function terminalEntryClassName(entry: TerminalOutputEntry): string {
   }
 }
 
+const TerminalOutputRow = memo(function TerminalOutputRow({ entry }: { entry: TerminalOutputEntry }) {
+  return (
+    <Text selectable type="code" className={`bg-transparent px-0 text-[12px] leading-[18px] ${terminalEntryClassName(entry)}`}>
+      {terminalEntryDisplayText(entry)}
+    </Text>
+  );
+});
+
+function renderTerminalOutput({ item }: { item: TerminalOutputEntry }) {
+  return <TerminalOutputRow entry={item} />;
+}
+
+function keyTerminalOutput(item: TerminalOutputEntry): string {
+  return item.id;
+}
+
+export type TerminalScreenProps = {
+  workspace: WorkspaceRecord | null;
+  conversation: ConversationRecord | null;
+  terminal: TerminalClientState | null;
+  connectionState: ConnectionState;
+  startTerminalSession: (workspace: WorkspaceRecord, conversation: ConversationRecord, options: { cwd: string; shell: string; rows: number; cols: number }) => boolean;
+  stopTerminalSession: (terminalId: string, tenantId: string, force?: boolean) => boolean;
+  sendTerminalInput: (terminalId: string, tenantId: string, data: string) => boolean;
+  resizeTerminalSession: (terminalId: string, tenantId: string, rows: number, cols: number) => boolean;
+  requestTerminalStatus: (workspace: WorkspaceRecord, conversation: ConversationRecord) => boolean;
+  clearTerminalOutput: (terminalId: string) => void;
+};
+
 export function TerminalScreen({
   workspace,
   conversation,
@@ -57,18 +94,7 @@ export function TerminalScreen({
   resizeTerminalSession,
   requestTerminalStatus,
   clearTerminalOutput,
-}: Partial<NativeStackScreenProps<RootStackParamList, 'Terminal'>> & {
-  workspace: WorkspaceRecord | null;
-  conversation: ConversationRecord | null;
-  terminal: TerminalClientState | null;
-  connectionState: ConnectionState;
-  startTerminalSession: (workspace: WorkspaceRecord, conversation: ConversationRecord, options: { cwd: string; shell: string; rows: number; cols: number }) => boolean;
-  stopTerminalSession: (terminalId: string, tenantId: string, force?: boolean) => boolean;
-  sendTerminalInput: (terminalId: string, tenantId: string, data: string) => boolean;
-  resizeTerminalSession: (terminalId: string, tenantId: string, rows: number, cols: number) => boolean;
-  requestTerminalStatus: (workspace: WorkspaceRecord, conversation: ConversationRecord) => boolean;
-  clearTerminalOutput: (terminalId: string) => void;
-}) {
+}: TerminalScreenProps) {
   const toast = useAppToast();
   const terminalId = conversation ? terminalIdForConversation(conversation.id) : terminal?.terminalId ?? '';
   const effectiveTenantId = terminal?.tenantId || workspace?.tenantId || 'local';
@@ -78,7 +104,10 @@ export function TerminalScreen({
   const [colsDraft, setColsDraft] = useState(String(terminal?.cols ?? DEFAULT_TERMINAL_COLS));
   const [inputDraft, setInputDraft] = useState('');
   const [settingsExpanded, setSettingsExpanded] = useState(false);
-  const outputScrollRef = useRef<ScrollView | null>(null);
+  const [showJumpToLatestOutput, setShowJumpToLatestOutput] = useState(false);
+  const outputListRef = useRef<FlatList<TerminalOutputEntry> | null>(null);
+  const shouldFollowOutputRef = useRef(true);
+  const pendingOutputScrollFrameRef = useRef<number | null>(null);
   const terminalStateRef = useRef(terminal);
   const autoStartKeyRef = useRef('');
   const reconnectAttemptRef = useRef(0);
@@ -91,6 +120,8 @@ export function TerminalScreen({
   const rows = Math.max(8, Math.min(200, Number.parseInt(rowsDraft, 10) || DEFAULT_TERMINAL_ROWS));
   const cols = Math.max(20, Math.min(400, Number.parseInt(colsDraft, 10) || DEFAULT_TERMINAL_COLS));
   const statusColor = isRunning ? 'success' : terminal?.status === 'error' ? 'danger' : isBusy ? 'warning' : 'default';
+  const output = terminal?.output ?? EMPTY_TERMINAL_OUTPUT;
+  const latestOutputId = output.at(-1)?.id ?? '';
 
   useEffect(() => {
     terminalStateRef.current = terminal;
@@ -196,9 +227,43 @@ export function TerminalScreen({
     workspace?.path,
   ]);
 
+  const scrollToLatestOutput = useCallback((animated: boolean) => {
+    if (pendingOutputScrollFrameRef.current !== null) return;
+    pendingOutputScrollFrameRef.current = requestAnimationFrame(() => {
+      pendingOutputScrollFrameRef.current = null;
+      outputListRef.current?.scrollToEnd({ animated });
+    });
+  }, []);
+
+  useEffect(() => () => {
+    if (pendingOutputScrollFrameRef.current !== null) {
+      cancelAnimationFrame(pendingOutputScrollFrameRef.current);
+      pendingOutputScrollFrameRef.current = null;
+    }
+  }, []);
+
   useEffect(() => {
-    requestAnimationFrame(() => outputScrollRef.current?.scrollToEnd({ animated: true }));
-  }, [terminal?.output.length]);
+    shouldFollowOutputRef.current = true;
+    setShowJumpToLatestOutput(false);
+  }, [terminalId]);
+
+  useEffect(() => {
+    if (latestOutputId && shouldFollowOutputRef.current) scrollToLatestOutput(false);
+  }, [latestOutputId, scrollToLatestOutput]);
+
+  const handleOutputScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+    const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y;
+    const isAtBottom = distanceFromBottom <= TERMINAL_BOTTOM_FOLLOW_THRESHOLD;
+    shouldFollowOutputRef.current = isAtBottom;
+    setShowJumpToLatestOutput(!isAtBottom && output.length > 0);
+  }, [output.length]);
+
+  const jumpToLatestOutput = useCallback(() => {
+    shouldFollowOutputRef.current = true;
+    setShowJumpToLatestOutput(false);
+    scrollToLatestOutput(true);
+  }, [scrollToLatestOutput]);
 
   const start = useCallback(() => {
     if (!workspace || !conversation) {
@@ -356,6 +421,11 @@ export function TerminalScreen({
             <Text type="body-xs" weight="semibold" className="uppercase tracking-wide text-muted">
               Session
             </Text>
+            {terminal?.outputTruncated ? (
+              <Chip size="sm" variant="soft" color="warning">
+                <Chip.Label>已截断</Chip.Label>
+              </Chip>
+            ) : null}
           </View>
           <View className="flex-row gap-0.5">
             <Button isIconOnly size="sm" variant="ghost" accessibilityLabel="复制输出" isDisabled={!terminal?.output.length} onPress={() => void copyOutput()} className="h-8 w-8 rounded-full">
@@ -366,19 +436,35 @@ export function TerminalScreen({
             </Button>
           </View>
         </View>
-        <ScrollView ref={outputScrollRef} className="flex-1" contentContainerClassName="px-4 py-3">
-          {terminal?.output.length ? (
-            terminal.output.map((entry) => (
-              <Text key={entry.id} selectable type="code" className={`bg-transparent px-0 text-[12px] leading-[18px] ${terminalEntryClassName(entry)}`}>
-                {terminalEntryDisplayText(entry)}
-              </Text>
-            ))
-          ) : (
+        <FlatList
+          ref={outputListRef}
+          data={output}
+          renderItem={renderTerminalOutput}
+          keyExtractor={keyTerminalOutput}
+          className="flex-1"
+          contentContainerClassName="px-4 py-3"
+          ListEmptyComponent={(
             <Text type="code" className="bg-transparent px-0 text-[12px] leading-[18px] text-muted">
               {connectionState === 'open' ? 'terminal idle\n' : 'backend disconnected\n'}
             </Text>
           )}
-        </ScrollView>
+          initialNumToRender={18}
+          maxToRenderPerBatch={12}
+          updateCellsBatchingPeriod={40}
+          windowSize={9}
+          maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
+          removeClippedSubviews={Platform.OS === 'android'}
+          onScroll={handleOutputScroll}
+          scrollEventThrottle={80}
+        />
+        {showJumpToLatestOutput ? (
+          <View className="absolute bottom-3 right-3">
+            <Button size="sm" variant="secondary" accessibilityLabel="跳到最新输出" onPress={jumpToLatestOutput} className="h-9 rounded-full px-3 shadow-sm">
+              <StyledIonicons name="arrow-down" size={14} className="text-foreground" />
+              <Button.Label>最新输出</Button.Label>
+            </Button>
+          </View>
+        ) : null}
       </Surface>
 
       <View className="flex-row items-center gap-2 px-4 pt-3" style={{ paddingBottom: 12 + insets.bottom }}>
