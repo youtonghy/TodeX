@@ -59,6 +59,20 @@ test('timeline store preserves references for no-op upserts and merges streamed 
   assert.equal(updates, 1);
 });
 
+test('timeline store ignores raw-only changes from legacy persisted entries', () => {
+  const store = new TimelineStore(20);
+  const initial = { ...entry('a1', 'w1', 'c1', 'hello'), raw: '{"legacy":true}' };
+  store.replace([initial]);
+  const before = store.getConversationSnapshot('w1', 'c1');
+  let updates = 0;
+  store.subscribeConversation('w1', 'c1', () => { updates += 1; });
+
+  store.upsertBatch([{ entry: { ...initial, raw: '' }, appendSubtitle: false }]);
+
+  assert.equal(store.getConversationSnapshot('w1', 'c1'), before);
+  assert.equal(updates, 0);
+});
+
 test('timeline store enforces its global retention limit', () => {
   const store = new TimelineStore(3);
   store.replace([

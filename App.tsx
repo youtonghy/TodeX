@@ -32,7 +32,8 @@ import {
   WorkspaceRecord,
   approvalResponsePayload,
   buildHttpUrl,
-  classifyPendingRequest,
+  updatePendingRequestsFromEvent,
+  isPendingRequestType,
   permissionDecision,
   createRequestId,
   displayNameFromPath,
@@ -156,7 +157,6 @@ import {
   SOCKET_FRAME_DECODE_BUDGET_MS,
   MAX_TRANSPORT_HELLO_SESSION_CURSORS,
   MAX_TIMELINE_ITEMS,
-  MAX_EVENTS,
   MAX_USAGE_RECORDS,
   backendProfileTokenKey,
   CHAT_ATTACH_REPLAY_LIMIT,
@@ -293,6 +293,28 @@ const navigationRef = createNavigationContainerRef<RootStackParamList>();
 enableScreens(true);
 
 const timelineStore = new TimelineStore(MAX_TIMELINE_ITEMS);
+const EMPTY_ATTACHMENTS = Object.freeze([]) as unknown as ComposerAttachmentDraft[];
+const EMPTY_SKILLS = Object.freeze([]) as unknown as SelectedSkillAttachment[];
+
+function sameContextUsage(left: MobileContextUsage | undefined, right: MobileContextUsage): boolean {
+  return Boolean(
+    left
+    && left.usedTokens === right.usedTokens
+    && left.contextWindow === right.contextWindow
+    && left.model === right.model
+    && left.inputTokens === right.inputTokens
+    && left.outputTokens === right.outputTokens
+    && left.cachedInputTokens === right.cachedInputTokens
+    && left.cacheWriteTokens === right.cacheWriteTokens
+  );
+}
+
+function sameConnectionHealthSignal(left: ConnectionHealth, right: ConnectionHealth): boolean {
+  return left.status === right.status
+    && left.error === right.error
+    && left.code === right.code;
+}
+
 export default function App() {
   const { statusBarStyle, navigationTheme, screenOptions } = useAppNavigationTheme();
   const socketRef = useRef<WebSocket | null>(null);
@@ -329,6 +351,8 @@ export default function App() {
   const workspaceBackendSkipNextSaveRef = useRef(false);
   const workspaceBackendSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const healthProbeSeqRef = useRef(0);
+  const connectionHealthDetailsRef = useRef<ConnectionHealth>(defaultConnectionHealth);
+  const resolvedPendingRequestIdsRef = useRef(new Set<string>());
   const loadedNativeThreadHistoryRef = useRef(new Map<string, number>());
   const unmaterializedNativeThreadIdsRef = useRef(new Set<string>());
   const lastFailureRetryableRef = useRef(true);
@@ -341,7 +365,6 @@ export default function App() {
   const gitRepositoryActionInFlightRef = useRef(false);
   const usageRecordsRef = useRef<MobileUsageRecord[]>([]);
   const v2ProvidersRef = useRef<ProviderDescriptor[]>([]);
-  const contextUsageRef = useRef<Record<string, MobileContextUsage>>({});
 
   const [hydrated, setHydrated] = useState(false);
   const [backendSecretsHydrated, setBackendSecretsHydrated] = useState(false);
@@ -360,7 +383,7 @@ export default function App() {
   const [modelCatalogError, setModelCatalogError] = useState('');
   const [lastError, setLastError] = useState('');
   const [serverVersion, setServerVersion] = useState<ServerVersion | null>(null);
-  const [events, setEvents] = useState<ServerEvent[]>([]);
+  const [pendingRequests, setPendingRequests] = useState<PendingRequest[]>([]);
   const [mentionHistory, setMentionHistory] = useState<WorkspaceMentionHistory[]>([]);
   const [experimentalFeatures, setExperimentalFeatures] = useState<ExperimentalFeatureSettings>(EXPERIMENTAL_FEATURE_DEFAULTS);
   const [selectedRequestId, setSelectedRequestId] = useState('');
@@ -901,8 +924,8 @@ export default function App() {
   }, [v2Providers]);
 
   useEffect(() => {
-    contextUsageRef.current = contextUsageByConversation;
-  }, [contextUsageByConversation]);
+    connectionHealthDetailsRef.current = connectionHealth;
+  }, [connectionHealth]);
 
   useEffect(() => {
     if (!hydrated) {
@@ -1184,7 +1207,7 @@ export default function App() {
     if (!hydrated) {
       return;
     }
-    void saveJson(WORKSPACES_STORAGE_KEY, workspaces);
+    scheduleJsonSave(WORKSPACES_STORAGE_KEY, workspaces);
     if (workspaceBackendSkipNextSaveRef.current) {
       workspaceBackendSkipNextSaveRef.current = false;
       return;
@@ -1192,14 +1215,14 @@ export default function App() {
     if (connectionState === 'open' && workspaceBackendReadyRef.current) {
       scheduleWorkspaceBackendSave(workspaces);
     }
-  }, [connectionState, hydrated, scheduleWorkspaceBackendSave, workspaces]);
+  }, [connectionState, hydrated, scheduleJsonSave, scheduleWorkspaceBackendSave, workspaces]);
 
   useEffect(() => {
     if (!hydrated) {
       return;
     }
-    void saveJson(CONVERSATIONS_STORAGE_KEY, conversations);
-  }, [conversations, hydrated]);
+    scheduleJsonSave(CONVERSATIONS_STORAGE_KEY, conversations);
+  }, [conversations, hydrated, scheduleJsonSave]);
 
   useEffect(() => {
     if (!hydrated) {
@@ -1344,28 +1367,6 @@ export default function App() {
       : null;
     return workspace && conversation ? { workspace, conversation } : null;
   }, []);
-
-  const pendingRequests = useMemo<PendingRequest[]>(() => {
-    const open = new Map<string, PendingRequest>();
-    const resolved = new Set<string>();
-
-    for (const event of events) {
-      if (event.type === 'codex.serverRequest.resolved' || event.type === 'permission.resolved') {
-        const data = eventPayloadData(event);
-        const resolvedId = data.requestId ?? data.request_id ?? data.permissionId;
-        if (typeof resolvedId === 'string' && resolvedId) {
-          resolved.add(resolvedId);
-        }
-      }
-
-      const request = classifyPendingRequest(event);
-      if (request) {
-        open.set(request.requestId, request);
-      }
-    }
-
-    return [...open.values()].filter((request) => !resolved.has(request.requestId));
-  }, [events]);
 
   useEffect(() => {
     if (!pendingRequests.length) {
@@ -1938,7 +1939,17 @@ export default function App() {
         sessionCursorsRef.current.set(sessionId, cursor);
         persistSessionCursors();
       }
-      setEvents((current) => [event, ...current].slice(0, MAX_EVENTS));
+      if (
+        isPendingRequestType(event.type)
+        || event.type === 'codex.serverRequest.resolved'
+        || event.type === 'permission.resolved'
+      ) {
+        setPendingRequests((current) => updatePendingRequestsFromEvent(
+          current,
+          event,
+          resolvedPendingRequestIdsRef.current,
+        ));
+      }
       if (handleTerminalEvent(event, data)) {
         return;
       }
@@ -2456,7 +2467,11 @@ export default function App() {
               cacheWriteTokens: contextUsage.cacheWriteTokens,
               updatedAt: contextUsage.updatedAt,
             };
-            setContextUsageByConversation((current) => ({ ...current, [conversation.id]: nextUsage }));
+            setContextUsageByConversation((current) => (
+              sameContextUsage(current[conversation.id], nextUsage)
+                ? current
+                : { ...current, [conversation.id]: nextUsage }
+            ));
             const usage = sharedUsageRecordFromV2Event(event, {
               conversationId: conversation.id,
               provider: conversation.provider,
@@ -2525,6 +2540,20 @@ export default function App() {
                   details: inner.details,
                   options: inner.options,
                   providerRequestId: inner.providerRequestId,
+                },
+              });
+            }
+          } else if (event.type === 'permission.resolved') {
+            const permissionId = typeof eventPayload.permissionId === 'string'
+              ? eventPayload.permissionId
+              : typeof eventPayload.requestId === 'string' ? eventPayload.requestId : '';
+            if (permissionId) {
+              enqueueServerEvent({
+                type: 'permission.resolved',
+                payload: {
+                  requestId: permissionId,
+                  permissionId,
+                  conversationId,
                 },
               });
             }
@@ -2656,11 +2685,17 @@ export default function App() {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), CONNECTION_HEALTH_TIMEOUT_MS);
 
-    setConnectionHealth((current) => ({
-      ...current,
-      status: current.status === 'online' ? 'online' : 'checking',
-      error: '',
-    }));
+    setConnectionHealth((current) => {
+      const isInitialCheck = current.status === 'unknown';
+      const next: ConnectionHealth = {
+        ...connectionHealthDetailsRef.current,
+        status: isInitialCheck ? 'checking' : current.status,
+        error: isInitialCheck ? '' : current.error,
+        code: isInitialCheck ? '' : current.code,
+      };
+      connectionHealthDetailsRef.current = next;
+      return sameConnectionHealthSignal(current, next) ? current : next;
+    });
 
     try {
       const response = await fetch(buildHttpUrl(settings.serverUrl, '/health'), {
@@ -2674,23 +2709,29 @@ export default function App() {
       if (!response.ok) {
         throw new Error(`health endpoint returned ${response.status}`);
       }
-      setConnectionHealth({
+      const next: ConnectionHealth = {
         status: 'online',
         latencyMs,
         lastCheckedAt: Date.now(),
         error: '',
-      });
+        code: '',
+      };
+      connectionHealthDetailsRef.current = next;
+      setConnectionHealth((current) => sameConnectionHealthSignal(current, next) ? current : next);
     } catch (error) {
       if (healthProbeSeqRef.current !== probeId) {
         return;
       }
       const isAbort = error instanceof Error && error.name === 'AbortError';
-      setConnectionHealth({
+      const next: ConnectionHealth = {
         status: 'offline',
         latencyMs: null,
         lastCheckedAt: Date.now(),
         error: isAbort ? '健康检查超时' : error instanceof Error ? error.message : '健康检查失败',
-      });
+        code: '',
+      };
+      connectionHealthDetailsRef.current = next;
+      setConnectionHealth((current) => sameConnectionHealthSignal(current, next) ? current : next);
     } finally {
       clearTimeout(timeoutId);
     }
@@ -6203,17 +6244,17 @@ export default function App() {
     }
   }, [appendTimeline, sendRawProtocolFrame, sendWorkspaceCommand, turnIds]);
 
-  const submitChat = useCallback((conversationId: string) => {
-    const text = (chatDrafts[conversationId] ?? '').trim();
-    const attachments = composerAttachments[conversationId] ?? [];
-    const skills = selectedSkills[conversationId] ?? [];
+  const submitChat = useCallback((conversationId: string, draft: string) => {
+    const text = draft.trim();
+    const attachments = composerAttachments[conversationId] ?? EMPTY_ATTACHMENTS;
+    const skills = selectedSkills[conversationId] ?? EMPTY_SKILLS;
     if (!text && attachments.length === 0 && skills.length === 0) {
-      return;
+      return false;
     }
     const context = getConversationContext(conversationId);
     if (!context) {
       notify.warning('未选择工作区', '请先选择一个工作区。');
-      return;
+      return false;
     }
     const { workspace, conversation } = context;
     const isThinking = thinkingConversations[conversationId] === true;
@@ -6249,21 +6290,22 @@ export default function App() {
         ],
       }));
       appendTimeline(makeSystemEntry('消息已加入候选', '当前任务完成后会自动继续发送。', workspace.id, conversationId));
-      return;
+      return true;
     }
     if (isV2Conversation(conversation)) {
       if (attachments.length > 0) {
         appendTimeline(makeSystemEntry('v2 对话暂不发送本地附件', '附件仅保留在时间线记录中。', workspace.id, conversationId));
       }
       sendV2Prompt(text, conversationId, skills);
-      return;
+      return true;
     }
     if (attachments.length > 0 || skills.length > 0) {
       void sendLocalTurn(text, 'implement', conversationId, attachments, skills);
-      return;
+      return true;
     }
     sendSlashCommand(text, conversationId);
-  }, [appendTimeline, chatDrafts, composerAttachments, getConversationContext, rememberMentionReferences, selectedSkills, sendLocalTurn, sendSlashCommand, sendV2Prompt, setConversationAttachments, setConversationChatDraft, setConversationComposerSelection, setConversationSelectedSkills, thinkingConversations]);
+    return true;
+  }, [appendTimeline, composerAttachments, getConversationContext, rememberMentionReferences, selectedSkills, sendLocalTurn, sendSlashCommand, sendV2Prompt, setConversationAttachments, setConversationChatDraft, setConversationComposerSelection, setConversationSelectedSkills, thinkingConversations]);
 
   const runWorkspaceCommand = useCallback((workspace: WorkspaceRecord, conversation: ConversationRecord, command: 'start' | 'status' | 'attach' | 'stop' | 'interrupt') => {
     if (command === 'start') {
@@ -6577,17 +6619,17 @@ export default function App() {
                   pendingRequests={pendingRequests}
                   selectedRequest={selectedRequest}
                   chatDraft={chatDrafts[props.route.params.conversationId] ?? ''}
-                  composerAttachments={composerAttachments[props.route.params.conversationId] ?? []}
-                  selectedSkills={selectedSkills[props.route.params.conversationId] ?? []}
+                  composerAttachments={composerAttachments[props.route.params.conversationId] ?? EMPTY_ATTACHMENTS}
+                  selectedSkills={selectedSkills[props.route.params.conversationId] ?? EMPTY_SKILLS}
                   composerSelection={composerSelections[props.route.params.conversationId] ?? DEFAULT_COMPOSER_SELECTION}
                   isThinking={thinkingConversations[props.route.params.conversationId] === true}
                   turnId={turnIds[props.route.params.conversationId] ?? ''}
                   lastError={lastError}
                   connectionState={connectionState}
-                  setChatDraft={(value) => setConversationChatDraft(props.route.params.conversationId, value)}
-                  setComposerAttachments={(value) => setConversationAttachments(props.route.params.conversationId, value)}
-                  setSelectedSkills={(value) => setConversationSelectedSkills(props.route.params.conversationId, value)}
-                  setComposerSelection={(value) => setConversationComposerSelection(props.route.params.conversationId, value)}
+                  persistChatDraft={setConversationChatDraft}
+                  persistComposerAttachments={setConversationAttachments}
+                  persistSelectedSkills={setConversationSelectedSkills}
+                  persistComposerSelection={setConversationComposerSelection}
                   submitChat={submitChat}
                   stopThinking={stopThinking}
                   sendApprovalResponse={sendApprovalResponse}
@@ -6736,7 +6778,7 @@ export default function App() {
                   catalogs={capabilityCatalogs}
                   onRefresh={refreshCapabilityCatalog}
                   conversationId={activeConversationId}
-                  selectedSkills={activeConversationId ? selectedSkills[activeConversationId] ?? [] : []}
+                  selectedSkills={activeConversationId ? selectedSkills[activeConversationId] ?? EMPTY_SKILLS : EMPTY_SKILLS}
                   canInvoke={Boolean(conversations.find((item) => item.id === activeConversationId && (item.v2ConversationId || item.provider)))}
                   onToggleSkill={(skill, provider) => {
                     if (activeConversationId) {
@@ -7020,7 +7062,7 @@ export default function App() {
             status={skillListStatus}
             error={skillListError}
             skills={skillListItems}
-            selectedSkills={selectedSkills[skillListConversationId] ?? []}
+            selectedSkills={selectedSkills[skillListConversationId] ?? EMPTY_SKILLS}
             onRefresh={() => void requestSkillList(skillListConversationId || activeConversationRef.current, true)}
             onToggleSkill={(skill) => toggleSelectedSkill(skillListConversationId || activeConversationRef.current, skill)}
             onClose={() => setSkillListVisible(false)}

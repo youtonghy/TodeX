@@ -647,6 +647,41 @@ test('classifies approval requests and builds matching response payloads', () =>
   });
 });
 
+test('maintains pending requests incrementally across resolution and replay', () => {
+  const resolvedIds = new Set();
+  const requestEvent = {
+    type: 'codex.approval.permissions.request',
+    payload: { data: { requestId: 'perm-incremental' } },
+  };
+  const request = todex.updatePendingRequestsFromEvent([], requestEvent, resolvedIds);
+  assert.equal(request.length, 1);
+  assert.equal(request[0].requestId, 'perm-incremental');
+  assert.equal(todex.updatePendingRequestsFromEvent(request, requestEvent, resolvedIds), request);
+
+  const resolved = todex.updatePendingRequestsFromEvent(request, {
+    type: 'codex.serverRequest.resolved',
+    payload: { data: { requestId: 'perm-incremental' } },
+  }, resolvedIds);
+  assert.deepEqual(resolved, []);
+  assert.equal(
+    todex.updatePendingRequestsFromEvent(resolved, { ...requestEvent }, resolvedIds),
+    resolved,
+  );
+});
+
+test('resolves v2 permission requests by permission id', () => {
+  const resolvedIds = new Set();
+  const request = todex.updatePendingRequestsFromEvent([], {
+    type: 'conversation.permission.request',
+    payload: { requestId: 'v2-permission', permissionId: 'v2-permission' },
+  }, resolvedIds);
+  const resolved = todex.updatePendingRequestsFromEvent(request, {
+    type: 'permission.resolved',
+    payload: { permissionId: 'v2-permission' },
+  }, resolvedIds);
+  assert.deepEqual(resolved, []);
+});
+
 test('parses embedded pairing links and applies encrypted settings', async () => {
   const pairing = await transportCrypto.resolvePairingPayload(JSON.stringify({
     kind: 'todex-pairing-link',

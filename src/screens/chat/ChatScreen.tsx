@@ -6,7 +6,6 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
-  type Dispatch,
   type SetStateAction,
 } from 'react';
 import {
@@ -132,18 +131,18 @@ export function ChatScreen({
   timelineStore,
   pendingRequests,
   selectedRequest,
-  chatDraft,
+  chatDraft: persistedChatDraft,
   composerAttachments,
   selectedSkills,
-  composerSelection,
+  composerSelection: persistedComposerSelection,
   isThinking,
   turnId,
   lastError,
   connectionState,
-  setChatDraft,
-  setComposerAttachments,
-  setSelectedSkills,
-  setComposerSelection,
+  persistChatDraft,
+  persistComposerAttachments,
+  persistSelectedSkills,
+  persistComposerSelection,
   submitChat,
   stopThinking,
   sendApprovalResponse,
@@ -184,11 +183,11 @@ export function ChatScreen({
   turnId: string;
   lastError: string;
   connectionState: ConnectionState;
-  setChatDraft: Dispatch<SetStateAction<string>>;
-  setComposerAttachments: Dispatch<SetStateAction<ComposerAttachmentDraft[]>>;
-  setSelectedSkills: Dispatch<SetStateAction<SelectedSkillAttachment[]>>;
-  setComposerSelection: Dispatch<SetStateAction<TextInputSelectionChangeEventData['selection']>>;
-  submitChat: (conversationId: string) => void;
+  persistChatDraft: (conversationId: string, value: SetStateAction<string>) => void;
+  persistComposerAttachments: (conversationId: string, value: SetStateAction<ComposerAttachmentDraft[]>) => void;
+  persistSelectedSkills: (conversationId: string, value: SetStateAction<SelectedSkillAttachment[]>) => void;
+  persistComposerSelection: (conversationId: string, value: SetStateAction<TextInputSelectionChangeEventData['selection']>) => void;
+  submitChat: (conversationId: string, draft: string) => boolean;
   stopThinking: (conversationId: string) => void;
   sendApprovalResponse: (selection: boolean | PermissionOption, request: PendingRequest) => boolean;
   attachWorkspaceConversation: (workspace: WorkspaceRecord, conversation: ConversationRecord) => boolean;
@@ -215,6 +214,9 @@ export function ChatScreen({
   capabilityCatalog?: CatalogState;
 }) {
   const toast = useAppToast();
+  const conversationId = route.params.conversationId;
+  const [chatDraft, setLocalChatDraft] = useState(persistedChatDraft);
+  const [composerSelection, setLocalComposerSelection] = useState(persistedComposerSelection);
   const [menuVisible, setMenuVisible] = useState(false);
   const [removeWorkspaceVisible, setRemoveWorkspaceVisible] = useState(false);
   const [pickerSheet, setPickerSheet] = useState<PickerSheetState>(null);
@@ -234,10 +236,68 @@ export function ChatScreen({
   const expandedComposerInputRef = useRef<TextInput | null>(null);
   const autoExpandedProgressIdsRef = useRef<Set<string>>(new Set());
   const autoExpandedRequestIdsRef = useRef<Map<string, string[]>>(new Map());
+  const chatDraftRef = useRef(persistedChatDraft);
+  const composerSelectionRef = useRef(persistedComposerSelection);
   const insets = useSafeAreaInsets();
   const keyboardVisible = useKeyboardState((state) => state.isVisible);
   const composerKeyboardOffset = useMemo(() => ({ opened: insets.bottom }), [insets.bottom]);
   const composerPaddingBottom = 12 + insets.bottom;
+
+  const setChatDraft = useCallback((value: SetStateAction<string>) => {
+    setLocalChatDraft((current) => {
+      const next = typeof value === 'function' ? value(current) : value;
+      chatDraftRef.current = next;
+      return next;
+    });
+  }, []);
+  const setComposerSelection = useCallback((value: SetStateAction<TextInputSelectionChangeEventData['selection']>) => {
+    setLocalComposerSelection((current) => {
+      const next = typeof value === 'function' ? value(current) : value;
+      composerSelectionRef.current = next;
+      return next;
+    });
+  }, []);
+  const setComposerAttachments = useCallback(
+    (value: SetStateAction<ComposerAttachmentDraft[]>) => persistComposerAttachments(conversationId, value),
+    [conversationId, persistComposerAttachments],
+  );
+  const setSelectedSkills = useCallback(
+    (value: SetStateAction<SelectedSkillAttachment[]>) => persistSelectedSkills(conversationId, value),
+    [conversationId, persistSelectedSkills],
+  );
+  const persistComposerState = useCallback(() => {
+    persistChatDraft(conversationId, chatDraftRef.current);
+    persistComposerSelection(conversationId, composerSelectionRef.current);
+  }, [conversationId, persistChatDraft, persistComposerSelection]);
+  const clearLocalComposerDraft = useCallback(() => {
+    chatDraftRef.current = '';
+    composerSelectionRef.current = DEFAULT_COMPOSER_SELECTION;
+    setLocalChatDraft('');
+    setLocalComposerSelection(DEFAULT_COMPOSER_SELECTION);
+  }, []);
+  const clearComposerDraft = useCallback(() => {
+    clearLocalComposerDraft();
+    persistChatDraft(conversationId, '');
+    persistComposerSelection(conversationId, DEFAULT_COMPOSER_SELECTION);
+  }, [clearLocalComposerDraft, conversationId, persistChatDraft, persistComposerSelection]);
+  const submitComposer = useCallback(() => {
+    if (submitChat(conversationId, chatDraftRef.current)) {
+      clearLocalComposerDraft();
+    }
+  }, [clearLocalComposerDraft, conversationId, submitChat]);
+
+  useEffect(() => {
+    chatDraftRef.current = persistedChatDraft;
+    composerSelectionRef.current = persistedComposerSelection;
+    setLocalChatDraft(persistedChatDraft);
+    setLocalComposerSelection(persistedComposerSelection);
+  }, [conversationId, persistedChatDraft, persistedComposerSelection]);
+
+  useEffect(() => () => {
+    persistChatDraft(conversationId, chatDraftRef.current);
+    persistComposerSelection(conversationId, composerSelectionRef.current);
+  }, [conversationId, persistChatDraft, persistComposerSelection]);
+
   const workspace = workspaces.find((item) => item.id === route.params.workspaceId) ?? null;
   const conversation = conversations.find((item) => item.id === route.params.conversationId) ?? null;
   const subscribeTimeline = useCallback(
@@ -284,6 +344,14 @@ export function ChatScreen({
     () => buildConversationRenderItems(conversationMessages),
     [conversationMessages],
   );
+  const latestIncomingEntryId = useMemo(() => {
+    for (let index = conversationMessages.length - 1; index >= 0; index -= 1) {
+      if (conversationMessages[index].kind === 'incoming') {
+        return conversationMessages[index].id;
+      }
+    }
+    return '';
+  }, [conversationMessages]);
   const visibleConversationRenderItems = useMemo(
     () => conversationRenderItems.slice(-visibleRenderItemCount),
     [conversationRenderItems, visibleRenderItemCount],
@@ -989,6 +1057,7 @@ export function ChatScreen({
     const collapsible = isCollapsibleProgressEntry(entry);
     const manuallyExpanded = expandedProgressIds.has(entry.id);
     const collapsed = collapsible ? !manuallyExpanded : false;
+    const isLatestIncoming = entry.kind === 'incoming' && entry.id === latestIncomingEntryId;
     return (
       <MessageBubble
         entry={entry}
@@ -999,7 +1068,8 @@ export function ChatScreen({
         onApprovalResponse={handleApprovalResponse}
         onOpenLink={openMessageLink}
         onFork={entry.kind === 'incoming' && conversation ? forkCurrentConversation : undefined}
-        usage={entry.kind === 'incoming' ? contextUsage : null}
+        usage={isLatestIncoming ? contextUsage : null}
+        streaming={isLatestIncoming && isThinking}
       />
     );
   }, [
@@ -1008,6 +1078,8 @@ export function ChatScreen({
     contextUsage,
     conversation,
     forkCurrentConversation,
+    isThinking,
+    latestIncomingEntryId,
     openMessageLink,
     pendingRequestById,
     toggleProgressEntry,
@@ -1221,8 +1293,7 @@ export function ChatScreen({
                     onPress={() => {
                       if (item.command === '/skills') {
                         sendSlashCommand('/skills', route.params.conversationId);
-                        setChatDraft('');
-                        setComposerSelection(DEFAULT_COMPOSER_SELECTION);
+                        clearComposerDraft();
                         return;
                       }
                       const nextText = `${item.command} `;
@@ -1322,6 +1393,7 @@ export function ChatScreen({
                 value={chatDraft}
                 onChangeText={setChatDraft}
                 onSelectionChange={(event) => setComposerSelection(event.nativeEvent.selection)}
+                onBlur={persistComposerState}
                 onKeyPress={(event) => {
                   if (event.nativeEvent.key === 'Escape' && isThinking) {
                     stopThinking(route.params.conversationId);
@@ -1359,7 +1431,7 @@ export function ChatScreen({
               variant="primary"
               accessibilityLabel="发送消息"
               isDisabled={!chatDraft.trim() && composerAttachments.length === 0 && selectedSkills.length === 0}
-              onPress={() => submitChat(route.params.conversationId)}
+              onPress={submitComposer}
               className="h-11 w-11 rounded-full"
             >
               <StyledIonicons name="arrow-up" size={20} className="text-accent-foreground" />
@@ -1397,6 +1469,7 @@ export function ChatScreen({
               value={chatDraft}
               onChangeText={setChatDraft}
               onSelectionChange={(event) => setComposerSelection(event.nativeEvent.selection)}
+              onBlur={persistComposerState}
               onKeyPress={(event) => {
                 if (event.nativeEvent.key === 'Escape' && isThinking) {
                   stopThinking(route.params.conversationId);

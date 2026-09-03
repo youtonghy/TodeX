@@ -747,7 +747,7 @@ export function classifyV2ConversationEvent(
   const providerMethod = readString(payload, ['providerMethod', 'provider_method', 'method']);
   const messageRole = readString(message, ['role']).toLowerCase();
   const at = eventTime(event, now);
-  const base = { raw: shortJsonValue(event), at, workspaceId, conversationId };
+  const base = { raw: '', at, workspaceId, conversationId };
 
   if (type === 'provider.event' && isProviderLifecycleMethod(providerMethod)) {
     return null;

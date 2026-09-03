@@ -57,6 +57,7 @@ export function useAppNavigationTheme(): AppNavigationTheme {
       headerTitleStyle: { color: foreground, fontSize: 17, fontWeight: '600' },
       headerBackButtonDisplayMode: 'minimal',
       contentStyle: { backgroundColor: background },
+      freezeOnBlur: true,
     };
     return {
       isDark,

@@ -1403,6 +1403,45 @@ export function classifyPendingRequest(event: ServerEvent): PendingRequest | nul
   };
 }
 
+const MAX_RESOLVED_PENDING_REQUEST_IDS = 512;
+
+export function updatePendingRequestsFromEvent(
+  current: PendingRequest[],
+  event: ServerEvent,
+  resolvedRequestIds: Set<string>,
+): PendingRequest[] {
+  const data = eventPayloadData(event);
+  if (event.type === 'codex.serverRequest.resolved' || event.type === 'permission.resolved') {
+    const resolvedId = data.requestId ?? data.request_id ?? data.permissionId;
+    if (typeof resolvedId !== 'string' || !resolvedId) {
+      return current;
+    }
+    resolvedRequestIds.add(resolvedId);
+    while (resolvedRequestIds.size > MAX_RESOLVED_PENDING_REQUEST_IDS) {
+      const oldestId = resolvedRequestIds.values().next().value;
+      if (typeof oldestId !== 'string') break;
+      resolvedRequestIds.delete(oldestId);
+    }
+    const next = current.filter((request) => request.requestId !== resolvedId);
+    return next.length === current.length ? current : next;
+  }
+
+  const request = classifyPendingRequest(event);
+  if (!request || resolvedRequestIds.has(request.requestId)) {
+    return current;
+  }
+  const index = current.findIndex((item) => item.requestId === request.requestId);
+  if (index === -1) {
+    return [request, ...current];
+  }
+  if (current[index].event === event) {
+    return current;
+  }
+  const next = current.slice();
+  next[index] = request;
+  return next;
+}
+
 export function titleForRequest(type: string, data: Record<string, unknown>): string {
   const requestId = String(data.requestId ?? data.request_id ?? '');
   const base = requestId ? `${requestId} · ` : '';

@@ -231,6 +231,7 @@ test('classifies nested Pi thought, tool, and assistant events', () => {
   }), 'workspace-1', 'turn-1');
   assert.equal(assistant.kind, 'incoming');
   assert.equal(assistant.subtitle, 'hello world');
+  assert.equal(assistant.raw, '');
 
   const user = parity.classifyV2ConversationEvent(event({
     type: 'message.created',

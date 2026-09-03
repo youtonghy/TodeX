@@ -1,4 +1,4 @@
-import { memo, useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 import { Pressable, View } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { Button, Chip, Surface, Text } from 'heroui-native';
@@ -113,6 +113,7 @@ export const MessageBubble = memo(function MessageBubble({
   onOpenLink,
   onFork,
   usage,
+  streaming = false,
 }: {
   entry: TimelineEntry;
   collapsed?: boolean;
@@ -124,6 +125,7 @@ export const MessageBubble = memo(function MessageBubble({
   onOpenLink?: (href: string) => void;
   onFork?: () => void;
   usage?: MobileContextUsage | null;
+  streaming?: boolean;
 }) {
   const toast = useAppToast();
   const [usageVisible, setUsageVisible] = useState(false);
@@ -137,7 +139,10 @@ export const MessageBubble = memo(function MessageBubble({
     await Clipboard.setStringAsync(text);
     toast.success('已复制', '消息内容已复制到剪贴板');
   };
-  const links = !collapsed && !system && entry.subtitle ? extractMessageLinks(entry.subtitle) : [];
+  const links = useMemo(
+    () => !streaming && !collapsed && !system && entry.subtitle ? extractMessageLinks(entry.subtitle) : [],
+    [collapsed, entry.subtitle, streaming, system],
+  );
   const timeLabel = nowLabel(entry.at);
 
   // Compact progress / system rows (steps, thinking, tool calls).

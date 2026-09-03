@@ -79,7 +79,6 @@ export class TimelineStore {
       if (
         merged.title === previous.title
         && merged.subtitle === previous.subtitle
-        && merged.raw === previous.raw
         && merged.at === previous.at
       ) {
         continue;

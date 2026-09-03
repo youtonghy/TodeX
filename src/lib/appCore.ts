@@ -1107,7 +1107,6 @@ export const SOCKET_FRAME_DECODE_BATCH_SIZE = 8;
 export const SOCKET_FRAME_DECODE_BUDGET_MS = 10;
 export const MAX_TRANSPORT_HELLO_SESSION_CURSORS = 12;
 export const MAX_TIMELINE_ITEMS = 260;
-export const MAX_EVENTS = 220;
 export const MAX_USAGE_RECORDS = 2000;
 
 export function backendProfileTokenKey(profileId: string): string {
