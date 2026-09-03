@@ -12,10 +12,10 @@ import {
   serviceTierSlashCommandsForModel,
   slashCommandNeedsActionPage,
   type ConversationRecord,
-  type RootStackParamList,
   type SlashCommandCategory,
   type ThreadMenuAction,
 } from '../lib/appCore';
+import type { RootStackParamList } from '../navigation/routes';
 import {
   ListRow,
   ListSection,

@@ -1,7 +1,8 @@
 import { memo } from 'react';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 
-import { terminalIdForConversation, type RootStackParamList } from '../lib/appCore';
+import { terminalIdForConversation } from '../lib/appCore';
+import type { RootStackParamList } from '../navigation/routes';
 import { GitDiffScreen } from '../screens/GitDiffScreen';
 import { TerminalScreen } from '../screens/TerminalScreen';
 import { useAppRuntime, useConnectionState, useKeyedStoreValue } from './appRuntime';
@@ -58,4 +59,3 @@ export const TerminalRouteScreen = memo(function TerminalRouteScreen({ route }: 
 export const GitDiffRouteScreen = memo(function GitDiffRouteScreen({ route }: NativeStackScreenProps<RootStackParamList, 'GitDiff'>) {
   return <GitDiffRuntimePanel {...route.params} />;
 });
-

@@ -1,13 +1,18 @@
 import { createContext, useCallback, useContext, useSyncExternalStore, type ReactNode } from 'react';
 
-import type { WorkspaceRecord } from '../lib/todex';
+import type { PendingRequest, WorkspaceRecord } from '../lib/todex';
 import type {
   ConnectionState,
+  ComposerAttachmentDraft,
+  ComposerSelection,
   ConversationRecord,
   GitDiffState,
+  MobileContextUsage,
+  QueuedChatSubmission,
   TerminalClientState,
 } from '../lib/appCore';
-import { ExternalStore, KeyedExternalStore, RuntimeTransaction } from './externalStore';
+import type { TimelineStore } from '../lib/timelineStore';
+import { ExternalStore, KeyedExternalStore, RuntimeActionRegistry, RuntimeTransaction } from './externalStore';
 
 export type OutputRuntimeActions = {
   startTerminalSession: (
@@ -25,10 +30,21 @@ export type OutputRuntimeActions = {
 
 export type AppRuntime = {
   transaction: RuntimeTransaction;
+  timelineStore: TimelineStore;
+  routeSnapshots: KeyedExternalStore<unknown>;
+  actions: RuntimeActionRegistry;
   workspaces: KeyedExternalStore<WorkspaceRecord>;
   conversations: KeyedExternalStore<ConversationRecord>;
   terminals: KeyedExternalStore<TerminalClientState>;
   gitDiffs: KeyedExternalStore<GitDiffState>;
+  chatDrafts: KeyedExternalStore<string>;
+  queuedChatDrafts: KeyedExternalStore<QueuedChatSubmission[]>;
+  composerAttachments: KeyedExternalStore<ComposerAttachmentDraft[]>;
+  composerSelections: KeyedExternalStore<ComposerSelection>;
+  turnIds: KeyedExternalStore<string>;
+  thinkingConversations: KeyedExternalStore<boolean>;
+  contextUsage: KeyedExternalStore<MobileContextUsage>;
+  pendingRequests: ExternalStore<PendingRequest[]>;
   connectionState: ExternalStore<ConnectionState>;
   outputActions: OutputRuntimeActions;
   bindOutputActions: (actions: OutputRuntimeActions) => void;
@@ -38,7 +54,7 @@ function recordById<Value extends { id: string }>(values: readonly Value[]): Rec
   return Object.fromEntries(values.map((value) => [value.id, value]));
 }
 
-export function createAppRuntime(): AppRuntime {
+export function createAppRuntime(timelineStore: TimelineStore): AppRuntime {
   const transaction = new RuntimeTransaction();
   let outputActionImplementations: OutputRuntimeActions | null = null;
   const getOutputActions = () => {
@@ -48,10 +64,21 @@ export function createAppRuntime(): AppRuntime {
 
   const runtime: AppRuntime = {
     transaction,
+    timelineStore,
+    routeSnapshots: new KeyedExternalStore(transaction),
+    actions: new RuntimeActionRegistry(),
     workspaces: new KeyedExternalStore(transaction),
     conversations: new KeyedExternalStore(transaction),
     terminals: new KeyedExternalStore(transaction),
     gitDiffs: new KeyedExternalStore(transaction),
+    chatDrafts: new KeyedExternalStore(transaction),
+    queuedChatDrafts: new KeyedExternalStore(transaction),
+    composerAttachments: new KeyedExternalStore(transaction),
+    composerSelections: new KeyedExternalStore(transaction),
+    turnIds: new KeyedExternalStore(transaction),
+    thinkingConversations: new KeyedExternalStore(transaction),
+    contextUsage: new KeyedExternalStore(transaction),
+    pendingRequests: new ExternalStore<PendingRequest[]>([], transaction),
     connectionState: new ExternalStore<ConnectionState>('idle', transaction),
     outputActions: {
       startTerminalSession: (...args) => getOutputActions().startTerminalSession(...args),
@@ -98,8 +125,20 @@ export function useKeyedStoreValue<Value>(store: KeyedExternalStore<Value>, key:
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
+export function useAllKeyedStoreValues<Value>(store: KeyedExternalStore<Value>): Readonly<Record<string, Value>> {
+  return useSyncExternalStore(store.subscribe, store.getAllSnapshot, store.getAllSnapshot);
+}
+
+export function useRouteSnapshot<Value>(key: string): Value | null {
+  const { routeSnapshots } = useAppRuntime();
+  return useKeyedStoreValue(routeSnapshots, key) as Value | null;
+}
+
 export function useConnectionState(): ConnectionState {
   const { connectionState } = useAppRuntime();
   return useSyncExternalStore(connectionState.subscribe, connectionState.getSnapshot, connectionState.getSnapshot);
 }
 
+export function useExternalStoreValue<Value>(store: ExternalStore<Value>): Value {
+  return useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+}

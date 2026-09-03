@@ -12,8 +12,8 @@ import {
   nowLabel,
   type ConnectionState,
   type ConversationRecord,
-  type RootStackParamList,
 } from '../lib/appCore';
+import type { RootStackParamList } from '../navigation/routes';
 import { ProviderIcon } from '../components/ProviderIcon';
 import { PromptModal } from '../components/modals';
 import {
@@ -33,25 +33,7 @@ import {
   StyledIonicons,
 } from '../components/ui';
 
-export function ConversationListScreen({
-  navigation,
-  route,
-  workspaces,
-  conversations,
-  activeConversationId,
-  activeTurns,
-  connectionState,
-  threadListStatus,
-  threadListError,
-  createConversation,
-  v2Providers,
-  refreshNativeThreads,
-  selectWorkspace,
-  selectConversation,
-  renameConversation,
-  forkConversation,
-  removeConversation,
-}: NativeStackScreenProps<RootStackParamList, 'Conversations'> & {
+export type ConversationListScreenProps = NativeStackScreenProps<RootStackParamList, 'Conversations'> & {
   workspaces: WorkspaceRecord[];
   conversations: ConversationRecord[];
   activeConversationId: string;
@@ -72,7 +54,27 @@ export function ConversationListScreen({
   renameConversation: (conversationId: string, title: string) => void;
   forkConversation: (conversationId: string) => ConversationRecord | null;
   removeConversation: (conversationId: string) => void;
-}) {
+};
+
+export function ConversationListScreen({
+  navigation,
+  route,
+  workspaces,
+  conversations,
+  activeConversationId,
+  activeTurns,
+  connectionState,
+  threadListStatus,
+  threadListError,
+  createConversation,
+  v2Providers,
+  refreshNativeThreads,
+  selectWorkspace,
+  selectConversation,
+  renameConversation,
+  forkConversation,
+  removeConversation,
+}: ConversationListScreenProps) {
   const isFocused = useIsFocused();
   const [renamingConversation, setRenamingConversation] = useState<ConversationRecord | null>(null);
   const [actionConversation, setActionConversation] = useState<ConversationRecord | null>(null);

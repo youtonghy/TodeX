@@ -59,6 +59,13 @@ Built with **React Native 0.86**, **Expo SDK 57**, **Uniwind (Tailwind CSS v4)**
 | **Cryptography** | `@noble/ciphers`, `@noble/curves`, `@noble/hashes`, `@noble/post-quantum` |
 | **Protocol Layer** | Shared `src/lib` implementation (v2 API Client, Transport, Crypto, Metrics) |
 
+Mobile screens are registered statically in `src/navigation/AppNavigator.tsx`. Shared
+screen data is subscribed through the entity- and conversation-scoped external stores
+in `src/runtime`, while commands cross the boundary through stable runtime action
+facades. Do not lift high-frequency drafts, streaming state, or terminal output back
+into the `App.tsx` navigation render tree. Growing output must use virtualized lists and
+an explicit entry or byte limit before it reaches React rendering.
+
 ---
 
 ## Quick Start

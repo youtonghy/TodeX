@@ -59,6 +59,11 @@
 | **密码学套件** | `@noble/ciphers`, `@noble/curves`, `@noble/hashes`, `@noble/post-quantum` |
 | **协议层核心** | 共享 `src/lib`（v2 API Client、Transport 传输层、Crypto 密码学模块、网络探测） |
 
+移动端页面统一由 `src/navigation/AppNavigator.tsx` 静态注册。跨页面共享数据通过
+`src/runtime` 中的外部 store 按实体或会话订阅，页面动作通过稳定的运行时代理调用；不要把
+高频草稿、流式状态或终端输出重新提升到 `App.tsx` 的导航渲染树。持续增长的输出必须使用
+虚拟化列表，并在进入 React 渲染层前设置明确的条目或字节上限。
+
 ---
 
 ## 快速开始

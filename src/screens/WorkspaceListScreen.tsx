@@ -10,9 +10,9 @@ import {
   fetchWorkspaceDirectorySnapshot,
   profileSettings,
   type ConversationRecord,
-  type RootStackParamList,
   type ServerVersion,
 } from '../lib/appCore';
+import type { RootStackParamList } from '../navigation/routes';
 import { WorkspacePathPickerModal, PromptModal } from '../components/modals';
 import {
   ActionSheet,
@@ -35,6 +35,27 @@ import {
   useAppToast,
 } from '../components/ui';
 
+export type WorkspaceListScreenProps = NativeStackScreenProps<RootStackParamList, 'Workspaces'> & {
+  workspaces: WorkspaceRecord[];
+  conversations: ConversationRecord[];
+  settings: ConnectionSettings;
+  serverVersion: ServerVersion | null;
+  v2Providers: ProviderDescriptor[];
+  v2ConversationCount: number;
+  connectionState: string;
+  createWorkspace: (name: string, path: string, backendConnectionId?: string) => { workspace: WorkspaceRecord; conversation: ConversationRecord } | null;
+  selectWorkspace: (workspaceId: string) => void;
+  renameWorkspace: (workspaceId: string, name: string) => void;
+  forkWorkspace: (workspaceId: string) => { workspace: WorkspaceRecord; conversation: ConversationRecord | null } | null;
+  removeWorkspace: (workspaceId: string) => void;
+  openUsage: () => void;
+  openAbout: () => void;
+  openKanban: () => void;
+  openGit: (conversationId?: string) => void;
+  backendProfiles: BackendConnectionProfile[];
+  activeBackendConnectionId: string;
+};
+
 export function WorkspaceListScreen({
   navigation,
   workspaces,
@@ -55,26 +76,7 @@ export function WorkspaceListScreen({
   openGit,
   backendProfiles,
   activeBackendConnectionId,
-}: NativeStackScreenProps<RootStackParamList, 'Workspaces'> & {
-  workspaces: WorkspaceRecord[];
-  conversations: ConversationRecord[];
-  settings: ConnectionSettings;
-  serverVersion: ServerVersion | null;
-  v2Providers: ProviderDescriptor[];
-  v2ConversationCount: number;
-  connectionState: string;
-  createWorkspace: (name: string, path: string, backendConnectionId?: string) => { workspace: WorkspaceRecord; conversation: ConversationRecord } | null;
-  selectWorkspace: (workspaceId: string) => void;
-  renameWorkspace: (workspaceId: string, name: string) => void;
-  forkWorkspace: (workspaceId: string) => { workspace: WorkspaceRecord; conversation: ConversationRecord | null } | null;
-  removeWorkspace: (workspaceId: string) => void;
-  openUsage: () => void;
-  openAbout: () => void;
-  openKanban: () => void;
-  openGit: (conversationId?: string) => void;
-  backendProfiles: BackendConnectionProfile[];
-  activeBackendConnectionId: string;
-}) {
+}: WorkspaceListScreenProps) {
   const toast = useAppToast();
   const accentForeground = useThemeColor('accent-foreground');
   const [createVisible, setCreateVisible] = useState(false);

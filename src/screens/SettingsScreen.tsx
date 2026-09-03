@@ -22,8 +22,8 @@ import {
   type ConnectionHealth,
   type ConnectionState,
   type PairingChunkCollector,
-  type RootStackParamList,
 } from '../lib/appCore';
+import type { RootStackParamList } from '../navigation/routes';
 import {
   ConfirmDialog,
   ConnectionChip,

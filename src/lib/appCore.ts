@@ -41,7 +41,7 @@ import {
   sessionIdFromEvent as transportSessionIdFromEvent,
 } from './transport';
 import { V2ApiClient, providerDisplayName, type ConversationEvent, type ConversationManifest, type ProviderDescriptor, type ProviderKind } from './v2';
-import type { WorkbenchTab } from '../screens/WorkbenchScreen';
+import { WORKBENCH_TABS, type WorkbenchTab } from './workbench';
 import {
   buildConversationRenderItems as sharedBuildConversationRenderItems,
   classifyV2ConversationEvent as sharedClassifyV2ConversationEvent,
@@ -55,27 +55,6 @@ import {
   settingsFromProfile as sharedSettingsFromProfile,
   validateLoopbackUrl,
 } from './mobileParity';
-
-export type RootStackParamList = {
-  Workspaces: undefined;
-  V2Conversations: undefined;
-  Conversations: { workspaceId: string };
-  Chat: { workspaceId: string; conversationId: string };
-  SlashCommands: { workspaceId: string; conversationId: string };
-  SlashCommandAction: { workspaceId: string; conversationId: string; command: string };
-  Experimental: { workspaceId: string; conversationId: string };
-  GitDiff: { workspaceId: string; conversationId: string };
-  Terminal: { workspaceId: string; conversationId: string };
-  Settings: undefined;
-  Capabilities: undefined;
-  Browser: { workspaceId: string; conversationId: string; url?: string; filePath?: string };
-  Files: { workspaceId: string; conversationId: string; filePath?: string };
-  Usage: undefined;
-  About: undefined;
-  Kanban: undefined;
-  Workbench: { workspaceId: string; conversationId: string; tab?: WorkbenchTab };
-  Git: { workspaceId: string; conversationId: string };
-};
 
 export type ServerVersion = {
   name: string;
@@ -1387,8 +1366,6 @@ export const DEFAULT_WORKBENCH_STATE: MobileWorkbenchState = {
   browserFilePath: '',
   inspectedElement: null,
 };
-
-export const WORKBENCH_TABS: readonly WorkbenchTab[] = ['terminal', 'browser', 'files', 'git-diff'];
 
 export function normalizeWorkbenchState(value: unknown): MobileWorkbenchState {
   const raw = value && typeof value === 'object' && !Array.isArray(value)

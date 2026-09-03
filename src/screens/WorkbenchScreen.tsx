@@ -5,8 +5,8 @@ import { Button, Text } from 'heroui-native';
 import { Segment } from 'heroui-native-pro';
 
 import { EmptyStateView, Screen, StyledIonicons } from '../components/ui';
-
-export type WorkbenchTab = 'terminal' | 'browser' | 'files' | 'git-diff';
+import { WORKBENCH_TABS, type WorkbenchTab } from '../lib/workbench';
+export type { WorkbenchTab } from '../lib/workbench';
 
 export type WorkbenchContentRenderer = ReactNode | (() => ReactNode);
 
@@ -45,8 +45,6 @@ type TabDefinition = {
   label: string;
   icon: keyof typeof Ionicons.glyphMap;
 };
-
-const DEFAULT_TABS: readonly WorkbenchTab[] = ['terminal', 'browser', 'files', 'git-diff'];
 
 const TAB_DEFINITIONS: Record<WorkbenchTab, TabDefinition> = {
   terminal: { value: 'terminal', label: '终端', icon: 'terminal-outline' },
@@ -88,7 +86,7 @@ export function WorkbenchScreen({
   children,
 }: WorkbenchScreenProps) {
   const tabs = useMemo<WorkbenchTab[]>(() => {
-    const candidates = visibleTabs && visibleTabs.length > 0 ? visibleTabs : DEFAULT_TABS;
+    const candidates = visibleTabs && visibleTabs.length > 0 ? visibleTabs : WORKBENCH_TABS;
     return [...new Set(candidates)].filter((value): value is WorkbenchTab => value in TAB_DEFINITIONS);
   }, [visibleTabs]);
   const firstTab = tabs[0] || 'terminal';

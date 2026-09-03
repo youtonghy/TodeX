@@ -11,12 +11,9 @@ import {
 import { Alert, AppState, View } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { StatusBar } from 'expo-status-bar';
-import { NavigationContainer, createNavigationContainerRef } from '@react-navigation/native';
-import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { enableScreens } from 'react-native-screens';
 import { HeroUINativeProvider, Spinner, Surface, Text as HeroText } from 'heroui-native';
 
 import {
@@ -93,14 +90,8 @@ import {
   type ProviderModelDescriptor,
   type SkillCatalogDescriptor,
 } from './src/lib/v2';
-import { CapabilitiesScreen, type CatalogState } from './src/components/CapabilitiesScreen';
-import { UsageScreen } from './src/screens/UsageScreen';
-import { AboutScreen } from './src/screens/AboutScreen';
-import { KanbanScreen } from './src/screens/KanbanScreen';
-import { FilesScreen } from './src/screens/FilesScreen';
-import { BrowserScreen } from './src/screens/BrowserScreen';
-import { WorkbenchScreen, type WorkbenchTab } from './src/screens/WorkbenchScreen';
-import { GitScreen } from './src/screens/GitScreen';
+import type { CatalogState } from './src/lib/capabilityCatalog';
+import type { WorkbenchTab } from './src/lib/workbench';
 import {
   contextUsageFromV2Event as sharedContextUsageFromV2Event,
   normalizeBackendConnectionProfiles as sharedNormalizeBackendConnectionProfiles,
@@ -221,7 +212,6 @@ import {
   createDefaultConversation,
   conversationsForWorkspaceSnapshot,
   forkConversationRecord,
-  type RootStackParamList,
   type ServerVersion,
   type ConversationRecord,
   type MobileUsageRecord,
@@ -262,7 +252,6 @@ import {
   type ThreadMenuAction,
   type TimelineTarget,
   type ConnectionState,
-  type RuntimeStatusState,
   type ConnectionHealth,
   type TimelineEntry,
   type PermissionPreset,
@@ -270,16 +259,10 @@ import {
   type WorkspaceMentionHistory,
   type PersistedSettings,
 } from './src/lib/appCore';
-import { BrowserPreviewWebView } from './src/components/BrowserPreviewWebView';
+import { navigationRef } from './src/navigation/navigationRef';
+import { AppNavigator } from './src/navigation/AppNavigator';
 import { useAppNavigationTheme } from './src/theme/navigation';
 import { ToastBridge, notify } from './src/components/ui';
-import { WorkspaceListScreen } from './src/screens/WorkspaceListScreen';
-import { ConversationListScreen } from './src/screens/ConversationListScreen';
-import { ChatScreen } from './src/screens/chat/ChatScreen';
-import { SettingsScreen } from './src/screens/SettingsScreen';
-import { ExperimentalScreen } from './src/screens/ExperimentalScreen';
-import { SlashCommandsScreen } from './src/screens/SlashCommandsScreen';
-import { SlashCommandActionScreen } from './src/screens/SlashCommandActionScreen';
 import {
   ModelPickerModal,
   PromptModal,
@@ -292,17 +275,54 @@ import {
   syncRuntimeEntities,
 } from './src/runtime/appRuntime';
 import {
-  GitDiffRouteScreen,
-  GitDiffRuntimePanel,
-  TerminalRouteScreen,
-  TerminalRuntimePanel,
-} from './src/runtime/OutputRuntimeScreens';
+  CHAT_ACTIONS,
+  CHAT_ROUTE_SNAPSHOT,
+  type ChatRuntimeActions,
+  type ChatRuntimeSnapshot,
+} from './src/runtime/ChatRuntimeScreen';
+import {
+  CONVERSATION_ACTIONS,
+  CONVERSATION_ROUTE_SNAPSHOT,
+  type ConversationRouteSnapshot,
+  type ConversationRuntimeActions,
+} from './src/runtime/ConversationRuntimeScreen';
+import {
+  WORKSPACE_ACTIONS,
+  WORKSPACE_ROUTE_SNAPSHOT,
+  type WorkspaceRouteSnapshot,
+  type WorkspaceRuntimeActions,
+} from './src/runtime/WorkspaceRuntimeScreen';
+import {
+  ABOUT_ROUTE_SNAPSHOT,
+  EXPERIMENTAL_ROUTE_SNAPSHOT,
+  SETTINGS_ROUTE_SNAPSHOT,
+  USAGE_ROUTE_SNAPSHOT,
+  type AboutRouteSnapshot,
+  type ExperimentalRouteSnapshot,
+  type SettingsRouteSnapshot,
+  type UsageRouteSnapshot,
+} from './src/runtime/LeafRuntimeScreens';
+import {
+  CAPABILITIES_ACTIONS,
+  CAPABILITIES_ROUTE_SNAPSHOT,
+  COMMAND_ACTIONS,
+  COMMAND_ROUTE_SNAPSHOT,
+  KANBAN_ACTIONS,
+  KANBAN_ROUTE_SNAPSHOT,
+  type CapabilitiesRouteSnapshot,
+  type CapabilitiesRuntimeActions,
+  type CommandRouteSnapshot,
+  type CommandRuntimeActions,
+  type KanbanRouteSnapshot,
+  type KanbanRuntimeActions,
+} from './src/runtime/CommandRuntimeScreens';
+import {
+  TOOL_ACTIONS,
+  TOOL_ROUTE_SNAPSHOT,
+  type ToolRouteSnapshot,
+  type ToolRuntimeActions,
+} from './src/runtime/ToolRuntimeScreens';
 
-const Stack = createNativeStackNavigator<RootStackParamList>();
-const navigationRef = createNavigationContainerRef<RootStackParamList>();
-enableScreens(true);
-
-const timelineStore = new TimelineStore(MAX_TIMELINE_ITEMS);
 const EMPTY_ATTACHMENTS = Object.freeze([]) as unknown as ComposerAttachmentDraft[];
 const EMPTY_SKILLS = Object.freeze([]) as unknown as SelectedSkillAttachment[];
 
@@ -338,9 +358,12 @@ function appendBoundedTerminalEntry(
 }
 
 export default function App() {
-  const { statusBarStyle, navigationTheme, screenOptions } = useAppNavigationTheme();
+  const { statusBarStyle } = useAppNavigationTheme();
+  const timelineStoreRef = useRef<TimelineStore | null>(null);
+  if (!timelineStoreRef.current) timelineStoreRef.current = new TimelineStore(MAX_TIMELINE_ITEMS);
+  const timelineStore = timelineStoreRef.current;
   const appRuntimeRef = useRef<ReturnType<typeof createAppRuntime> | null>(null);
-  if (!appRuntimeRef.current) appRuntimeRef.current = createAppRuntime();
+  if (!appRuntimeRef.current) appRuntimeRef.current = createAppRuntime(timelineStore);
   const appRuntime = appRuntimeRef.current;
   const socketRef = useRef<WebSocket | null>(null);
   const socketCryptoRef = useRef<TransportCryptoSession | null>(null);
@@ -407,14 +430,8 @@ export default function App() {
   const [modelCatalogError, setModelCatalogError] = useState('');
   const [lastError, setLastError] = useState('');
   const [serverVersion, setServerVersion] = useState<ServerVersion | null>(null);
-  const [pendingRequests, setPendingRequests] = useState<PendingRequest[]>([]);
   const [mentionHistory, setMentionHistory] = useState<WorkspaceMentionHistory[]>([]);
   const [experimentalFeatures, setExperimentalFeatures] = useState<ExperimentalFeatureSettings>(EXPERIMENTAL_FEATURE_DEFAULTS);
-  const [selectedRequestId, setSelectedRequestId] = useState('');
-  const [chatDrafts, setChatDrafts] = useState<Record<string, string>>({});
-  const [queuedChatDrafts, setQueuedChatDrafts] = useState<Record<string, QueuedChatSubmission[]>>({});
-  const [composerAttachments, setComposerAttachments] = useState<Record<string, ComposerAttachmentDraft[]>>({});
-  const [composerSelections, setComposerSelections] = useState<Record<string, ComposerSelection>>({});
   const [selectedSkills, setSelectedSkills] = useState<Record<string, SelectedSkillAttachment[]>>({});
   const [skillListVisible, setSkillListVisible] = useState(false);
   const [skillListConversationId, setSkillListConversationId] = useState('');
@@ -425,8 +442,6 @@ export default function App() {
   const [modelPickerPrompt, setModelPickerPrompt] = useState<ModelPickerPromptState | null>(null);
   const [threadInfoModal, setThreadInfoModal] = useState<ThreadInfoModalState | null>(null);
   const [threadCommandPrompt, setThreadCommandPrompt] = useState<ThreadCommandPromptState | null>(null);
-  const [turnIds, setTurnIds] = useState<Record<string, string>>({});
-  const [thinkingConversations, setThinkingConversations] = useState<Record<string, boolean>>({});
   const [threadListStatusByWorkspace, setThreadListStatusByWorkspace] = useState<Record<string, 'idle' | 'loading' | 'ready' | 'error'>>({});
   const [threadListErrorByWorkspace, setThreadListErrorByWorkspace] = useState<Record<string, string>>({});
   const [mcpInventoryByConversation, setMcpInventoryByConversation] = useState<Record<string, McpInventoryState>>({});
@@ -440,7 +455,6 @@ export default function App() {
   const [providerModels, setProviderModels] = useState<Partial<Record<ProviderKind, ProviderModelDescriptor[]>>>({});
   const [providerCommands, setProviderCommands] = useState<Partial<Record<ProviderKind, ProviderCommandDescriptor[]>>>({});
   const [providerCatalogStatus, setProviderCatalogStatus] = useState<Partial<Record<ProviderKind, 'idle' | 'loading' | 'ready' | 'error'>>>({});
-  const [contextUsageByConversation, setContextUsageByConversation] = useState<Record<string, MobileContextUsage>>({});
   const [usageRecords, setUsageRecords] = useState<MobileUsageRecord[]>([]);
   const [workbenchByConversation, setWorkbenchByConversation] = useState<Record<string, MobileWorkbenchState>>({});
   const [gitRepositories, setGitRepositories] = useState<GitRepositorySummary[]>([]);
@@ -462,6 +476,200 @@ export default function App() {
     const next = typeof value === 'function' ? value(current) : value;
     appRuntime.gitDiffs.replace(next);
   }, [appRuntime]);
+
+  const setContextUsageByConversation = useCallback<Dispatch<SetStateAction<Record<string, MobileContextUsage>>>>((value) => {
+    const current = appRuntime.contextUsage.getAllSnapshot() as Record<string, MobileContextUsage>;
+    const next = typeof value === 'function' ? value(current) : value;
+    appRuntime.contextUsage.replace(next);
+  }, [appRuntime]);
+
+  const setTurnIds = useCallback<Dispatch<SetStateAction<Record<string, string>>>>((value) => {
+    const current = appRuntime.turnIds.getAllSnapshot() as Record<string, string>;
+    const next = typeof value === 'function' ? value(current) : value;
+    turnIdsRef.current = next;
+    appRuntime.turnIds.replace(next);
+  }, [appRuntime]);
+
+  const setThinkingConversations = useCallback<Dispatch<SetStateAction<Record<string, boolean>>>>((value) => {
+    const current = appRuntime.thinkingConversations.getAllSnapshot() as Record<string, boolean>;
+    const next = typeof value === 'function' ? value(current) : value;
+    thinkingConversationsRef.current = next;
+    appRuntime.thinkingConversations.replace(next);
+  }, [appRuntime]);
+
+  const setChatDrafts = useCallback<Dispatch<SetStateAction<Record<string, string>>>>((value) => {
+    const current = appRuntime.chatDrafts.getAllSnapshot() as Record<string, string>;
+    const next = typeof value === 'function' ? value(current) : value;
+    appRuntime.chatDrafts.replace(next);
+  }, [appRuntime]);
+
+  const setQueuedChatDrafts = useCallback<Dispatch<SetStateAction<Record<string, QueuedChatSubmission[]>>>>((value) => {
+    const current = appRuntime.queuedChatDrafts.getAllSnapshot() as Record<string, QueuedChatSubmission[]>;
+    const next = typeof value === 'function' ? value(current) : value;
+    queuedChatDraftsRef.current = next;
+    appRuntime.queuedChatDrafts.replace(next);
+  }, [appRuntime]);
+
+  const setComposerAttachments = useCallback<Dispatch<SetStateAction<Record<string, ComposerAttachmentDraft[]>>>>((value) => {
+    const current = appRuntime.composerAttachments.getAllSnapshot() as Record<string, ComposerAttachmentDraft[]>;
+    const next = typeof value === 'function' ? value(current) : value;
+    appRuntime.composerAttachments.replace(next);
+  }, [appRuntime]);
+
+  const setComposerSelections = useCallback<Dispatch<SetStateAction<Record<string, ComposerSelection>>>>((value) => {
+    const current = appRuntime.composerSelections.getAllSnapshot() as Record<string, ComposerSelection>;
+    const next = typeof value === 'function' ? value(current) : value;
+    appRuntime.composerSelections.replace(next);
+  }, [appRuntime]);
+
+  const setPendingRequests = useCallback<Dispatch<SetStateAction<PendingRequest[]>>>((value) => {
+    const current = appRuntime.pendingRequests.getSnapshot();
+    const next = typeof value === 'function' ? value(current) : value;
+    appRuntime.pendingRequests.set(next);
+  }, [appRuntime]);
+
+  useEffect(() => {
+    const snapshot: ChatRuntimeSnapshot = {
+      settings,
+      workspaces,
+      conversations,
+      selectedSkills,
+      lastError,
+      v2Providers,
+      providerModels,
+      providerCommands,
+      providerCatalogStatus,
+      capabilityCatalog: capabilityCatalogs.codex,
+    };
+    appRuntime.routeSnapshots.set(CHAT_ROUTE_SNAPSHOT, snapshot);
+  }, [
+    appRuntime,
+    capabilityCatalogs.codex,
+    conversations,
+    lastError,
+    providerCatalogStatus,
+    providerCommands,
+    providerModels,
+    selectedSkills,
+    settings,
+    v2Providers,
+    workspaces,
+  ]);
+
+  useEffect(() => {
+    const snapshot: WorkspaceRouteSnapshot = {
+      workspaces,
+      conversations,
+      settings,
+      serverVersion,
+      v2Providers,
+      v2ConversationCount: v2Conversations.length,
+      backendProfiles,
+      activeBackendConnectionId,
+    };
+    appRuntime.routeSnapshots.set(WORKSPACE_ROUTE_SNAPSHOT, snapshot);
+  }, [
+    activeBackendConnectionId,
+    appRuntime,
+    backendProfiles,
+    conversations,
+    serverVersion,
+    settings,
+    v2Conversations.length,
+    v2Providers,
+    workspaces,
+  ]);
+
+  useEffect(() => {
+    const snapshot: ExperimentalRouteSnapshot = { features: experimentalFeatures, setFeatures: setExperimentalFeatures };
+    appRuntime.routeSnapshots.set(EXPERIMENTAL_ROUTE_SNAPSHOT, snapshot);
+  }, [appRuntime, experimentalFeatures]);
+
+  useEffect(() => {
+    const snapshot: UsageRouteSnapshot = { records: usageRecords };
+    appRuntime.routeSnapshots.set(USAGE_ROUTE_SNAPSHOT, snapshot);
+  }, [appRuntime, usageRecords]);
+
+  useEffect(() => {
+    const snapshot: ConversationRouteSnapshot = {
+      workspaces,
+      conversations,
+      activeConversationId,
+      threadListStatusByWorkspace,
+      threadListErrorByWorkspace,
+      v2Providers,
+    };
+    appRuntime.routeSnapshots.set(CONVERSATION_ROUTE_SNAPSHOT, snapshot);
+  }, [
+    activeConversationId,
+    appRuntime,
+    conversations,
+    threadListErrorByWorkspace,
+    threadListStatusByWorkspace,
+    v2Providers,
+    workspaces,
+  ]);
+
+  useEffect(() => {
+    const snapshot: CapabilitiesRouteSnapshot = {
+      providers: v2Providers,
+      catalogs: capabilityCatalogs,
+      defaultWorkspacePath: settings.defaultWorkspacePath,
+      serverWorkspaceRoot: serverVersion?.workspace_root,
+      selectedSkills,
+    };
+    appRuntime.routeSnapshots.set(CAPABILITIES_ROUTE_SNAPSHOT, snapshot);
+  }, [
+    appRuntime,
+    capabilityCatalogs,
+    selectedSkills,
+    serverVersion?.workspace_root,
+    settings.defaultWorkspacePath,
+    v2Providers,
+  ]);
+
+  useEffect(() => {
+    const workspaceNames = new Map(workspaces.map((workspace) => [workspace.id, workspace.name]));
+    const snapshot: KanbanRouteSnapshot = {
+      conversations: conversations.map((conversation) => ({
+        ...conversation,
+        workspaceName: workspaceNames.get(conversation.workspaceId),
+        status: conversation.nativeStatus,
+      })),
+      canRefresh: connectionState === 'open',
+    };
+    appRuntime.routeSnapshots.set(KANBAN_ROUTE_SNAPSHOT, snapshot);
+  }, [appRuntime, connectionState, conversations, workspaces]);
+
+  useEffect(() => {
+    const snapshot: ToolRouteSnapshot = {
+      settings,
+      backendProfiles,
+      activeBackendConnectionId,
+      workbenchByConversation,
+      gitRepositories,
+      gitRepositoryTarget,
+      gitRepositoryStatus,
+      gitRepositoryError,
+      gitRepositoryOutput,
+      gitRepositoryOutputTarget,
+      gitRepositoryActionTarget,
+    };
+    appRuntime.routeSnapshots.set(TOOL_ROUTE_SNAPSHOT, snapshot);
+  }, [
+    activeBackendConnectionId,
+    appRuntime,
+    backendProfiles,
+    gitRepositories,
+    gitRepositoryActionTarget,
+    gitRepositoryError,
+    gitRepositoryOutput,
+    gitRepositoryOutputTarget,
+    gitRepositoryStatus,
+    gitRepositoryTarget,
+    settings,
+    workbenchByConversation,
+  ]);
 
   useEffect(() => {
     if (!hydrated || !settings.serverUrl.trim()) {
@@ -501,7 +709,6 @@ export default function App() {
   const queuedChatDispatchingRef = useRef(new Set<string>());
   const sendQueuedChatDraftRef = useRef<(submission: QueuedChatSubmission, conversationId: string) => Promise<boolean>>(async () => false);
 
-  const activeTurnId = activeConversationId ? turnIds[activeConversationId] ?? '' : '';
   const modelCatalog = useMemo(
     () => mergeModelCatalog(
       remoteModelCatalog,
@@ -512,6 +719,32 @@ export default function App() {
     ),
     [remoteModelCatalog, settings.defaultModel, workspaces],
   );
+
+  useEffect(() => {
+    const snapshot: CommandRouteSnapshot = {
+      settings,
+      modelCatalog,
+      modelCatalogStatus,
+      modelCatalogError,
+      mcpInventoryByConversation,
+      permissionProfilesByConversation,
+      hooksCatalogByConversation,
+      pluginsCatalogByConversation,
+      memorySettingsByConversation,
+    };
+    appRuntime.routeSnapshots.set(COMMAND_ROUTE_SNAPSHOT, snapshot);
+  }, [
+    appRuntime,
+    hooksCatalogByConversation,
+    mcpInventoryByConversation,
+    memorySettingsByConversation,
+    modelCatalog,
+    modelCatalogError,
+    modelCatalogStatus,
+    permissionProfilesByConversation,
+    pluginsCatalogByConversation,
+    settings,
+  ]);
 
   const setConversationChatDraft = useCallback((conversationId: string, value: SetStateAction<string>) => {
     if (!conversationId) {
@@ -562,10 +795,6 @@ export default function App() {
       return { ...current, [conversationId]: next };
     });
   }, []);
-
-  useEffect(() => {
-    queuedChatDraftsRef.current = queuedChatDrafts;
-  }, [queuedChatDrafts]);
 
   const setConversationComposerSelection = useCallback((conversationId: string, value: SetStateAction<ComposerSelection>) => {
     if (!conversationId) {
@@ -930,14 +1159,6 @@ export default function App() {
   useEffect(() => {
     appRuntime.connectionState.set(connectionState);
   }, [appRuntime, connectionState]);
-
-  useEffect(() => {
-    turnIdsRef.current = turnIds;
-  }, [turnIds]);
-
-  useEffect(() => {
-    thinkingConversationsRef.current = thinkingConversations;
-  }, [thinkingConversations]);
 
   useEffect(() => {
     backendProfilesRef.current = backendProfiles;
@@ -1385,13 +1606,6 @@ export default function App() {
     }
   }, [activeConversation?.provider, activeWorkspace?.path, hydrated, providerCatalogStatus, refreshProviderCatalog, v2Providers]);
 
-  const runtimeStatus = useMemo<RuntimeStatusState>(() => ({
-    socket: connectionState,
-    daemon: connectionHealth.status,
-    codexAdapter: activeConversation?.localAdapterState ?? activeWorkspace?.localAdapterState ?? 'unknown',
-    turn: activeTurnId ? 'running' : 'idle',
-  }), [activeConversation?.localAdapterState, activeTurnId, activeWorkspace?.localAdapterState, connectionHealth.status, connectionState]);
-
   const getConversationContext = useCallback((conversationId = activeConversationRef.current): ConversationContext | null => {
     const conversation = conversationsRef.current.find((item) => item.id === conversationId) ?? null;
     const workspace = conversation
@@ -1399,21 +1613,6 @@ export default function App() {
       : null;
     return workspace && conversation ? { workspace, conversation } : null;
   }, []);
-
-  useEffect(() => {
-    if (!pendingRequests.length) {
-      setSelectedRequestId('');
-      return;
-    }
-    if (!selectedRequestId || !pendingRequests.some((request) => request.requestId === selectedRequestId)) {
-      setSelectedRequestId(pendingRequests[0].requestId);
-    }
-  }, [pendingRequests, selectedRequestId]);
-
-  const selectedRequest = useMemo(
-    () => pendingRequests.find((request) => request.requestId === selectedRequestId) ?? pendingRequests[0] ?? null,
-    [pendingRequests, selectedRequestId],
-  );
 
   const updateWorkspace = useCallback((id: string, patch: Partial<WorkspaceRecord>) => {
     setWorkspaces((current) =>
@@ -4776,10 +4975,6 @@ export default function App() {
     });
   }, []);
 
-  const workbenchStateFor = useCallback((conversationId: string) => (
-    workbenchByConversation[conversationId] || DEFAULT_WORKBENCH_STATE
-  ), [workbenchByConversation]);
-
   const openUsage = useCallback(() => navigationRef.current?.navigate('Usage'), []);
   const openAbout = useCallback(() => navigationRef.current?.navigate('About'), []);
   const openKanban = useCallback(() => navigationRef.current?.navigate('Kanban'), []);
@@ -5568,7 +5763,7 @@ export default function App() {
         command,
         title: 'Turn items',
         placeholder: 'turn_id',
-        initialValue: turnIds[conversationId] || '',
+        initialValue: turnIdsRef.current[conversationId] || '',
       });
       return;
     }
@@ -5593,7 +5788,7 @@ export default function App() {
       warning: '需要粘贴 guardian denied action 的原始事件 JSON。',
       multiline: true,
     });
-  }, [turnIds]);
+  }, []);
 
   const openSlashCommandActionPage = useCallback((workspace: WorkspaceRecord, conversation: ConversationRecord, command: string) => {
     navigationRef.current?.navigate('SlashCommandAction', {
@@ -5693,8 +5888,9 @@ export default function App() {
           return;
         }
         const deny = /^(deny|decline|reject|no)$/i.test(rest[0] ?? '');
-        const requestId = rest[1] || selectedRequest?.requestId || '';
-        const target = pendingRequests.find((request) => request.requestId === requestId) ?? selectedRequest;
+        const pendingRequests = appRuntime.pendingRequests.getSnapshot();
+        const requestId = rest[1] || pendingRequests[0]?.requestId || '';
+        const target = pendingRequests.find((request) => request.requestId === requestId) ?? pendingRequests[0] ?? null;
         if (!target) {
           notify.warning('没有待处理请求', '当前没有可回复的审批或问题。');
           return;
@@ -6002,7 +6198,7 @@ export default function App() {
         }
         sendWorkspaceCommand(workspace, 'codex.local.interrupt', {
           threadId,
-          turnId: turnIds[conversation.id] || '',
+          turnId: turnIdsRef.current[conversation.id] || '',
         }, conversation);
         return;
       }
@@ -6111,6 +6307,7 @@ export default function App() {
       addCommandNotice(`/${lower} recognized`, '该命令不在当前内置命令清单中，已阻止作为普通 prompt 发送。');
     },
     [
+      appRuntime,
       applyPermissionProfile,
       applyServiceTier,
       applyModelCommand,
@@ -6123,12 +6320,10 @@ export default function App() {
       openExperimentalFeatures,
       openSlashCommandActionPage,
       openThreadCommandPrompt,
-      pendingRequests,
       requestMcpInventory,
       requestSkillList,
       removeConversation,
       selectConversation,
-      selectedRequest,
       sendApprovalResponse,
       sendLocalTurn,
       sendNativeThreadAction,
@@ -6144,7 +6339,6 @@ export default function App() {
       setConversationComposerSelection,
       setLastError,
       toggleFastServiceTier,
-      turnIds,
       updateConversation,
       updateWorkspace,
       v2Providers,
@@ -6267,14 +6461,14 @@ export default function App() {
       setLastError('当前还没有可中断的 thread。');
       return;
     }
-    if (sendWorkspaceCommand(workspace, 'codex.local.interrupt', { threadId, turnId: turnIds[conversationId] || '' }, conversation)) {
+    if (sendWorkspaceCommand(workspace, 'codex.local.interrupt', { threadId, turnId: turnIdsRef.current[conversationId] || '' }, conversation)) {
       appendTimeline(makeSystemEntry('已发送停止', '正在请求 Codex 中断当前思考。', workspace.id, conversation.id));
     }
-  }, [appendTimeline, sendRawProtocolFrame, sendWorkspaceCommand, turnIds]);
+  }, [appendTimeline, sendRawProtocolFrame, sendWorkspaceCommand]);
 
   const submitChat = useCallback((conversationId: string, draft: string) => {
     const text = draft.trim();
-    const attachments = composerAttachments[conversationId] ?? EMPTY_ATTACHMENTS;
+    const attachments = appRuntime.composerAttachments.getSnapshot(conversationId) ?? EMPTY_ATTACHMENTS;
     const skills = selectedSkills[conversationId] ?? EMPTY_SKILLS;
     if (!text && attachments.length === 0 && skills.length === 0) {
       return false;
@@ -6285,7 +6479,7 @@ export default function App() {
       return false;
     }
     const { workspace, conversation } = context;
-    const isThinking = thinkingConversations[conversationId] === true;
+    const isThinking = thinkingConversationsRef.current[conversationId] === true;
     const mentionReferences = parseMentionReferences(text);
     if (mentionReferences.length > 0) {
       rememberMentionReferences(workspace.id, mentionReferences);
@@ -6333,7 +6527,7 @@ export default function App() {
     }
     sendSlashCommand(text, conversationId);
     return true;
-  }, [appendTimeline, composerAttachments, getConversationContext, rememberMentionReferences, selectedSkills, sendLocalTurn, sendSlashCommand, sendV2Prompt, setConversationAttachments, setConversationChatDraft, setConversationComposerSelection, setConversationSelectedSkills, thinkingConversations]);
+  }, [appRuntime, appendTimeline, getConversationContext, rememberMentionReferences, selectedSkills, sendLocalTurn, sendSlashCommand, sendV2Prompt, setConversationAttachments, setConversationChatDraft, setConversationComposerSelection, setConversationSelectedSkills]);
 
   const runWorkspaceCommand = useCallback((workspace: WorkspaceRecord, conversation: ConversationRecord, command: 'start' | 'status' | 'attach' | 'stop' | 'interrupt') => {
     if (command === 'start') {
@@ -6356,7 +6550,7 @@ export default function App() {
       }
       sendWorkspaceCommand(workspace, 'codex.local.interrupt', {
         threadId,
-        turnId: turnIds[conversation.id] || '',
+        turnId: turnIdsRef.current[conversation.id] || '',
       }, conversation);
       return;
     }
@@ -6369,7 +6563,7 @@ export default function App() {
       }
       updateConversation(conversation.id, { localAdapterState: 'stopped' });
     }
-  }, [attachWorkspaceConversation, sendWorkspaceCommand, turnIds, updateConversation, startLocalAdapter]);
+  }, [attachWorkspaceConversation, sendWorkspaceCommand, updateConversation, startLocalAdapter]);
 
   const runThreadMenuAction = useCallback((conversationId: string, action: ThreadMenuAction) => {
     if (action === 'fork') {
@@ -6555,6 +6749,58 @@ export default function App() {
     }
   }, [sendNativeThreadAction, sendTrackedLocalMethod]);
 
+  useEffect(() => {
+    const snapshot: SettingsRouteSnapshot = {
+      settings,
+      setSettings,
+      connectionState,
+      connectionHealth,
+      lastError,
+      connect,
+      closeSocket,
+      backendProfiles,
+      activeBackendConnectionId,
+      updateBackendProfile,
+      addBackendProfile,
+      removeBackendProfile,
+      selectBackendProfile,
+    };
+    appRuntime.routeSnapshots.set(SETTINGS_ROUTE_SNAPSHOT, snapshot);
+  }, [
+    activeBackendConnectionId,
+    addBackendProfile,
+    appRuntime,
+    backendProfiles,
+    closeSocket,
+    connect,
+    connectionHealth,
+    connectionState,
+    lastError,
+    removeBackendProfile,
+    selectBackendProfile,
+    settings,
+    updateBackendProfile,
+  ]);
+
+  useEffect(() => {
+    const snapshot: AboutRouteSnapshot = {
+      appVersion: '1.0.0',
+      backendVersion: serverVersion?.version,
+      backendUrl: settings.serverUrl,
+      workspacePath: activeWorkspace?.path,
+      dataDirectory: serverVersion?.data_dir,
+      connectionState,
+    };
+    appRuntime.routeSnapshots.set(ABOUT_ROUTE_SNAPSHOT, snapshot);
+  }, [
+    activeWorkspace?.path,
+    appRuntime,
+    connectionState,
+    serverVersion?.data_dir,
+    serverVersion?.version,
+    settings.serverUrl,
+  ]);
+
   appRuntime.bindOutputActions({
     startTerminalSession,
     stopTerminalSession,
@@ -6563,6 +6809,89 @@ export default function App() {
     requestTerminalStatus,
     clearTerminalOutput,
     requestGitDiff,
+  });
+  appRuntime.actions.bind<ChatRuntimeActions>(CHAT_ACTIONS, {
+    persistChatDraft: setConversationChatDraft,
+    persistComposerAttachments: setConversationAttachments,
+    persistSelectedSkills: setConversationSelectedSkills,
+    persistComposerSelection: setConversationComposerSelection,
+    submitChat,
+    stopThinking,
+    sendApprovalResponse,
+    attachWorkspaceConversation,
+    loadNativeThreadHistory,
+    runWorkspaceCommand,
+    runThreadMenuAction,
+    sendSlashCommand,
+    openGitDiff,
+    openGit,
+    openTerminal,
+    openBrowser,
+    openFiles,
+    openWorkbench,
+    openUsage,
+    switchConversationAgent,
+    applyConversationModelSelection,
+    refreshProviderCatalog,
+    removeWorkspace,
+  });
+  appRuntime.actions.bind<ConversationRuntimeActions>(CONVERSATION_ACTIONS, {
+    createConversation,
+    refreshNativeThreads: requestNativeThreadList,
+    selectWorkspace,
+    selectConversation,
+    renameConversation,
+    forkConversation,
+    removeConversation,
+  });
+  appRuntime.actions.bind<WorkspaceRuntimeActions>(WORKSPACE_ACTIONS, {
+    createWorkspace,
+    selectWorkspace,
+    renameWorkspace,
+    forkWorkspace,
+    removeWorkspace,
+    openUsage,
+    openAbout,
+    openKanban,
+    openGit,
+  });
+  appRuntime.actions.bind<CommandRuntimeActions>(COMMAND_ACTIONS, {
+    refreshModelCatalog: requestModelCatalog,
+    applyWorkspaceModelSelection,
+    requestMcpInventory,
+    requestPermissionProfiles,
+    requestHooksCatalog,
+    requestPluginsCatalog,
+    requestMemorySettings,
+    updateMemorySettings,
+    resetMemories,
+    applyPermissionProfile,
+    toggleFastServiceTier,
+    applyPersonality,
+    submitFeedback,
+    selectConversation,
+    sendSlashCommand,
+    openGitDiff,
+    runThreadMenuAction,
+  });
+  appRuntime.actions.bind<CapabilitiesRuntimeActions>(CAPABILITIES_ACTIONS, {
+    refreshCapabilityCatalog,
+    toggleCatalogSkill,
+    callMcpTool,
+  });
+  appRuntime.actions.bind<KanbanRuntimeActions>(KANBAN_ACTIONS, {
+    selectConversation,
+    refresh: () => {
+      void refreshServerVersion();
+    },
+  });
+  appRuntime.actions.bind<ToolRuntimeActions>(TOOL_ACTIONS, {
+    resolveBackendProfile: backendProfileForContext,
+    updateWorkbenchState,
+    setConversationChatDraft,
+    openGit,
+    requestGitRepositories,
+    runGitAction,
   });
 
   if (!hydrated) {
@@ -6594,417 +6923,7 @@ export default function App() {
           <HeroUINativeProvider>
             <AppRuntimeProvider runtime={appRuntime}>
             <ToastBridge />
-            <NavigationContainer ref={navigationRef} theme={navigationTheme}>
-            <StatusBar style={statusBarStyle} />
-            <Stack.Navigator
-              initialRouteName="Workspaces"
-              screenOptions={screenOptions}
-            >
-            <Stack.Screen name="Workspaces" options={{ title: '工作区' }}>
-              {(props) => (
-                <WorkspaceListScreen
-                  {...props}
-                  workspaces={workspaces}
-                  conversations={conversations}
-                  settings={settings}
-                  serverVersion={serverVersion}
-                  v2Providers={v2Providers}
-                  v2ConversationCount={v2Conversations.length}
-                  connectionState={connectionState}
-                  createWorkspace={createWorkspace}
-                  selectWorkspace={selectWorkspace}
-                  renameWorkspace={renameWorkspace}
-                  forkWorkspace={forkWorkspace}
-                  removeWorkspace={removeWorkspace}
-                  openUsage={openUsage}
-                  openAbout={openAbout}
-                  openKanban={openKanban}
-                  openGit={openGit}
-                  backendProfiles={backendProfiles}
-                  activeBackendConnectionId={activeBackendConnectionId}
-                />
-              )}
-            </Stack.Screen>
-            <Stack.Screen name="Conversations">
-              {(props) => (
-                <ConversationListScreen
-                  {...props}
-                  workspaces={workspaces}
-                  conversations={conversations}
-                  activeConversationId={activeConversationId}
-                  activeTurns={turnIds}
-                  connectionState={connectionState}
-                  threadListStatus={threadListStatusByWorkspace[props.route.params.workspaceId] ?? 'idle'}
-                  threadListError={threadListErrorByWorkspace[props.route.params.workspaceId] ?? ''}
-                  createConversation={createConversation}
-                  v2Providers={v2Providers}
-                  refreshNativeThreads={requestNativeThreadList}
-                  selectWorkspace={selectWorkspace}
-                  selectConversation={selectConversation}
-                  renameConversation={renameConversation}
-                  forkConversation={forkConversation}
-                  removeConversation={removeConversation}
-                />
-              )}
-            </Stack.Screen>
-            <Stack.Screen name="Chat">
-              {(props) => (
-                <ChatScreen
-                  {...props}
-                  settings={settings}
-                  workspaces={workspaces}
-                  conversations={conversations}
-                  timelineStore={timelineStore}
-                  pendingRequests={pendingRequests}
-                  selectedRequest={selectedRequest}
-                  chatDraft={chatDrafts[props.route.params.conversationId] ?? ''}
-                  composerAttachments={composerAttachments[props.route.params.conversationId] ?? EMPTY_ATTACHMENTS}
-                  selectedSkills={selectedSkills[props.route.params.conversationId] ?? EMPTY_SKILLS}
-                  composerSelection={composerSelections[props.route.params.conversationId] ?? DEFAULT_COMPOSER_SELECTION}
-                  isThinking={thinkingConversations[props.route.params.conversationId] === true}
-                  turnId={turnIds[props.route.params.conversationId] ?? ''}
-                  lastError={lastError}
-                  connectionState={connectionState}
-                  persistChatDraft={setConversationChatDraft}
-                  persistComposerAttachments={setConversationAttachments}
-                  persistSelectedSkills={setConversationSelectedSkills}
-                  persistComposerSelection={setConversationComposerSelection}
-                  submitChat={submitChat}
-                  stopThinking={stopThinking}
-                  sendApprovalResponse={sendApprovalResponse}
-                  attachWorkspaceConversation={attachWorkspaceConversation}
-                  loadNativeThreadHistory={loadNativeThreadHistory}
-                  runWorkspaceCommand={runWorkspaceCommand}
-                  runThreadMenuAction={runThreadMenuAction}
-                  sendSlashCommand={sendSlashCommand}
-                  openGitDiff={openGitDiff}
-                  openGit={openGit}
-                  openTerminal={openTerminal}
-                  openBrowser={openBrowser}
-                  openFiles={openFiles}
-                  openWorkbench={openWorkbench}
-                  openUsage={openUsage}
-                  v2Providers={v2Providers}
-                  providerModels={providerModels}
-                  providerCommands={providerCommands}
-                  providerCatalogStatus={providerCatalogStatus}
-                  contextUsage={contextUsageByConversation[props.route.params.conversationId] ?? null}
-                  switchConversationAgent={switchConversationAgent}
-                  applyConversationModelSelection={applyConversationModelSelection}
-                  refreshProviderCatalog={refreshProviderCatalog}
-                  removeWorkspace={removeWorkspace}
-                  capabilityCatalog={capabilityCatalogs.codex}
-                />
-              )}
-            </Stack.Screen>
-            <Stack.Screen name="SlashCommands" options={{ title: 'Slash Commands' }}>
-              {(props) => {
-                const conversation = conversations.find((item) => item.id === props.route.params.conversationId) ?? null;
-                const workspace = workspaces.find((item) => item.id === props.route.params.workspaceId) ?? null;
-                return (
-                  <SlashCommandsScreen
-                    {...props}
-                    workspace={workspace}
-                    conversation={conversation}
-                    settings={settings}
-                    modelCatalog={modelCatalog}
-                    runThreadMenuAction={runThreadMenuAction}
-                    sendSlashCommand={sendSlashCommand}
-                    openGitDiff={openGitDiff}
-                  />
-                );
-              }}
-            </Stack.Screen>
-            <Stack.Screen name="SlashCommandAction" options={{ title: 'Command' }}>
-              {(props) => {
-                const conversation = conversations.find((item) => item.id === props.route.params.conversationId) ?? null;
-                const workspace = workspaces.find((item) => item.id === props.route.params.workspaceId) ?? null;
-                const workspaceConversations = workspace
-                  ? conversations.filter((item) => item.workspaceId === workspace.id)
-                  : [];
-                return (
-                  <SlashCommandActionScreen
-                    {...props}
-                    workspace={workspace}
-                    conversation={conversation}
-                    settings={settings}
-                    modelCatalog={modelCatalog}
-                    modelCatalogStatus={modelCatalogStatus}
-                    modelCatalogError={modelCatalogError}
-                    mcpInventory={mcpInventoryByConversation[props.route.params.conversationId] ?? null}
-                    permissionProfilesState={permissionProfilesByConversation[props.route.params.conversationId] ?? null}
-                    hooksCatalog={hooksCatalogByConversation[props.route.params.conversationId] ?? null}
-                    pluginsCatalog={pluginsCatalogByConversation[props.route.params.conversationId] ?? null}
-                    memorySettingsState={memorySettingsByConversation[props.route.params.conversationId] ?? null}
-                    refreshModelCatalog={requestModelCatalog}
-                    applyWorkspaceModelSelection={applyWorkspaceModelSelection}
-                    requestMcpInventory={requestMcpInventory}
-                    requestPermissionProfiles={requestPermissionProfiles}
-                    requestHooksCatalog={requestHooksCatalog}
-                    requestPluginsCatalog={requestPluginsCatalog}
-                    requestMemorySettings={requestMemorySettings}
-                    updateMemorySettings={updateMemorySettings}
-                    resetMemories={resetMemories}
-                    applyPermissionProfile={applyPermissionProfile}
-                    toggleFastServiceTier={toggleFastServiceTier}
-                    applyPersonality={applyPersonality}
-                    submitFeedback={submitFeedback}
-                    workspaceConversations={workspaceConversations}
-                    selectConversation={selectConversation}
-                    sendSlashCommand={sendSlashCommand}
-                    openGitDiff={openGitDiff}
-                  />
-                );
-              }}
-            </Stack.Screen>
-            <Stack.Screen name="GitDiff" component={GitDiffRouteScreen} options={{ title: 'Git Diff' }} />
-            <Stack.Screen name="Terminal" component={TerminalRouteScreen} options={{ title: '终端' }} />
-            <Stack.Screen name="Experimental" options={{ title: 'Experimental' }}>
-              {(props) => {
-                const conversation = conversations.find((item) => item.id === props.route.params.conversationId) ?? null;
-                const workspace = workspaces.find((item) => item.id === props.route.params.workspaceId) ?? null;
-                return (
-                  <ExperimentalScreen
-                    {...props}
-                    workspace={workspace}
-                    conversation={conversation}
-                    features={experimentalFeatures}
-                    setFeatures={setExperimentalFeatures}
-                  />
-                );
-              }}
-            </Stack.Screen>
-            <Stack.Screen name="Capabilities" options={{ title: 'Skills 和 MCPs' }}>
-              {() => (
-                <CapabilitiesScreen
-                  workspacePath={activeWorkspace?.path ?? serverVersion?.workspace_root ?? settings.defaultWorkspacePath}
-                  providers={v2Providers}
-                  catalogs={capabilityCatalogs}
-                  onRefresh={refreshCapabilityCatalog}
-                  conversationId={activeConversationId}
-                  selectedSkills={activeConversationId ? selectedSkills[activeConversationId] ?? EMPTY_SKILLS : EMPTY_SKILLS}
-                  canInvoke={Boolean(conversations.find((item) => item.id === activeConversationId && (item.v2ConversationId || item.provider)))}
-                  onToggleSkill={(skill, provider) => {
-                    if (activeConversationId) {
-                      toggleCatalogSkill(activeConversationId, skill, provider);
-                    }
-                  }}
-                  onCallMcp={(resourceId, toolName) => {
-                    if (activeConversationId) {
-                      callMcpTool(activeConversationId, resourceId, toolName);
-                    }
-                  }}
-                />
-              )}
-            </Stack.Screen>
-            <Stack.Screen name="Settings" options={{ title: '设置' }}>
-              {(props) => (
-                <SettingsScreen
-                  {...props}
-                  settings={settings}
-                  setSettings={setSettings}
-                  connectionState={connectionState}
-                  connectionHealth={connectionHealth}
-                  lastError={lastError}
-                  connect={connect}
-                  closeSocket={closeSocket}
-                  backendProfiles={backendProfiles}
-                  activeBackendConnectionId={activeBackendConnectionId}
-                  updateBackendProfile={updateBackendProfile}
-                  addBackendProfile={addBackendProfile}
-                  removeBackendProfile={removeBackendProfile}
-                  selectBackendProfile={selectBackendProfile}
-                />
-              )}
-            </Stack.Screen>
-            <Stack.Screen name="Usage" options={{ title: '使用统计' }}>
-              {(props) => <UsageScreen {...props} records={usageRecords} onRefresh={() => undefined} />}
-            </Stack.Screen>
-            <Stack.Screen name="About" options={{ title: '关于 TodeX' }}>
-              {(props) => (
-                <AboutScreen
-                  {...props}
-                  appVersion="1.0.0"
-                  backendVersion={serverVersion?.version}
-                  backendUrl={settings.serverUrl}
-                  workspacePath={activeWorkspace?.path}
-                  dataDirectory={serverVersion?.data_dir}
-                  connectionState={connectionState}
-                  onCopy={async (value) => {
-                    await Clipboard.setStringAsync(value);
-                  }}
-                />
-              )}
-            </Stack.Screen>
-            <Stack.Screen name="Kanban" options={{ title: '看板' }}>
-              {(props) => (
-                <KanbanScreen
-                  {...props}
-                  conversations={conversations.map((conversation) => ({
-                    ...conversation,
-                    workspaceName: workspaces.find((workspace) => workspace.id === conversation.workspaceId)?.name,
-                    status: conversation.nativeStatus,
-                  }))}
-                  onOpenConversation={(item) => {
-                    selectConversation(item.workspaceId, item.id);
-                    props.navigation.navigate('Chat', { workspaceId: item.workspaceId, conversationId: item.id });
-                  }}
-                  onRefresh={() => {
-                    if (connectionState === 'open') void refreshServerVersion();
-                  }}
-                />
-              )}
-            </Stack.Screen>
-            <Stack.Screen name="Browser" options={{ title: '浏览器' }}>
-              {(props) => {
-                const profile = backendProfileForContext(
-                  props.route.params.workspaceId,
-                  props.route.params.conversationId,
-                );
-                const api = apiClientForConnection(settings, profile);
-                const backendUrl = profile?.serverUrl || settings.serverUrl;
-                return (
-                  <BrowserScreen
-                    {...props}
-                    client={api}
-                    initialUrl={props.route.params.url || backendUrl}
-                    initialFilePath={props.route.params.filePath}
-                    renderWebView={(result) => (
-                      <BrowserPreviewWebView
-                        result={result}
-                        backendUrl={backendUrl}
-                        onInspect={(inspectedElement) => updateWorkbenchState(
-                          props.route.params.conversationId,
-                          { inspectedElement },
-                        )}
-                      />
-                    )}
-                  />
-                );
-              }}
-            </Stack.Screen>
-            <Stack.Screen name="Files" options={{ title: '文件' }}>
-              {(props) => {
-                const profile = backendProfileForContext(
-                  props.route.params.workspaceId,
-                  props.route.params.conversationId,
-                );
-                return (
-                  <FilesScreen
-                    {...props}
-                    client={apiClientForConnection(settings, profile)}
-                    rootPath={workspaces.find((workspace) => workspace.id === props.route.params.workspaceId)?.path || settings.defaultWorkspacePath}
-                    initialFilePath={props.route.params.filePath}
-                    onFileSelected={(path) => updateWorkbenchState(props.route.params.conversationId, { browserFilePath: path })}
-                  />
-                );
-              }}
-            </Stack.Screen>
-            <Stack.Screen name="Workbench" options={{ title: '工作台' }}>
-              {(props) => {
-                const workspace = workspaces.find((item) => item.id === props.route.params.workspaceId) ?? null;
-                const conversation = conversations.find((item) => item.id === props.route.params.conversationId) ?? null;
-                const profile = backendProfileForContext(
-                  props.route.params.workspaceId,
-                  props.route.params.conversationId,
-                );
-                const workbench = workbenchStateFor(props.route.params.conversationId);
-                const tab = props.route.params.tab || workbench.activeTab;
-                const backendUrl = profile?.serverUrl || settings.serverUrl;
-                return (
-                  <WorkbenchScreen
-                    {...props}
-                    activeTab={tab}
-                    visibleTabs={workbench.tabs}
-                    onTabChange={(next) => updateWorkbenchState(props.route.params.conversationId, { activeTab: next })}
-                    title={workspace?.name || '工作台'}
-                    subtitle={conversation?.title || workspace?.path}
-                    action={workbench.inspectedElement
-                      ? {
-                          label: '插入元素',
-                          icon: 'add-circle-outline',
-                          onPress: () => {
-                            const element = workbench.inspectedElement;
-                            if (!element) return;
-                            const description = [
-                              `[浏览器元素 ${element.tagName.toLowerCase() || 'element'}${element.selector ? ` ${element.selector}` : ''}]`,
-                              element.text,
-                            ].filter(Boolean).join(' ');
-                            setConversationChatDraft(props.route.params.conversationId, (current) => (
-                              `${current}${current.trim() ? '\n' : ''}${description}`
-                            ));
-                            updateWorkbenchState(props.route.params.conversationId, { inspectedElement: null });
-                            props.navigation.navigate('Chat', {
-                              workspaceId: props.route.params.workspaceId,
-                              conversationId: props.route.params.conversationId,
-                            });
-                          },
-                        }
-                      : { label: 'Git', icon: 'git-branch-outline', onPress: () => openGit(props.route.params.conversationId) }}
-                    renderTerminal={<TerminalRuntimePanel
-                      workspaceId={props.route.params.workspaceId}
-                      conversationId={props.route.params.conversationId}
-                    />}
-                    renderGitDiff={<GitDiffRuntimePanel
-                      workspaceId={props.route.params.workspaceId}
-                      conversationId={props.route.params.conversationId}
-                    />}
-                    renderBrowser={<BrowserScreen
-                      client={apiClientForConnection(settings, profile)}
-                      initialUrl={workbench.browserUrl || backendUrl}
-                      initialFilePath={workbench.browserFilePath || undefined}
-                      onResult={(result) => updateWorkbenchState(props.route.params.conversationId, { browserUrl: result.url })}
-                      renderWebView={(result) => (
-                        <BrowserPreviewWebView
-                          result={result}
-                          backendUrl={backendUrl}
-                          onInspect={(inspectedElement) => updateWorkbenchState(
-                            props.route.params.conversationId,
-                            { inspectedElement },
-                          )}
-                        />
-                      )}
-                    />}
-                    renderFiles={<FilesScreen
-                      client={apiClientForConnection(settings, profile)}
-                      rootPath={workspace?.path || settings.defaultWorkspacePath}
-                      initialFilePath={workbench.browserFilePath || undefined}
-                      onFileSelected={(path) => updateWorkbenchState(props.route.params.conversationId, { browserFilePath: path })}
-                    />}
-                  />
-                );
-              }}
-            </Stack.Screen>
-            <Stack.Screen name="Git" options={{ title: 'Git 操作' }}>
-              {(props) => {
-                const workspace = workspaces.find((item) => item.id === props.route.params.workspaceId) ?? null;
-                const profile = backendProfileForContext(
-                  props.route.params.workspaceId,
-                  props.route.params.conversationId,
-                );
-                const workspacePath = workspace?.path || settings.defaultWorkspacePath;
-                const target = `${profile?.id || activeBackendConnectionId || 'default'}\n${workspacePath}`;
-                const targetMatches = gitRepositoryTarget === target;
-                return (
-                  <GitScreen
-                    key={target}
-                    client={apiClientForConnection(settings, profile)}
-                    workspacePath={workspacePath}
-                    repositories={targetMatches ? gitRepositories : []}
-                    status={targetMatches ? gitRepositoryStatus : 'loading'}
-                    error={targetMatches ? gitRepositoryError : ''}
-                    output={targetMatches && gitRepositoryOutputTarget === target ? gitRepositoryOutput : ''}
-                    actionBusy={Boolean(gitRepositoryActionTarget)}
-                    onRefresh={(path) => requestGitRepositories(path, profile?.id)}
-                    onRun={(path, action, message, includeUnstaged) => (
-                      runGitAction(path, action, message, includeUnstaged, profile?.id)
-                    )}
-                  />
-                );
-              }}
-            </Stack.Screen>
-            </Stack.Navigator>
-            </NavigationContainer>
+            <AppNavigator />
             <PromptModal
           visible={Boolean(modelCommandPrompt)}
           title="切换模型"

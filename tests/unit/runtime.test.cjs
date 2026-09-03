@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const path = require('node:path');
 
 const compiledDir = path.join(__dirname, '..', '..', 'dist', 'unit');
-const { ExternalStore, KeyedExternalStore, RuntimeTransaction } = require(path.join(compiledDir, 'runtime', 'externalStore.js'));
+const { ExternalStore, KeyedExternalStore, RuntimeActionRegistry, RuntimeTransaction } = require(path.join(compiledDir, 'runtime', 'externalStore.js'));
 const { buildGitDiffViewModel, retainTerminalOutput } = require(path.join(compiledDir, 'lib', 'outputModels.js'));
 
 test('keyed store keeps snapshots stable and only notifies changed keys', () => {
@@ -79,6 +79,25 @@ test('runtime transaction drains listeners after an error and remains reusable',
   assert.deepEqual(notifications, ['throws', 'continues']);
   assert.throws(() => store.set(2), /listener failed/);
   assert.equal(store.getSnapshot(), 2);
+});
+
+test('runtime transaction preserves undefined thrown by an operation', () => {
+  const transaction = new RuntimeTransaction();
+  assert.throws(
+    () => transaction.run(() => { throw undefined; }),
+    (error) => error === undefined,
+  );
+});
+
+test('runtime action facades stay stable while dispatching to the latest implementation', () => {
+  const registry = new RuntimeActionRegistry();
+  const actions = registry.get('chat');
+  const submit = actions.submit;
+  registry.bind('chat', { submit: (value) => `first:${value}` });
+  assert.equal(submit('one'), 'first:one');
+  registry.bind('chat', { submit: (value) => `second:${value}` });
+  assert.equal(actions.submit, submit);
+  assert.equal(submit('two'), 'second:two');
 });
 
 test('terminal output retention applies entry and character limits from the newest entries', () => {

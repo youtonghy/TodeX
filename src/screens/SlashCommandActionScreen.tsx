@@ -36,8 +36,8 @@ import {
   type MemorySettingsState,
   type PermissionProfilesState,
   type PluginsCatalogState,
-  type RootStackParamList,
 } from '../lib/appCore';
+import type { RootStackParamList } from '../navigation/routes';
 import { ReasoningEffortSelector } from '../components/modals';
 import {
   FormField,

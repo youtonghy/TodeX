@@ -10,10 +10,12 @@ export class RuntimeTransaction {
   run<Result>(operation: () => Result): Result {
     this.depth += 1;
     let result: Result | undefined;
+    let operationFailed = false;
     let operationError: unknown;
     try {
       result = operation();
     } catch (error: unknown) {
+      operationFailed = true;
       operationError = error;
     } finally {
       this.depth -= 1;
@@ -31,7 +33,7 @@ export class RuntimeTransaction {
         }
       }
     }
-    if (operationError !== undefined) throw operationError;
+    if (operationFailed) throw operationError;
     if (notificationError !== undefined) throw notificationError;
     return result as Result;
   }
@@ -145,5 +147,37 @@ export class KeyedExternalStore<Value> {
         this.keyListeners.get(key)?.forEach((listener) => this.transaction.notify(listener));
       });
     });
+  }
+}
+
+export class RuntimeActionRegistry {
+  private implementations = new Map<string, object>();
+  private facades = new Map<string, object>();
+
+  bind<Actions extends object>(namespace: string, actions: Actions): void {
+    this.implementations.set(namespace, actions);
+  }
+
+  get<Actions extends object>(namespace: string): Actions {
+    const existing = this.facades.get(namespace);
+    if (existing) return existing as Actions;
+
+    const methods = new Map<PropertyKey, (...args: unknown[]) => unknown>();
+    const facade = new Proxy({}, {
+      get: (_target, property) => {
+        const cached = methods.get(property);
+        if (cached) return cached;
+        const method = (...args: unknown[]) => {
+          const implementation = this.implementations.get(namespace) as Record<PropertyKey, unknown> | undefined;
+          const action = implementation?.[property];
+          if (typeof action !== 'function') throw new Error(`Runtime action ${namespace}.${String(property)} is not bound`);
+          return Reflect.apply(action, implementation, args);
+        };
+        methods.set(property, method);
+        return method;
+      },
+    });
+    this.facades.set(namespace, facade);
+    return facade as Actions;
   }
 }

@@ -83,15 +83,15 @@ import {
   type ConversationRenderItem,
   type MentionSuggestion,
   type MobileContextUsage,
-  type RootStackParamList,
   type SelectedSkillAttachment,
   type ThreadMenuAction,
   type TimelineEntry,
   type WorkspaceEntry,
 } from '../../lib/appCore';
-import type { CatalogState } from '../../components/CapabilitiesScreen';
+import type { CatalogState } from '../../lib/capabilityCatalog';
 import type { TimelineStore } from '../../lib/timelineStore';
-import type { WorkbenchTab } from '../WorkbenchScreen';
+import type { WorkbenchTab } from '../../lib/workbench';
+import type { RootStackParamList } from '../../navigation/routes';
 import { ProviderIcon } from '../../components/ProviderIcon';
 import {
   ActionSheet,
@@ -122,59 +122,12 @@ type PickerSheetState =
 const INITIAL_RENDER_ITEM_COUNT = 32;
 const RENDER_ITEM_PAGE_SIZE = 32;
 
-export function ChatScreen({
-  navigation,
-  route,
-  settings,
-  workspaces,
-  conversations,
-  timelineStore,
-  pendingRequests,
-  selectedRequest,
-  chatDraft: persistedChatDraft,
-  composerAttachments,
-  selectedSkills,
-  composerSelection: persistedComposerSelection,
-  isThinking,
-  turnId,
-  lastError,
-  connectionState,
-  persistChatDraft,
-  persistComposerAttachments,
-  persistSelectedSkills,
-  persistComposerSelection,
-  submitChat,
-  stopThinking,
-  sendApprovalResponse,
-  attachWorkspaceConversation,
-  loadNativeThreadHistory,
-  runWorkspaceCommand,
-  runThreadMenuAction,
-  sendSlashCommand,
-  openGitDiff,
-  openGit,
-  openTerminal,
-  openBrowser,
-  openFiles,
-  openWorkbench,
-  openUsage,
-  v2Providers,
-  providerModels,
-  providerCommands,
-  providerCatalogStatus,
-  contextUsage,
-  switchConversationAgent,
-  applyConversationModelSelection,
-  refreshProviderCatalog,
-  removeWorkspace,
-  capabilityCatalog,
-}: NativeStackScreenProps<RootStackParamList, 'Chat'> & {
+export type ChatScreenProps = NativeStackScreenProps<RootStackParamList, 'Chat'> & {
   settings: ConnectionSettings;
   workspaces: WorkspaceRecord[];
   conversations: ConversationRecord[];
   timelineStore: TimelineStore;
   pendingRequests: PendingRequest[];
-  selectedRequest: PendingRequest | null;
   chatDraft: string;
   composerAttachments: ComposerAttachmentDraft[];
   selectedSkills: SelectedSkillAttachment[];
@@ -212,7 +165,54 @@ export function ChatScreen({
   refreshProviderCatalog: (provider: ProviderKind, workspacePath?: string) => Promise<boolean>;
   removeWorkspace: (workspaceId: string) => void;
   capabilityCatalog?: CatalogState;
-}) {
+};
+
+export function ChatScreen({
+  navigation,
+  route,
+  settings,
+  workspaces,
+  conversations,
+  timelineStore,
+  pendingRequests,
+  chatDraft: persistedChatDraft,
+  composerAttachments,
+  selectedSkills,
+  composerSelection: persistedComposerSelection,
+  isThinking,
+  turnId,
+  lastError,
+  connectionState,
+  persistChatDraft,
+  persistComposerAttachments,
+  persistSelectedSkills,
+  persistComposerSelection,
+  submitChat,
+  stopThinking,
+  sendApprovalResponse,
+  attachWorkspaceConversation,
+  loadNativeThreadHistory,
+  runWorkspaceCommand,
+  runThreadMenuAction,
+  sendSlashCommand,
+  openGitDiff,
+  openGit,
+  openTerminal,
+  openBrowser,
+  openFiles,
+  openWorkbench,
+  openUsage,
+  v2Providers,
+  providerModels,
+  providerCommands,
+  providerCatalogStatus,
+  contextUsage,
+  switchConversationAgent,
+  applyConversationModelSelection,
+  refreshProviderCatalog,
+  removeWorkspace,
+  capabilityCatalog,
+}: ChatScreenProps) {
   const toast = useAppToast();
   const conversationId = route.params.conversationId;
   const [chatDraft, setLocalChatDraft] = useState(persistedChatDraft);
@@ -1514,7 +1514,7 @@ export function ChatScreen({
             { id: 'workbench', label: '工作台', icon: 'grid-outline', onPress: () => openWorkbench(conversation.id) },
             { id: 'usage', label: '使用统计', icon: 'stats-chart-outline', onPress: openUsage },
             { id: 'slash', label: 'Slash Commands', icon: 'code-slash-outline', onPress: () => navigation.navigate('SlashCommands', { workspaceId: workspace.id, conversationId: conversation.id }) },
-            { id: 'capabilities', label: 'Skills 和 MCPs', icon: 'extension-puzzle-outline', onPress: () => navigation.navigate('Capabilities') },
+            { id: 'capabilities', label: 'Skills 和 MCPs', icon: 'extension-puzzle-outline', onPress: () => navigation.navigate('Capabilities', route.params) },
             { id: 'settings', label: '设置', icon: 'settings-outline', onPress: () => navigation.navigate('Settings') },
           ])}
           {menuSection('Thread', [

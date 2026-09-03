@@ -1005,6 +1005,21 @@ test('main socket uses the single-argument WebSocket constructor', () => {
   assert.equal(headerOptions, null, 'connect() must not build header-only auth options');
 });
 
+test('mobile navigation remains isolated from the root state component', () => {
+  const appSource = fs.readFileSync(path.join(__dirname, '..', '..', 'App.tsx'), 'utf8');
+  const navigatorSource = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'src', 'navigation', 'AppNavigator.tsx'),
+    'utf8',
+  );
+  assert.equal(appSource.includes('<Stack.Screen'), false, 'App.tsx must not register screens directly');
+  assert.ok(appSource.includes('<AppNavigator />'), 'App.tsx must render the isolated navigator');
+  assert.equal(
+    /<Stack\.Screen[^>]*>\s*\{/.test(navigatorSource),
+    false,
+    'navigator screens must use static component registration instead of render props',
+  );
+});
+
 test('normalizes loopback server URLs to origin without /v1', () => {
   assert.equal(todex.normalizeServerUrl('http://localhost:7345/v2/ws'), 'http://127.0.0.1:7345');
   assert.equal(todex.normalizeServerUrl('ws://127.0.0.1:7345/path'), 'http://127.0.0.1:7345');

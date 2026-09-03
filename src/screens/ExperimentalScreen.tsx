@@ -10,8 +10,8 @@ import {
   type ConversationRecord,
   type ExperimentalFeatureId,
   type ExperimentalFeatureSettings,
-  type RootStackParamList,
 } from '../lib/appCore';
+import type { RootStackParamList } from '../navigation/routes';
 import {
   ConfirmDialog,
   InlineNotice,

@@ -3,18 +3,12 @@ import { FlatList, RefreshControl, ScrollView, View } from 'react-native';
 import { Button, Chip, Surface, Switch, Text } from 'heroui-native';
 import { Segment } from 'heroui-native-pro';
 
-import type { McpCatalog, McpServerCatalogDescriptor, ProviderDescriptor, ProviderKind, SkillCatalog, SkillCatalogDescriptor } from '../lib/v2';
+import type { McpServerCatalogDescriptor, ProviderDescriptor, ProviderKind, SkillCatalogDescriptor } from '../lib/v2';
+import type { CatalogState } from '../lib/capabilityCatalog';
 import { ProviderIcon } from './ProviderIcon';
 import { EmptyStateView, InlineNotice, LoadingState, Screen, StyledIonicons } from './ui';
 
-export type CatalogState = {
-  status: 'idle' | 'loading' | 'ready' | 'error';
-  skills?: SkillCatalog;
-  mcp?: McpCatalog;
-  error?: string;
-};
-
-type Props = {
+export type CapabilitiesScreenProps = {
   workspacePath: string;
   providers: ProviderDescriptor[];
   catalogs: Partial<Record<ProviderKind, CatalogState>>;
@@ -154,7 +148,7 @@ export function CapabilitiesScreen({
   canInvoke = false,
   onToggleSkill,
   onCallMcp,
-}: Props) {
+}: CapabilitiesScreenProps) {
   const [viewMode, setViewMode] = useState<ViewMode>('skills');
   const [providerChoice, setProviderChoice] = useState<ProviderChoice>('common');
   const provider = providerChoice === 'common' ? undefined : providers.find((item) => item.id === providerChoice);
