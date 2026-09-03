@@ -12,7 +12,6 @@ import {
 import {
   FlatList,
   Image,
-  InteractionManager,
   type ListRenderItemInfo,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
@@ -493,17 +492,20 @@ export function ChatScreen({
     initialLatestScrollRef.current = true;
     shouldFollowLatestRef.current = true;
     let cancelled = false;
+    let released = false;
     const release = () => {
-      if (!cancelled) setHistoryLoadReady(true);
+      if (cancelled || released) return;
+      released = true;
+      setHistoryLoadReady(true);
     };
     const unsubscribe = navigation.addListener('transitionEnd', (event) => {
       if (!event.data.closing) release();
     });
-    const interaction = InteractionManager.runAfterInteractions(release);
+    const idleCallbackId = requestIdleCallback(release);
     return () => {
       cancelled = true;
       unsubscribe();
-      interaction.cancel();
+      cancelIdleCallback(idleCallbackId);
     };
   }, [navigation, route.params.conversationId]);
 
