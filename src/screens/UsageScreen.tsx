@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { RefreshControl, ScrollView, View } from 'react-native';
 import { Chip, Surface, Text } from 'heroui-native';
-import { BarChart, NumberValue, ProgressBar, TrendChip, Widget } from 'heroui-native-pro';
+import { NumberValue, ProgressBar, TrendChip, Widget } from 'heroui-native-pro';
 
 import { EmptyStateView, ListRow, ListSection, Screen, ScreenIntro, ScreenScrollView, SectionHeader, StyledIonicons } from '../components/ui';
 
@@ -34,6 +34,13 @@ type UsageRow = {
   id: string;
   label: string;
   totals: UsageTotals;
+};
+
+type UsageChartDatum = {
+  index: number;
+  label: string;
+  input: number;
+  output: number;
 };
 
 const EMPTY_TOTALS: UsageTotals = {
@@ -148,6 +155,31 @@ function MetricTile({
         {detail}
       </Text>
     </Surface>
+  );
+}
+
+function TokenDistributionChart({ data }: { data: readonly UsageChartDatum[] }) {
+  const maxValue = Math.max(1, ...data.flatMap((item) => [item.input, item.output]));
+  const barHeight = (value: number) => value > 0 ? Math.max(3, Math.round((value / maxValue) * 152)) : 0;
+
+  return (
+    <View
+      className="h-44 flex-row items-end gap-2 border-b border-separator px-2 pt-4"
+      accessibilityRole="image"
+      accessibilityLabel="输入与输出 token 柱状图"
+    >
+      {data.map((item) => (
+        <View
+          key={item.label}
+          className="min-w-0 flex-1 flex-row items-end justify-center gap-1"
+          accessible
+          accessibilityLabel={`${item.label}，输入 ${formatTokens(item.input)}，输出 ${formatTokens(item.output)}`}
+        >
+          <View className="w-3 rounded-t bg-chart-2" style={{ height: barHeight(item.input) }} />
+          <View className="w-3 rounded-t bg-chart-1" style={{ height: barHeight(item.output) }} />
+        </View>
+      ))}
+    </View>
   );
 }
 
@@ -266,14 +298,7 @@ export function UsageScreen({ records = [], onRefresh, refreshing = false }: Usa
                   </Widget.Legend>
                 </Widget.Header>
                 <Widget.Content>
-                  <BarChart data={chartData} xKey="index" yKeys={['input', 'output']} wrapperClassName="h-44">
-                    {({ points, chartBounds }) => (
-                      <BarChart.BarGroup chartBounds={chartBounds} barWidth={12}>
-                        <BarChart.BarGroupItem points={points.input} colorClassName="accent-chart-2" />
-                        <BarChart.BarGroupItem points={points.output} colorClassName="accent-chart-1" />
-                      </BarChart.BarGroup>
-                    )}
-                  </BarChart>
+                  <TokenDistributionChart data={chartData} />
                   <View className="mt-2 flex-row flex-wrap gap-1.5">
                     {chartData.map((item) => (
                       <Chip key={item.label} size="sm" variant="soft">
