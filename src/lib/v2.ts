@@ -41,6 +41,46 @@ export type ProviderDescriptor = {
   models: ProviderModelDescriptor[];
 };
 
+export type ManagedCliProvider = 'codex' | 'pi' | 'claude-code' | 'grok-build';
+export type CliVersionStatus = 'upToDate' | 'updateAvailable' | 'ahead' | 'unknown' | 'notInstalled' | 'external';
+export type CliUpgradeStatus = 'running' | 'succeeded' | 'failed';
+
+type CliVersionInfoBase = {
+  name: string;
+  installed: boolean;
+  currentVersion?: string;
+  latestVersion?: string;
+  status: CliVersionStatus;
+  error?: string;
+};
+
+export type CliVersionInfo = CliVersionInfoBase & ({
+  id: ManagedCliProvider;
+  kind: 'managed';
+  upgradeSupported: boolean;
+} | {
+  id: string;
+  kind: 'external';
+  upgradeSupported: false;
+});
+
+export type CliUpgradeOperation = {
+  id: string;
+  provider: ManagedCliProvider;
+  status: CliUpgradeStatus;
+  startedAt: string;
+  finishedAt?: string;
+  previousVersion?: string;
+  currentVersion?: string;
+  error?: string;
+};
+
+export type CliVersionsResponse = {
+  clis: CliVersionInfo[];
+  checkedAt: string;
+  activeOperation?: CliUpgradeOperation;
+};
+
 export type ProviderModelDescriptor = {
   id: string;
   displayName: string;
@@ -277,6 +317,18 @@ export class V2ApiClient {
 
   async listProviders(): Promise<{ providers: ProviderDescriptor[] }> {
     return this.request('/v2/providers');
+  }
+
+  async listCliVersions(): Promise<CliVersionsResponse> {
+    return this.request('/v2/providers/versions');
+  }
+
+  async upgradeCli(provider: ManagedCliProvider): Promise<CliUpgradeOperation> {
+    return this.request(`/v2/providers/${encodeURIComponent(provider)}/upgrade`, { method: 'POST' });
+  }
+
+  async getCliUpgrade(operationId: string): Promise<CliUpgradeOperation> {
+    return this.request(`/v2/providers/upgrades/${encodeURIComponent(operationId)}`);
   }
 
   async listProviderModels(provider: ProviderKind, workspace: string): Promise<ProviderModelsResponse> {

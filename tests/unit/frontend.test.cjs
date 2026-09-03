@@ -1082,6 +1082,32 @@ test('provider display names keep Cloud Code out of conversation agents', () => 
   assert.equal(Object.values(v2.PROVIDER_DISPLAY_NAMES).includes('Cloud Code'), false);
 });
 
+test('CLI manager client uses fixed provider routes and bearer authentication', async () => {
+  const requests = [];
+  const client = new v2.V2ApiClient({
+    serverUrl: 'https://agent.example.test',
+    authToken: 'secret-token',
+    fetchImpl: async (url, init) => {
+      requests.push({ url: String(url), method: init?.method || 'GET', authorization: init?.headers?.get('Authorization') });
+      return new Response(JSON.stringify({ id: 'cliup_1', provider: 'codex', status: 'running', startedAt: '2026-09-03T00:00:00Z' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    },
+  });
+
+  await client.listCliVersions();
+  await client.upgradeCli('codex');
+  await client.getCliUpgrade('cliup_1');
+
+  assert.deepEqual(requests.map(({ url, method }) => ({ url, method })), [
+    { url: 'https://agent.example.test/v2/providers/versions', method: 'GET' },
+    { url: 'https://agent.example.test/v2/providers/codex/upgrade', method: 'POST' },
+    { url: 'https://agent.example.test/v2/providers/upgrades/cliup_1', method: 'GET' },
+  ]);
+  assert.ok(requests.every((request) => request.authorization === 'Bearer secret-token'));
+});
+
 test('ACP permission options preserve order and exact option ids', () => {
   const request = todex.classifyPendingRequest({
     type: 'conversation.permission.request',
