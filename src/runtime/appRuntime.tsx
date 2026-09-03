@@ -1,8 +1,8 @@
 import { createContext, useCallback, useContext, useSyncExternalStore, type ReactNode } from 'react';
 
 import type { PendingRequest, WorkspaceRecord } from '../lib/todex';
+import type { ConnectionHealth, ConnectionState } from '../lib/connectionState';
 import type {
-  ConnectionState,
   ComposerAttachmentDraft,
   ComposerSelection,
   ConversationRecord,
@@ -12,6 +12,8 @@ import type {
   TerminalClientState,
 } from '../lib/appCore';
 import type { TimelineStore } from '../lib/timelineStore';
+import { AppOverlayStore } from './appOverlayStore';
+import { ConnectionController } from './connectionController';
 import { ExternalStore, KeyedExternalStore, RuntimeActionRegistry, RuntimeTransaction } from './externalStore';
 
 export type OutputRuntimeActions = {
@@ -45,7 +47,10 @@ export type AppRuntime = {
   thinkingConversations: KeyedExternalStore<boolean>;
   contextUsage: KeyedExternalStore<MobileContextUsage>;
   pendingRequests: ExternalStore<PendingRequest[]>;
+  connection: ConnectionController;
   connectionState: ExternalStore<ConnectionState>;
+  connectionHealth: ExternalStore<ConnectionHealth>;
+  overlays: AppOverlayStore;
   outputActions: OutputRuntimeActions;
   bindOutputActions: (actions: OutputRuntimeActions) => void;
 };
@@ -56,6 +61,7 @@ function recordById<Value extends { id: string }>(values: readonly Value[]): Rec
 
 export function createAppRuntime(timelineStore: TimelineStore): AppRuntime {
   const transaction = new RuntimeTransaction();
+  const connection = new ConnectionController({ transaction });
   let outputActionImplementations: OutputRuntimeActions | null = null;
   const getOutputActions = () => {
     if (!outputActionImplementations) throw new Error('App runtime output actions are not bound');
@@ -79,7 +85,10 @@ export function createAppRuntime(timelineStore: TimelineStore): AppRuntime {
     thinkingConversations: new KeyedExternalStore(transaction),
     contextUsage: new KeyedExternalStore(transaction),
     pendingRequests: new ExternalStore<PendingRequest[]>([], transaction),
-    connectionState: new ExternalStore<ConnectionState>('idle', transaction),
+    connection,
+    connectionState: connection.state,
+    connectionHealth: connection.health,
+    overlays: new AppOverlayStore(transaction),
     outputActions: {
       startTerminalSession: (...args) => getOutputActions().startTerminalSession(...args),
       stopTerminalSession: (...args) => getOutputActions().stopTerminalSession(...args),
@@ -137,6 +146,11 @@ export function useRouteSnapshot<Value>(key: string): Value | null {
 export function useConnectionState(): ConnectionState {
   const { connectionState } = useAppRuntime();
   return useSyncExternalStore(connectionState.subscribe, connectionState.getSnapshot, connectionState.getSnapshot);
+}
+
+export function useConnectionHealth(): ConnectionHealth {
+  const { connectionHealth } = useAppRuntime();
+  return useSyncExternalStore(connectionHealth.subscribe, connectionHealth.getSnapshot, connectionHealth.getSnapshot);
 }
 
 export function useExternalStoreValue<Value>(store: ExternalStore<Value>): Value {

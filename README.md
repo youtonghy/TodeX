@@ -66,6 +66,12 @@ facades. Do not lift high-frequency drafts, streaming state, or terminal output 
 into the `App.tsx` navigation render tree. Growing output must use virtualized lists and
 an explicit entry or byte limit before it reaches React rendering.
 
+The runtime-owned connection controller is the single owner of the `/v2/ws` socket,
+transport encryption, reconnect policy, and health polling. Screens subscribe only to
+the connection fields they display. Global prompts and sheets are rendered by
+`AppOverlayHost`; app-level workflows open them through the overlay store and stable
+action facade instead of adding modal state to `App.tsx`.
+
 ---
 
 ## Quick Start

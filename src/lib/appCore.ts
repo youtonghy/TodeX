@@ -43,6 +43,20 @@ import {
 import { V2ApiClient, providerDisplayName, type ConversationEvent, type ConversationManifest, type ProviderDescriptor, type ProviderKind } from './v2';
 import { WORKBENCH_TABS, type WorkbenchTab } from './workbench';
 import {
+  CONNECTION_HEALTH_INTERVAL_MS,
+  CONNECTION_HEALTH_TIMEOUT_MS,
+  defaultConnectionHealth,
+  type ConnectionHealth,
+  type ConnectionState,
+} from './connectionState';
+export {
+  CONNECTION_HEALTH_INTERVAL_MS,
+  CONNECTION_HEALTH_TIMEOUT_MS,
+  defaultConnectionHealth,
+  type ConnectionHealth,
+  type ConnectionState,
+} from './connectionState';
+import {
   buildConversationRenderItems as sharedBuildConversationRenderItems,
   classifyV2ConversationEvent as sharedClassifyV2ConversationEvent,
   shouldAppendV2ConversationEvent as sharedShouldAppendV2ConversationEvent,
@@ -443,8 +457,6 @@ export type TimelineTarget = {
   conversationId: string;
 };
 
-export type ConnectionState = 'idle' | 'connecting' | 'open' | 'closed' | 'error';
-
 export type RuntimeStatusState = {
   socket: ConnectionState;
   daemon: ConnectionHealth['status'];
@@ -452,16 +464,6 @@ export type RuntimeStatusState = {
   turn: 'idle' | 'running';
 };
 
-export type ConnectionHealth = {
-  status: 'unknown' | 'checking' | 'online' | 'offline';
-  latencyMs: number | null;
-  lastCheckedAt: number | null;
-  error: string;
-  code?: string;
-};
-
-export const CONNECTION_HEALTH_INTERVAL_MS = 5000;
-export const CONNECTION_HEALTH_TIMEOUT_MS = 3500;
 export const MAX_COMPOSER_ATTACHMENTS = 8;
 export const MAX_IMAGE_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 export const MAX_FILE_ATTACHMENT_BYTES = 512 * 1024;
@@ -1349,14 +1351,6 @@ export const defaultSettings: ConnectionSettings = {
   approvalPolicy: 'on-request',
   approvalsReviewer: 'user',
   sandboxMode: 'workspace-write',
-};
-
-export const defaultConnectionHealth: ConnectionHealth = {
-  status: 'unknown',
-  latencyMs: null,
-  lastCheckedAt: null,
-  error: '',
-  code: '',
 };
 
 export const DEFAULT_WORKBENCH_STATE: MobileWorkbenchState = {

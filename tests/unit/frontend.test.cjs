@@ -987,22 +987,38 @@ test('main socket uses the single-argument WebSocket constructor', () => {
   // -only auth future would silently break. Authentication must ride on the
   // URL built by buildV2WebSocketUrlWithOptions.
   const appSource = fs.readFileSync(path.join(__dirname, '..', '..', 'App.tsx'), 'utf8');
-  assert.ok(
-    appSource.includes('const socket = new WebSocket(wsUrl);'),
-    'connect() must construct the socket with new WebSocket(wsUrl)',
+  const controllerSource = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'src', 'runtime', 'connectionController.ts'),
+    'utf8',
   );
   assert.ok(
-    !appSource.includes('undefined, options)'),
+    controllerSource.includes('new WebSocket(url)'),
+    'the connection controller must construct the socket with one URL argument',
+  );
+  assert.equal(appSource.includes('new WebSocket('), false, 'App.tsx must not own the WebSocket');
+  assert.ok(
+    !controllerSource.includes('undefined, options)'),
     'connect() must not pass a third WebSocket constructor argument',
   );
   assert.ok(
-    !/new \(WebSocket as typeof WebSocket/.test(appSource),
+    !/new \(WebSocket as typeof WebSocket/.test(controllerSource),
     'connect() must not use the RN WebSocket constructor cast',
   );
-  const connectStart = appSource.indexOf('const wsUrl = buildV2WebSocketUrlWithOptions');
-  const tryStart = appSource.indexOf('try {', connectStart);
-  const headerOptions = appSource.slice(connectStart, tryStart).match(/Authorization/);
+  const connectStart = controllerSource.indexOf('const wsUrl = buildV2WebSocketUrlWithOptions');
+  const tryStart = controllerSource.indexOf('try {', connectStart);
+  const headerOptions = controllerSource.slice(connectStart, tryStart).match(/Authorization/);
   assert.equal(headerOptions, null, 'connect() must not build header-only auth options');
+});
+
+test('root app delegates connection lifecycle and global overlays', () => {
+  const appSource = fs.readFileSync(path.join(__dirname, '..', '..', 'App.tsx'), 'utf8');
+  assert.ok(appSource.includes('<ConnectionRuntimeEffects />'));
+  assert.ok(appSource.includes('<AppOverlayHost />'));
+  assert.equal(/const \[connection(State|Health)/.test(appSource), false);
+  assert.equal(/<(PromptModal|ModelPickerModal|SkillPickerModal|ThreadInfoModal)\b/.test(appSource), false);
+  assert.equal(appSource.includes('socketRef'), false);
+  assert.equal(appSource.includes('reconnectTimerRef'), false);
+  assert.equal(appSource.includes('healthProbeSeqRef'), false);
 });
 
 test('mobile navigation remains isolated from the root state component', () => {

@@ -15,7 +15,7 @@ import type { AppScreenProps } from '../navigation/routes';
 import { KanbanScreen, type KanbanConversation } from '../screens/KanbanScreen';
 import { SlashCommandActionScreen } from '../screens/SlashCommandActionScreen';
 import { SlashCommandsScreen } from '../screens/SlashCommandsScreen';
-import { useAllKeyedStoreValues, useAppRuntime, useKeyedStoreValue, useRouteSnapshot } from './appRuntime';
+import { useAllKeyedStoreValues, useAppRuntime, useConnectionState, useKeyedStoreValue, useRouteSnapshot } from './appRuntime';
 
 type SlashCommandsProps = ComponentProps<typeof SlashCommandsScreen>;
 type SlashCommandActionProps = ComponentProps<typeof SlashCommandActionScreen>;
@@ -69,7 +69,6 @@ export type CapabilitiesRuntimeActions = {
 
 export type KanbanRouteSnapshot = {
   conversations: readonly KanbanConversation[];
-  canRefresh: boolean;
 };
 
 export type KanbanRuntimeActions = {
@@ -162,6 +161,7 @@ export const CapabilitiesRouteScreen = memo(function CapabilitiesRouteScreen({ r
 export const KanbanRouteScreen = memo(function KanbanRouteScreen({ navigation }: AppScreenProps<'Kanban'>) {
   const runtime = useAppRuntime();
   const snapshot = useRouteSnapshot<KanbanRouteSnapshot>(KANBAN_ROUTE_SNAPSHOT);
+  const connectionState = useConnectionState();
   const actions = runtime.actions.get<KanbanRuntimeActions>(KANBAN_ACTIONS);
   if (!snapshot) return null;
   return (
@@ -171,7 +171,7 @@ export const KanbanRouteScreen = memo(function KanbanRouteScreen({ navigation }:
         actions.selectConversation(item.workspaceId, item.id);
         navigation.navigate('Chat', { workspaceId: item.workspaceId, conversationId: item.id });
       }}
-      onRefresh={snapshot.canRefresh ? actions.refresh : undefined}
+      onRefresh={connectionState === 'open' ? actions.refresh : undefined}
     />
   );
 });

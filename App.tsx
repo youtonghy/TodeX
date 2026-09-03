@@ -35,7 +35,6 @@ import {
   createRequestId,
   displayNameFromPath,
   eventPayloadData,
-  utf8ByteLength,
   extractThreadIdFromEvent,
   inferApprovalResponseType,
   isThreadNotMaterializedHistoryError,
@@ -65,20 +64,12 @@ import {
   saveJson,
   saveSecret,
 } from './src/lib/storage';
-import { createTransportCryptoSession, type TransportCryptoSession } from './src/lib/transportCrypto';
-import { MAX_LEGACY_MESSAGE_BYTES } from './src/lib/transport';
 import { ConnectionError } from './src/lib/connectionError';
-import { ConversationReplayTracker, TimelineStore } from './src/lib/timelineStore';
+import { TimelineStore } from './src/lib/timelineStore';
 import { retainTerminalOutput } from './src/lib/outputModels';
-import {
-  probeBackendConnection,
-  nextReconnectDelayMs,
-  inspectServerUrl,
-  tokenMatchesOrigin,
-} from './src/lib/connectionProbe';
+import { tokenMatchesOrigin, type BackendProbeResult } from './src/lib/connectionProbe';
 import {
   V2ApiClient,
-  buildV2WebSocketUrlWithOptions,
   providerDisplayName,
   type ConversationEvent,
   type ConversationManifest,
@@ -103,8 +94,6 @@ import {
 
 import {
   DEFAULT_COMPOSER_SELECTION,
-  CONNECTION_HEALTH_INTERVAL_MS,
-  CONNECTION_HEALTH_TIMEOUT_MS,
   localConversationStateOf,
   sessionIdForConversation,
   commandWorkspaceForConversation,
@@ -156,7 +145,6 @@ import {
   DEFAULT_TERMINAL_ROWS,
   DEFAULT_TERMINAL_COLS,
   LOCAL_SESSION_IDLE_SUSPEND_MS,
-  LOCAL_SESSION_IDLE_SWEEP_MS,
   EXPERIMENTAL_FEATURE_DEFAULTS,
   canonicalSlashCommand,
   serviceTierCommandForModel,
@@ -165,7 +153,6 @@ import {
   permissionProfileLabel,
   personalityLabel,
   defaultSettings,
-  defaultConnectionHealth,
   DEFAULT_WORKBENCH_STATE,
   normalizeWorkbenchState,
   normalizeWorkbenchMap,
@@ -242,17 +229,11 @@ import {
   type PendingSocketFrame,
   type PendingTimelineUpsert,
   type ConversationContext,
-  type ModelCommandPromptState,
-  type ModelPickerPromptState,
-  type ThreadInfoModalState,
   type ThreadCommandPromptState,
-  type SkillListStatus,
   type SkillListItem,
   type SelectedSkillAttachment,
   type ThreadMenuAction,
   type TimelineTarget,
-  type ConnectionState,
-  type ConnectionHealth,
   type TimelineEntry,
   type PermissionPreset,
   type MentionReference,
@@ -264,16 +245,22 @@ import { AppNavigator } from './src/navigation/AppNavigator';
 import { useAppNavigationTheme } from './src/theme/navigation';
 import { ToastBridge, notify } from './src/components/ui';
 import {
-  ModelPickerModal,
-  PromptModal,
-  SkillPickerModal,
-  ThreadInfoModal,
-} from './src/components/modals';
-import {
   AppRuntimeProvider,
   createAppRuntime,
   syncRuntimeEntities,
 } from './src/runtime/appRuntime';
+import {
+  CONNECTION_LIFECYCLE_ACTIONS,
+  ConnectionRuntimeEffects,
+  type ConnectionLifecycleActions,
+} from './src/runtime/ConnectionRuntimeEffects';
+import {
+  APP_OVERLAY_ACTIONS,
+  APP_OVERLAY_CONTEXT_SNAPSHOT,
+  AppOverlayHost,
+  type AppOverlayActions,
+  type AppOverlayContextSnapshot,
+} from './src/runtime/AppOverlayHost';
 import {
   CHAT_ACTIONS,
   CHAT_ROUTE_SNAPSHOT,
@@ -339,12 +326,6 @@ function sameContextUsage(left: MobileContextUsage | undefined, right: MobileCon
   );
 }
 
-function sameConnectionHealthSignal(left: ConnectionHealth, right: ConnectionHealth): boolean {
-  return left.status === right.status
-    && left.error === right.error
-    && left.code === right.code;
-}
-
 function appendBoundedTerminalEntry(
   output: readonly TerminalOutputEntry[],
   entry: TerminalOutputEntry,
@@ -365,8 +346,6 @@ export default function App() {
   const appRuntimeRef = useRef<ReturnType<typeof createAppRuntime> | null>(null);
   if (!appRuntimeRef.current) appRuntimeRef.current = createAppRuntime(timelineStore);
   const appRuntime = appRuntimeRef.current;
-  const socketRef = useRef<WebSocket | null>(null);
-  const socketCryptoRef = useRef<TransportCryptoSession | null>(null);
   const activeWorkspaceRef = useRef('');
   const activeConversationRef = useRef('');
   const workspacesRef = useRef<WorkspaceRecord[]>([]);
@@ -388,22 +367,14 @@ export default function App() {
   const pendingTimelineUpsertsRef = useRef<PendingTimelineUpsert[]>([]);
   const pendingTimelineUpsertFrameRef = useRef<number | null>(null);
   const capabilityWorkspaceRef = useRef('');
-  const socketGenerationRef = useRef(0);
-  const v2ReplayTrackerRef = useRef(new ConversationReplayTracker());
-  const autoConnectAttemptedRef = useRef(false);
   const sessionCursorsRef = useRef(new Map<string, number>());
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const manualDisconnectRef = useRef(false);
+  const connectionStartedRef = useRef(false);
   const workspaceBackendReadyRef = useRef(false);
   const workspaceBackendSkipNextSaveRef = useRef(false);
   const workspaceBackendSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const healthProbeSeqRef = useRef(0);
-  const connectionHealthDetailsRef = useRef<ConnectionHealth>(defaultConnectionHealth);
   const resolvedPendingRequestIdsRef = useRef(new Set<string>());
   const loadedNativeThreadHistoryRef = useRef(new Map<string, number>());
   const unmaterializedNativeThreadIdsRef = useRef(new Set<string>());
-  const lastFailureRetryableRef = useRef(true);
-  const reconnectAttemptRef = useRef(0);
   const backendProfilesRef = useRef<BackendConnectionProfile[]>([]);
   const activeBackendConnectionIdRef = useRef('');
   const gitRepositoryRequestSeqRef = useRef(0);
@@ -415,7 +386,6 @@ export default function App() {
 
   const [hydrated, setHydrated] = useState(false);
   const [backendSecretsHydrated, setBackendSecretsHydrated] = useState(false);
-  const [autoConnectEnabled, setAutoConnectEnabled] = useState(false);
   const [settings, setSettings] = useState<ConnectionSettings>(defaultSettings);
   const [backendProfiles, setBackendProfiles] = useState<BackendConnectionProfile[]>([]);
   const [activeBackendConnectionId, setActiveBackendConnectionId] = useState('');
@@ -423,8 +393,6 @@ export default function App() {
   const [conversations, setConversations] = useState<ConversationRecord[]>([]);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState('');
   const [activeConversationId, setActiveConversationId] = useState('');
-  const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
-  const [connectionHealth, setConnectionHealth] = useState<ConnectionHealth>(defaultConnectionHealth);
   const [remoteModelCatalog, setRemoteModelCatalog] = useState<CodexModelCatalogItem[]>([]);
   const [modelCatalogStatus, setModelCatalogStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [modelCatalogError, setModelCatalogError] = useState('');
@@ -433,15 +401,6 @@ export default function App() {
   const [mentionHistory, setMentionHistory] = useState<WorkspaceMentionHistory[]>([]);
   const [experimentalFeatures, setExperimentalFeatures] = useState<ExperimentalFeatureSettings>(EXPERIMENTAL_FEATURE_DEFAULTS);
   const [selectedSkills, setSelectedSkills] = useState<Record<string, SelectedSkillAttachment[]>>({});
-  const [skillListVisible, setSkillListVisible] = useState(false);
-  const [skillListConversationId, setSkillListConversationId] = useState('');
-  const [skillListStatus, setSkillListStatus] = useState<SkillListStatus>('idle');
-  const [skillListError, setSkillListError] = useState('');
-  const [skillListItems, setSkillListItems] = useState<SkillListItem[]>([]);
-  const [modelCommandPrompt, setModelCommandPrompt] = useState<ModelCommandPromptState | null>(null);
-  const [modelPickerPrompt, setModelPickerPrompt] = useState<ModelPickerPromptState | null>(null);
-  const [threadInfoModal, setThreadInfoModal] = useState<ThreadInfoModalState | null>(null);
-  const [threadCommandPrompt, setThreadCommandPrompt] = useState<ThreadCommandPromptState | null>(null);
   const [threadListStatusByWorkspace, setThreadListStatusByWorkspace] = useState<Record<string, 'idle' | 'loading' | 'ready' | 'error'>>({});
   const [threadListErrorByWorkspace, setThreadListErrorByWorkspace] = useState<Record<string, string>>({});
   const [mcpInventoryByConversation, setMcpInventoryByConversation] = useState<Record<string, McpInventoryState>>({});
@@ -636,10 +595,9 @@ export default function App() {
         workspaceName: workspaceNames.get(conversation.workspaceId),
         status: conversation.nativeStatus,
       })),
-      canRefresh: connectionState === 'open',
     };
     appRuntime.routeSnapshots.set(KANBAN_ROUTE_SNAPSHOT, snapshot);
-  }, [appRuntime, connectionState, conversations, workspaces]);
+  }, [appRuntime, conversations, workspaces]);
 
   useEffect(() => {
     const snapshot: ToolRouteSnapshot = {
@@ -933,32 +891,12 @@ export default function App() {
     return Object.fromEntries(selected.entries());
   }, []);
 
-  const closeSocket = useCallback((manual = true) => {
-    socketGenerationRef.current += 1;
-    v2ReplayTrackerRef.current.resetConnection();
-    if (manual) {
-      manualDisconnectRef.current = true;
-      setAutoConnectEnabled(false);
-      setConnectionState('closed');
-    }
-    if (reconnectTimerRef.current) {
-      clearTimeout(reconnectTimerRef.current);
-      reconnectTimerRef.current = null;
-    }
+  const resetTransportPipeline = useCallback(() => {
     if (workspaceBackendSyncTimerRef.current) {
       clearTimeout(workspaceBackendSyncTimerRef.current);
       workspaceBackendSyncTimerRef.current = null;
     }
     workspaceBackendReadyRef.current = false;
-    if (socketRef.current) {
-      try {
-        socketRef.current.close();
-      } catch {
-        // ignore
-      }
-      socketRef.current = null;
-    }
-    socketCryptoRef.current = null;
     pendingServerEventsRef.current = [];
     if (pendingServerEventFrameRef.current !== null) {
       cancelAnimationFrame(pendingServerEventFrameRef.current);
@@ -1131,16 +1069,29 @@ export default function App() {
       setExperimentalFeatures(normalizeExperimentalFeatures(storedExperimentalFeatures));
       setActiveWorkspaceId(firstWorkspaceId);
       setActiveConversationId(firstConversationId);
-      setAutoConnectEnabled(Boolean(effectiveSettings.serverUrl.trim()));
       setBackendSecretsHydrated(true);
       setHydrated(true);
     })();
 
     return () => {
       alive = false;
-      closeSocket(false);
     };
-  }, [closeSocket]);
+  }, [timelineStore]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    if (!connectionStartedRef.current) {
+      connectionStartedRef.current = true;
+      appRuntime.connection.start(settings, Boolean(settings.serverUrl.trim()));
+      return;
+    }
+    appRuntime.connection.configure(settings);
+  }, [appRuntime, hydrated, settings]);
+
+  useEffect(() => () => {
+    connectionStartedRef.current = false;
+    appRuntime.connection.dispose();
+  }, [appRuntime]);
 
   useEffect(() => {
     activeWorkspaceRef.current = activeWorkspaceId;
@@ -1157,10 +1108,6 @@ export default function App() {
   }, [appRuntime, conversations, workspaces]);
 
   useEffect(() => {
-    appRuntime.connectionState.set(connectionState);
-  }, [appRuntime, connectionState]);
-
-  useEffect(() => {
     backendProfilesRef.current = backendProfiles;
   }, [backendProfiles]);
 
@@ -1175,10 +1122,6 @@ export default function App() {
   useEffect(() => {
     v2ProvidersRef.current = v2Providers;
   }, [v2Providers]);
-
-  useEffect(() => {
-    connectionHealthDetailsRef.current = connectionHealth;
-  }, [connectionHealth]);
 
   useEffect(() => {
     if (!hydrated) {
@@ -1235,15 +1178,11 @@ export default function App() {
     setProviderCommands({});
     setProviderCatalogStatus({});
     setCapabilityCatalogs({});
-    setConnectionHealth(defaultConnectionHealth);
     setModelCatalogStatus('idle');
     setModelCatalogError('');
-    manualDisconnectRef.current = false;
-    closeSocket(false);
-    setAutoConnectEnabled(true);
-    setConnectionState('closed');
+    appRuntime.connection.restart(profileSettings(profile));
     return true;
-  }, [closeSocket]);
+  }, [appRuntime]);
 
   const addBackendProfile = useCallback((draft?: Partial<BackendConnectionProfile>) => {
     const id = createRequestId('backend');
@@ -1265,11 +1204,9 @@ export default function App() {
     activeBackendConnectionIdRef.current = profile.id;
     setActiveBackendConnectionId(profile.id);
     setSettings((current) => sharedSettingsFromProfile(profile, current));
-    closeSocket(false);
-    setAutoConnectEnabled(true);
-    setConnectionState('closed');
+    appRuntime.connection.restart(profileSettings(profile));
     return profile;
-  }, [closeSocket, settings]);
+  }, [appRuntime, settings]);
 
   const removeBackendProfile = useCallback((id: string) => {
     const profiles = backendProfilesRef.current;
@@ -1294,13 +1231,11 @@ export default function App() {
         activeBackendConnectionIdRef.current = fallback.id;
         setActiveBackendConnectionId(fallback.id);
         setSettings((current) => sharedSettingsFromProfile(fallback, current));
-        closeSocket(false);
-        setAutoConnectEnabled(true);
-        setConnectionState('closed');
+        appRuntime.connection.restart(profileSettings(fallback));
       }
     }
     return true;
-  }, [closeSocket]);
+  }, [appRuntime]);
 
   useEffect(() => {
     if (!hydrated || !activeBackendConnectionId) return;
@@ -1451,12 +1386,6 @@ export default function App() {
   }, [settings, syncWorkspacesToBackend]);
 
   useEffect(() => {
-    if (!hydrated || connectionState !== 'open') return;
-    const timer = setInterval(() => void syncWorkspacesFromBackend(), 15000);
-    return () => clearInterval(timer);
-  }, [connectionState, hydrated, syncWorkspacesFromBackend]);
-
-  useEffect(() => {
     if (!hydrated) {
       return;
     }
@@ -1465,10 +1394,10 @@ export default function App() {
       workspaceBackendSkipNextSaveRef.current = false;
       return;
     }
-    if (connectionState === 'open' && workspaceBackendReadyRef.current) {
+    if (appRuntime.connectionState.getSnapshot() === 'open' && workspaceBackendReadyRef.current) {
       scheduleWorkspaceBackendSave(workspaces);
     }
-  }, [connectionState, hydrated, scheduleJsonSave, scheduleWorkspaceBackendSave, workspaces]);
+  }, [appRuntime, hydrated, scheduleJsonSave, scheduleWorkspaceBackendSave, workspaces]);
 
   useEffect(() => {
     if (!hydrated) {
@@ -1841,10 +1770,9 @@ export default function App() {
       setLastError('');
       return;
     }
-    setSkillListStatus('error');
-    setSkillListError(errorMessage);
+    appRuntime.overlays.updateSkillRequest(pending.requestId, { status: 'error', error: errorMessage });
     setLastError(errorMessage);
-  }, []);
+  }, [appRuntime]);
 
   const finishPendingThreadAction = useCallback((pending: PendingThreadAction, errorMessage = '') => {
     clearTimeout(pending.timeoutId);
@@ -2276,9 +2204,11 @@ export default function App() {
       if (pendingSkillList) {
         if (event.type === 'codex.control.response') {
           const items = parseSkillListItems(data.result ?? data);
-          setSkillListItems(items);
-          setSkillListStatus('ready');
-          setSkillListError('');
+          appRuntime.overlays.updateSkillRequest(pendingSkillList.requestId, {
+            items,
+            status: 'ready',
+            error: '',
+          });
           appendTimeline(makeSystemEntry(
             'Skills loaded',
             items.length ? `${items.length} skills available` : 'No skills returned for this workspace',
@@ -2461,7 +2391,7 @@ export default function App() {
           if (pendingThreadAction.showResult) {
             const title = pendingThreadAction.resultTitle || `${pendingThreadAction.action} result`;
             const detail = pendingThreadAction.resultDetail || formatThreadActionResult(pendingThreadAction, responseValue);
-            setThreadInfoModal({
+            appRuntime.overlays.openThreadInfo({
               title,
               detail,
               raw: responseValue,
@@ -2621,7 +2551,7 @@ export default function App() {
         setLastError(localTurnErrorMessage(protocolError));
       }
     },
-    [appendTimeline, findPendingLocalStart, finishPendingGitDiff, finishPendingSkillList, finishPendingThreadAction, finishPendingThreadList, handleTerminalEvent, persistSessionCursors, resetWorkspaceSession, resolveTimelineTarget, settlePendingLocalStart, settlePendingThreadStart, setConversationThinking, setConversationTurnId, updateConversation, upsertChatTimeline, upsertNativeThreads],
+    [appRuntime, appendTimeline, findPendingLocalStart, finishPendingGitDiff, finishPendingSkillList, finishPendingThreadAction, finishPendingThreadList, handleTerminalEvent, persistSessionCursors, resetWorkspaceSession, resolveTimelineTarget, settlePendingLocalStart, settlePendingThreadStart, setConversationThinking, setConversationTurnId, updateConversation, upsertChatTimeline, upsertNativeThreads],
   );
 
   const scheduleServerEventDrain = useCallback(() => {
@@ -2646,7 +2576,7 @@ export default function App() {
   }, [scheduleServerEventDrain]);
 
   const decodeSocketFrame = useCallback((frame: PendingSocketFrame) => {
-    if (frame.generation !== socketGenerationRef.current) {
+    if (!appRuntime.connection.isCurrentGeneration(frame.generation)) {
       return;
     }
 
@@ -2787,7 +2717,7 @@ export default function App() {
     } catch (error) {
       setLastError(error instanceof Error ? error.message : 'failed to parse websocket message');
     }
-  }, [enqueueServerEvent, setConversationThinking, setConversationTurnId, updateConversation, upsertChatTimeline]);
+  }, [appRuntime, enqueueServerEvent, setConversationThinking, setConversationTurnId, updateConversation, upsertChatTimeline]);
 
   const scheduleSocketFrameDrain = useCallback(() => {
     if (pendingSocketFrameDrainRef.current !== null) {
@@ -2825,47 +2755,14 @@ export default function App() {
     scheduleSocketFrameDrain();
   }, [scheduleSocketFrameDrain]);
 
-  /** Raw `{id, type, payload}` frame on the unified /v2/ws socket: encrypt,
-   * guard the 8 MiB backend limit, send. Returns null when the frame never
-   * left (socket closed) and throws ConnectionError on oversize payloads. */
+  /** Sends a raw frame through the single runtime-owned /v2/ws connection. */
   const sendRawProtocolFrame = useCallback((message: { id: string; type: string; payload: Record<string, unknown> }) => {
-    const socket = socketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      return null;
-    }
-    let frame: string;
-    try {
-      frame = JSON.stringify(message);
-    } catch (error) {
-      setLastError(error instanceof Error ? error.message : '消息序列化失败。');
-      return null;
-    }
-    frame = socketCryptoRef.current?.encryptClientText(frame) ?? frame;
-    const size = utf8ByteLength(frame);
-    if (size > MAX_LEGACY_MESSAGE_BYTES) {
-      throw ConnectionError.messageTooLarge(size, MAX_LEGACY_MESSAGE_BYTES);
-    }
-    socket.send(frame);
-    return message;
-  }, []);
+    return appRuntime.connection.send(message);
+  }, [appRuntime]);
 
   const subscribeV2Conversation = useCallback((conversationId: string) => {
-    const afterSequence = v2ReplayTrackerRef.current.subscriptionCursor(conversationId);
-    if (afterSequence === null) return Boolean(conversationId);
-    const sent = sendRawProtocolFrame({
-      id: createRequestId('sub'),
-      type: 'conversation.subscribe',
-      payload: {
-        conversationId,
-        afterSequence,
-        limit: 200,
-      },
-    });
-    if (sent) {
-      v2ReplayTrackerRef.current.markSubscribed(conversationId);
-    }
-    return Boolean(sent);
-  }, [sendRawProtocolFrame]);
+    return appRuntime.connection.subscribeConversation(conversationId);
+  }, [appRuntime]);
 
   const sendSessionResume = useCallback((sessionCursors: Record<string, number>) => {
     try {
@@ -2900,268 +2797,33 @@ export default function App() {
     }
   }, [settings.serverUrl]);
 
-  const checkConnectionHealth = useCallback(async () => {
-    const probeId = healthProbeSeqRef.current + 1;
-    healthProbeSeqRef.current = probeId;
-    const startedAt = Date.now();
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), CONNECTION_HEALTH_TIMEOUT_MS);
-
-    setConnectionHealth((current) => {
-      const isInitialCheck = current.status === 'unknown';
-      const next: ConnectionHealth = {
-        ...connectionHealthDetailsRef.current,
-        status: isInitialCheck ? 'checking' : current.status,
-        error: isInitialCheck ? '' : current.error,
-        code: isInitialCheck ? '' : current.code,
-      };
-      connectionHealthDetailsRef.current = next;
-      return sameConnectionHealthSignal(current, next) ? current : next;
-    });
-
-    try {
-      const response = await fetch(buildHttpUrl(settings.serverUrl, '/health'), {
-        cache: 'no-store',
-        signal: controller.signal,
+  const handleConnectionProbe = useCallback((probe: BackendProbeResult) => {
+    if (probe.ok || probe.providers.length > 0) setV2Providers(probe.providers);
+    if (probe.version) {
+      setServerVersion({
+        name: probe.version.name,
+        version: probe.version.version,
+        data_dir: probe.version.dataDir || '',
+        workspace_root: probe.version.workspaceRoot || '',
       });
-      const latencyMs = Date.now() - startedAt;
-      if (healthProbeSeqRef.current !== probeId) {
-        return;
-      }
-      if (!response.ok) {
-        throw new Error(`health endpoint returned ${response.status}`);
-      }
-      const next: ConnectionHealth = {
-        status: 'online',
-        latencyMs,
-        lastCheckedAt: Date.now(),
-        error: '',
-        code: '',
-      };
-      connectionHealthDetailsRef.current = next;
-      setConnectionHealth((current) => sameConnectionHealthSignal(current, next) ? current : next);
-    } catch (error) {
-      if (healthProbeSeqRef.current !== probeId) {
-        return;
-      }
-      const isAbort = error instanceof Error && error.name === 'AbortError';
-      const next: ConnectionHealth = {
-        status: 'offline',
-        latencyMs: null,
-        lastCheckedAt: Date.now(),
-        error: isAbort ? '健康检查超时' : error instanceof Error ? error.message : '健康检查失败',
-        code: '',
-      };
-      connectionHealthDetailsRef.current = next;
-      setConnectionHealth((current) => sameConnectionHealthSignal(current, next) ? current : next);
-    } finally {
-      clearTimeout(timeoutId);
     }
-  }, [settings.serverUrl]);
+  }, []);
 
-  useEffect(() => {
-    if (!hydrated) {
-      return;
-    }
-
-    setConnectionHealth(defaultConnectionHealth);
-    void checkConnectionHealth();
-
-    const intervalId = setInterval(() => {
-      void checkConnectionHealth();
-    }, CONNECTION_HEALTH_INTERVAL_MS);
-
-    return () => {
-      clearInterval(intervalId);
-    };
-  }, [checkConnectionHealth, hydrated]);
-
-  const connect = useCallback(() => {
-    manualDisconnectRef.current = false;
-    autoConnectAttemptedRef.current = true;
-    setAutoConnectEnabled(true);
-    closeSocket(false);
-    setLastError('');
-    setConnectionState('connecting');
-    setConnectionHealth((current) => ({ ...current, status: 'checking', error: '', code: '' }));
-
-    void (async () => {
-      const inspected = inspectServerUrl(settings.serverUrl);
-      if (inspected.error) {
-        lastFailureRetryableRef.current = inspected.error.retryable;
-        setConnectionState('error');
-        setLastError(inspected.error.userMessage);
-        setConnectionHealth({
-          status: 'offline',
-          latencyMs: null,
-          lastCheckedAt: Date.now(),
-          error: inspected.error.userMessage,
-          code: inspected.error.code,
-        });
-        return;
-      }
-
-      const probe = await probeBackendConnection({
-        serverUrl: inspected.origin,
-        authToken: settings.authToken,
-      });
-      if (!probe.ok || probe.error) {
-        const error = probe.error ?? ConnectionError.unreachable('backend probe failed');
-        lastFailureRetryableRef.current = error.retryable;
-        setConnectionState('error');
-        setLastError(error.userMessage);
-        setConnectionHealth({
-          status: 'offline',
-          latencyMs: null,
-          lastCheckedAt: Date.now(),
-          error: error.userMessage,
-          code: error.code,
-        });
-        if (probe.version) {
-          setServerVersion({
-            name: probe.version.name,
-            version: probe.version.version,
-            data_dir: probe.version.dataDir || '',
-            workspace_root: probe.version.workspaceRoot || '',
-          });
-        }
-        if (probe.providers.length) {
-          setV2Providers(probe.providers);
-        }
-        return;
-      }
-
-      setV2Providers(probe.providers);
-      if (probe.version) {
-        setServerVersion({
-          name: probe.version.name,
-          version: probe.version.version,
-          data_dir: probe.version.dataDir || '',
-          workspace_root: probe.version.workspaceRoot || '',
-        });
-      }
-      setConnectionHealth({
-        status: 'online',
-        latencyMs: null,
-        lastCheckedAt: Date.now(),
-        error: '',
-        code: '',
-      });
-
-      let crypto: TransportCryptoSession | null = null;
+  const handleConnectionOpen = useCallback(() => {
+    sendSessionResume(getSessionCursorSnapshot());
+    void refreshServerVersion();
+    void syncWorkspacesFromBackend();
+    const activeConversation = conversationsRef.current.find(
+      (conversation) => conversation.id === activeConversationRef.current,
+    );
+    if (activeConversation?.v2ConversationId) {
       try {
-        crypto = createTransportCryptoSession({ ...settings, serverUrl: inspected.origin });
-      } catch (error) {
-        lastFailureRetryableRef.current = false;
-        setConnectionState('error');
-        setLastError(error instanceof Error ? error.message : '无法初始化加密连接');
-        return;
+        subscribeV2Conversation(activeConversation.v2ConversationId);
+      } catch {
+        // Opening the conversation retries the subscription.
       }
-
-      const wsUrl = buildV2WebSocketUrlWithOptions(inspected.origin, {
-        cryptoQueryString: crypto?.queryString,
-        authToken: settings.authToken,
-      });
-
-      try {
-        const socket = new WebSocket(wsUrl);
-        v2ReplayTrackerRef.current.resetConnection();
-        const generation = socketGenerationRef.current;
-        socketRef.current = socket;
-        socketCryptoRef.current = crypto;
-
-        socket.onopen = () => {
-          reconnectAttemptRef.current = 0;
-          lastFailureRetryableRef.current = true;
-          setConnectionState('open');
-          sendSessionResume(getSessionCursorSnapshot());
-          void checkConnectionHealth();
-          void refreshServerVersion();
-          void syncWorkspacesFromBackend();
-          const activeConversation = conversationsRef.current.find(
-            (conversation) => conversation.id === activeConversationRef.current,
-          );
-          if (activeConversation?.v2ConversationId) {
-            try {
-              subscribeV2Conversation(activeConversation.v2ConversationId);
-            } catch {
-              // Opening the conversation retries the subscription.
-            }
-          }
-        };
-
-        socket.onmessage = (event) => {
-          enqueueSocketFrame({
-            data: String(event.data),
-            generation,
-            crypto: socketCryptoRef.current,
-          });
-        };
-
-        socket.onerror = () => {
-          lastFailureRetryableRef.current = true;
-          setConnectionState('error');
-          setLastError(ConnectionError.websocketFailed(wsUrl).userMessage);
-          setConnectionHealth((current) => ({
-            ...current,
-            status: 'offline',
-            error: ConnectionError.websocketFailed(wsUrl).userMessage,
-            code: 'websocket_failed',
-          }));
-        };
-
-        socket.onclose = () => {
-          setConnectionState((current) => (current === 'open' || current === 'connecting' ? 'closed' : current));
-          if (socketRef.current === socket) {
-            socketCryptoRef.current = null;
-          }
-        };
-      } catch (error) {
-        lastFailureRetryableRef.current = true;
-        setConnectionState('error');
-        socketCryptoRef.current = null;
-        setLastError(error instanceof Error ? error.message : ConnectionError.websocketFailed(wsUrl).userMessage);
-      }
-    })();
-  }, [checkConnectionHealth, closeSocket, enqueueSocketFrame, getSessionCursorSnapshot, refreshServerVersion, sendSessionResume, settings, subscribeV2Conversation, syncWorkspacesFromBackend]);
-
-  useEffect(() => {
-    if (!hydrated || !autoConnectEnabled || manualDisconnectRef.current) {
-      return;
     }
-    if (connectionState !== 'closed' && connectionState !== 'error') {
-      return;
-    }
-    if (!lastFailureRetryableRef.current) {
-      return;
-    }
-    if (reconnectTimerRef.current) {
-      clearTimeout(reconnectTimerRef.current);
-    }
-    const delay = nextReconnectDelayMs(reconnectAttemptRef.current);
-    reconnectAttemptRef.current += 1;
-    reconnectTimerRef.current = setTimeout(() => {
-      reconnectTimerRef.current = null;
-      if (!manualDisconnectRef.current) {
-        connect();
-      }
-    }, delay);
-    return () => {
-      if (reconnectTimerRef.current) {
-        clearTimeout(reconnectTimerRef.current);
-        reconnectTimerRef.current = null;
-      }
-    };
-  }, [autoConnectEnabled, connect, connectionState, hydrated]);
-
-  useEffect(() => {
-    if (!hydrated || !autoConnectEnabled || autoConnectAttemptedRef.current) {
-      return;
-    }
-
-    autoConnectAttemptedRef.current = true;
-    connect();
-  }, [autoConnectEnabled, connect, hydrated]);
+  }, [getSessionCursorSnapshot, refreshServerVersion, sendSessionResume, subscribeV2Conversation, syncWorkspacesFromBackend]);
 
   const sendProtocolMessage = useCallback(
     (
@@ -3170,12 +2832,6 @@ export default function App() {
       requestId = createRequestId('msg'),
       target?: TimelineTarget,
     ) => {
-      const socket = socketRef.current;
-      if (!socket || socket.readyState !== WebSocket.OPEN) {
-        setLastError('请先在设置里连接后端。');
-        return false;
-      }
-
       let message: { id: string; type: string; payload: Record<string, unknown> } | null;
       try {
         message = sendRawProtocolFrame({ id: requestId, type, payload });
@@ -3512,7 +3168,7 @@ export default function App() {
     (workspaceId: string) => {
       const removedWorkspace = workspaces.find((workspace) => workspace.id === workspaceId);
       if (
-        connectionState === 'open' &&
+        appRuntime.connectionState.getSnapshot() === 'open' &&
         removedWorkspace &&
         (!removedWorkspace.backendConnectionId || removedWorkspace.backendConnectionId === activeBackendConnectionIdRef.current)
       ) {
@@ -3561,7 +3217,7 @@ export default function App() {
         setActiveConversationId(conversations.find((conversation) => conversation.workspaceId === next?.id)?.id ?? '');
       }
     },
-    [activeWorkspaceId, connectionState, conversations, settings, workspaces],
+    [activeWorkspaceId, appRuntime, conversations, settings, workspaces],
   );
 
   const renameWorkspace = useCallback((workspaceId: string, name: string) => {
@@ -4773,10 +4429,10 @@ export default function App() {
       workspaceId: context.workspace.id,
       conversationId: context.conversation.id,
     });
-    if (connectionState === 'open') {
+    if (appRuntime.connectionState.getSnapshot() === 'open') {
       requestTerminalStatus(context.workspace, context.conversation);
     }
-  }, [connectionState, getConversationContext, requestTerminalStatus, seedTerminalState]);
+  }, [appRuntime, getConversationContext, requestTerminalStatus, seedTerminalState]);
 
   const requestGitRepositories = useCallback(async (workspacePath?: string, backendConnectionId?: string | null) => {
     const path = workspacePath?.trim() || activeWorkspace?.path || settings.defaultWorkspacePath;
@@ -4986,20 +4642,22 @@ export default function App() {
       return false;
     }
     const { workspace, conversation } = context;
-    setSkillListConversationId(conversation.id);
-    setSkillListVisible(true);
-    setSkillListStatus('loading');
-    setSkillListError('');
+    const requestId = createRequestId('skills');
+    appRuntime.overlays.openSkillPicker({
+      conversationId: conversation.id,
+      requestId,
+      status: 'loading',
+      error: '',
+      items: [],
+    });
     try {
       await startLocalAdapter(workspace, conversation);
     } catch (error) {
       const message = error instanceof Error ? localTurnErrorMessage(error.message) : '本地会话未启动';
-      setSkillListStatus('error');
-      setSkillListError(message);
+      appRuntime.overlays.updateSkillRequest(requestId, { status: 'error', error: message });
       setLastError(message);
       return false;
     }
-    const requestId = createRequestId('skills');
     const timeoutId = setTimeout(() => {
       const pending = pendingSkillListsRef.current.get(requestId);
       if (pending) {
@@ -5024,7 +4682,7 @@ export default function App() {
       return false;
     }
     return true;
-  }, [finishPendingSkillList, getConversationContext, sendLocalMethodRequest, startLocalAdapter]);
+  }, [appRuntime, finishPendingSkillList, getConversationContext, sendLocalMethodRequest, startLocalAdapter]);
 
   const openExperimentalFeatures = useCallback((conversationId = activeConversationRef.current) => {
     const context = getConversationContext(conversationId);
@@ -5616,14 +5274,14 @@ export default function App() {
   }, [applyPermissionPreset]);
 
   const openModelPicker = useCallback((conversationId = activeConversationRef.current) => {
-    setModelPickerPrompt({
+    appRuntime.overlays.openModelPicker({
       target: 'workspace',
       conversationId,
     });
-    if (connectionState === 'open' && modelCatalogStatus !== 'loading') {
+    if (appRuntime.connectionState.getSnapshot() === 'open' && modelCatalogStatus !== 'loading') {
       requestModelCatalog();
     }
-  }, [connectionState, modelCatalogStatus, requestModelCatalog]);
+  }, [appRuntime, modelCatalogStatus, requestModelCatalog]);
 
   const applyModelCommand = useCallback(
     (conversationId: string, args: string[], promptWhenEmpty = true) => {
@@ -5645,7 +5303,7 @@ export default function App() {
 
       if (!model && !reasoningEffort) {
         if (promptWhenEmpty) {
-          setModelCommandPrompt({
+          appRuntime.overlays.openModelCommand({
             conversationId: conversation.id,
             initialValue: modelCommandInitialValue(workspace, settings),
           });
@@ -5673,7 +5331,7 @@ export default function App() {
         conversation.id,
       ));
     },
-    [appendTimeline, getConversationContext, settings, updateWorkspace],
+    [appRuntime, appendTimeline, getConversationContext, settings, updateWorkspace],
   );
 
   const applyWorkspaceModelSelection = useCallback(
@@ -5725,7 +5383,7 @@ export default function App() {
 
   const openThreadCommandPrompt = useCallback((conversationId: string, command: ThreadCommandPromptState['command']) => {
     if (command === 'metadata') {
-      setThreadCommandPrompt({
+      appRuntime.overlays.openThreadCommand({
         conversationId,
         command,
         title: 'Thread metadata',
@@ -5735,7 +5393,7 @@ export default function App() {
       return;
     }
     if (command === 'memory') {
-      setThreadCommandPrompt({
+      appRuntime.overlays.openThreadCommand({
         conversationId,
         command,
         title: 'Thread memory',
@@ -5746,7 +5404,7 @@ export default function App() {
       return;
     }
     if (command === 'shell') {
-      setThreadCommandPrompt({
+      appRuntime.overlays.openThreadCommand({
         conversationId,
         command,
         title: 'Thread shell command',
@@ -5758,7 +5416,7 @@ export default function App() {
       return;
     }
     if (command === 'items') {
-      setThreadCommandPrompt({
+      appRuntime.overlays.openThreadCommand({
         conversationId,
         command,
         title: 'Turn items',
@@ -5768,7 +5426,7 @@ export default function App() {
       return;
     }
     if (command === 'inject') {
-      setThreadCommandPrompt({
+      appRuntime.overlays.openThreadCommand({
         conversationId,
         command,
         title: 'Inject raw items',
@@ -5779,7 +5437,7 @@ export default function App() {
       });
       return;
     }
-    setThreadCommandPrompt({
+    appRuntime.overlays.openThreadCommand({
       conversationId,
       command,
       title: 'Approve denied action',
@@ -5788,7 +5446,7 @@ export default function App() {
       warning: '需要粘贴 guardian denied action 的原始事件 JSON。',
       multiline: true,
     });
-  }, []);
+  }, [appRuntime]);
 
   const openSlashCommandActionPage = useCallback((workspace: WorkspaceRecord, conversation: ConversationRecord, command: string) => {
     navigationRef.current?.navigate('SlashCommandAction', {
@@ -6385,54 +6043,37 @@ export default function App() {
     setActiveConversationId(nextConversation.id);
   }, [activeConversationId, activeWorkspaceId, conversations, hydrated, workspaces]);
 
-  useEffect(() => {
-    if (!hydrated || connectionState !== 'open') {
-      return;
-    }
-    const suspendIdleSessions = () => {
-      const now = Date.now();
-      const activeConversationId = activeConversationRef.current;
-      conversationsRef.current.forEach((conversation) => {
-        if (
-          conversation.id === activeConversationId ||
-          conversation.archived === true ||
-          localConversationStateOf(conversation) !== 'running' ||
-          now - conversation.updatedAt < LOCAL_SESSION_IDLE_SUSPEND_MS ||
-          pendingLocalStartsRef.current.has(conversation.id) ||
-          pendingThreadStartsRef.current.has(conversation.id) ||
-          turnIdsRef.current[conversation.id] ||
-          thinkingConversationsRef.current[conversation.id]
-        ) {
-          return;
-        }
-        const hasPendingThreadAction = [...pendingThreadActionsRef.current.values()].some(
-          (pending) =>
-            pending.conversationId === conversation.id ||
-            pending.sourceConversationId === conversation.id,
-        );
-        if (hasPendingThreadAction) {
-          return;
-        }
-        const hasActiveTerminal = Object.values(appRuntime.terminals.getAllSnapshot()).some(
-          (terminal) =>
-            terminal.conversationId === conversation.id &&
-            (terminal.status === 'starting' || terminal.status === 'running' || terminal.status === 'stopping'),
-        );
-        if (hasActiveTerminal) {
-          return;
-        }
-        const workspace = workspacesRef.current.find((item) => item.id === conversation.workspaceId) ?? null;
-        if (!workspace) {
-          return;
-        }
-        if (sendWorkspaceCommand(workspace, 'codex.local.stop', { force: false }, conversation)) {
-          updateConversation(conversation.id, { localAdapterState: 'stopped' });
-        }
-      });
-    };
-    const intervalId = setInterval(suspendIdleSessions, LOCAL_SESSION_IDLE_SWEEP_MS);
-    return () => clearInterval(intervalId);
-  }, [appRuntime, connectionState, hydrated, sendWorkspaceCommand, updateConversation]);
+  const suspendIdleSessions = useCallback(() => {
+    const now = Date.now();
+    const activeConversationId = activeConversationRef.current;
+    conversationsRef.current.forEach((conversation) => {
+      if (
+        conversation.id === activeConversationId ||
+        conversation.archived === true ||
+        localConversationStateOf(conversation) !== 'running' ||
+        now - conversation.updatedAt < LOCAL_SESSION_IDLE_SUSPEND_MS ||
+        pendingLocalStartsRef.current.has(conversation.id) ||
+        pendingThreadStartsRef.current.has(conversation.id) ||
+        turnIdsRef.current[conversation.id] ||
+        thinkingConversationsRef.current[conversation.id]
+      ) return;
+
+      const hasPendingThreadAction = [...pendingThreadActionsRef.current.values()].some(
+        (pending) => pending.conversationId === conversation.id || pending.sourceConversationId === conversation.id,
+      );
+      if (hasPendingThreadAction) return;
+      const hasActiveTerminal = Object.values(appRuntime.terminals.getAllSnapshot()).some(
+        (terminal) => terminal.conversationId === conversation.id
+          && (terminal.status === 'starting' || terminal.status === 'running' || terminal.status === 'stopping'),
+      );
+      if (hasActiveTerminal) return;
+      const workspace = workspacesRef.current.find((item) => item.id === conversation.workspaceId) ?? null;
+      if (!workspace) return;
+      if (sendWorkspaceCommand(workspace, 'codex.local.stop', { force: false }, conversation)) {
+        updateConversation(conversation.id, { localAdapterState: 'stopped' });
+      }
+    });
+  }, [appRuntime, sendWorkspaceCommand, updateConversation]);
 
   const stopThinking = useCallback((conversationId: string) => {
     const conversation = conversationsRef.current.find((item) => item.id === conversationId) ?? null;
@@ -6650,7 +6291,7 @@ export default function App() {
       const parsed = parseThreadMetadataPrompt(trimmed);
       if (parsed.error) {
         notify.warning('Metadata', parsed.error);
-        return;
+        return false;
       }
       void sendNativeThreadAction(prompt.conversationId, 'metadata', 'thread/metadata/update', (threadId) => ({
         threadId,
@@ -6659,14 +6300,13 @@ export default function App() {
         showResult: true,
         resultTitle: 'Thread metadata updated',
       });
-      setThreadCommandPrompt(null);
-      return;
+      return true;
     }
     if (prompt.command === 'memory') {
       const mode = parseThreadMemoryMode(trimmed);
       if (!mode) {
         notify.warning('Memory', '请输入 on、off 或 reset。');
-        return;
+        return false;
       }
       if (mode === 'reset') {
         void sendTrackedLocalMethod(prompt.conversationId, 'memoryReset', 'memory/reset', null, 'Memory reset');
@@ -6680,13 +6320,12 @@ export default function App() {
           resultDetail: `memory mode: ${mode}`,
         });
       }
-      setThreadCommandPrompt(null);
-      return;
+      return true;
     }
     if (prompt.command === 'shell') {
       if (!trimmed) {
         notify.warning('Shell command', '请输入要执行的 shell command。');
-        return;
+        return false;
       }
       void sendNativeThreadAction(prompt.conversationId, 'shell', 'thread/shellCommand', (threadId) => ({
         threadId,
@@ -6696,13 +6335,12 @@ export default function App() {
         resultTitle: 'Shell command sent',
         resultDetail: trimmed,
       });
-      setThreadCommandPrompt(null);
-      return;
+      return true;
     }
     if (prompt.command === 'items') {
       if (!trimmed) {
         notify.warning('Turn items', '请输入 turn id。');
-        return;
+        return false;
       }
       void sendNativeThreadAction(prompt.conversationId, 'items', 'thread/turns/items/list', (threadId) => ({
         threadId,
@@ -6713,14 +6351,13 @@ export default function App() {
         showResult: true,
         resultTitle: 'Turn items',
       });
-      setThreadCommandPrompt(null);
-      return;
+      return true;
     }
     if (prompt.command === 'inject') {
       const items = parseJsonArrayPrompt(trimmed);
       if (!items) {
         notify.warning('Inject items', '请输入 JSON 数组。');
-        return;
+        return false;
       }
       void sendNativeThreadAction(prompt.conversationId, 'inject', 'thread/inject_items', (threadId) => ({
         threadId,
@@ -6729,8 +6366,7 @@ export default function App() {
         showResult: true,
         resultTitle: 'Items injected',
       });
-      setThreadCommandPrompt(null);
-      return;
+      return true;
     }
     if (prompt.command === 'guardian') {
       try {
@@ -6742,22 +6378,31 @@ export default function App() {
           showResult: true,
           resultTitle: 'Guardian action approved',
         });
-        setThreadCommandPrompt(null);
+        return true;
       } catch {
         notify.warning('Guardian', '请输入有效 JSON。');
+        return false;
       }
     }
+    return false;
   }, [sendNativeThreadAction, sendTrackedLocalMethod]);
+
+  useEffect(() => {
+    const snapshot: AppOverlayContextSnapshot = {
+      settings,
+      modelCatalog,
+      modelCatalogStatus,
+      modelCatalogError,
+      selectedSkills,
+    };
+    appRuntime.routeSnapshots.set(APP_OVERLAY_CONTEXT_SNAPSHOT, snapshot);
+  }, [appRuntime, modelCatalog, modelCatalogError, modelCatalogStatus, selectedSkills, settings]);
 
   useEffect(() => {
     const snapshot: SettingsRouteSnapshot = {
       settings,
       setSettings,
-      connectionState,
-      connectionHealth,
       lastError,
-      connect,
-      closeSocket,
       backendProfiles,
       activeBackendConnectionId,
       updateBackendProfile,
@@ -6771,10 +6416,6 @@ export default function App() {
     addBackendProfile,
     appRuntime,
     backendProfiles,
-    closeSocket,
-    connect,
-    connectionHealth,
-    connectionState,
     lastError,
     removeBackendProfile,
     selectBackendProfile,
@@ -6789,13 +6430,11 @@ export default function App() {
       backendUrl: settings.serverUrl,
       workspacePath: activeWorkspace?.path,
       dataDirectory: serverVersion?.data_dir,
-      connectionState,
     };
     appRuntime.routeSnapshots.set(ABOUT_ROUTE_SNAPSHOT, snapshot);
   }, [
     activeWorkspace?.path,
     appRuntime,
-    connectionState,
     serverVersion?.data_dir,
     serverVersion?.version,
     settings.serverUrl,
@@ -6809,6 +6448,27 @@ export default function App() {
     requestTerminalStatus,
     clearTerminalOutput,
     requestGitDiff,
+  });
+  appRuntime.connection.bindHandlers({
+    onProbe: handleConnectionProbe,
+    onOpen: handleConnectionOpen,
+    onFrame: enqueueSocketFrame,
+    onResetTransport: resetTransportPipeline,
+    onError: setLastError,
+    onClearError: () => setLastError(''),
+  });
+  appRuntime.actions.bind<ConnectionLifecycleActions>(CONNECTION_LIFECYCLE_ACTIONS, {
+    syncWorkspaces: () => void syncWorkspacesFromBackend(),
+    suspendIdleSessions,
+  });
+  appRuntime.actions.bind<AppOverlayActions>(APP_OVERLAY_ACTIONS, {
+    requestModelCatalog,
+    requestSkillList,
+    toggleSelectedSkill,
+    applyDefaultModelSelection,
+    applyWorkspaceModelSelection,
+    applyModelCommand,
+    submitThreadCommandPrompt,
   });
   appRuntime.actions.bind<ChatRuntimeActions>(CHAT_ACTIONS, {
     persistChatDraft: setConversationChatDraft,
@@ -6922,125 +6582,10 @@ export default function App() {
         <KeyboardProvider>
           <HeroUINativeProvider>
             <AppRuntimeProvider runtime={appRuntime}>
-            <ToastBridge />
-            <AppNavigator />
-            <PromptModal
-          visible={Boolean(modelCommandPrompt)}
-          title="切换模型"
-          initialValue={modelCommandPrompt?.initialValue ?? ''}
-          placeholder="gpt-5.5 high"
-          onCancel={() => setModelCommandPrompt(null)}
-          onSubmit={(value) => {
-            const targetConversationId = modelCommandPrompt?.conversationId ?? '';
-            if (modelCommandPrompt?.target === 'settings') {
-              const { model, reasoningEffort, invalidReasoningEffort } = parseModelCommandArgs(value.trim().split(/\s+/));
-              if (invalidReasoningEffort) {
-                notify.warning('无效思考强度', '支持 none、minimal、low、medium、high、xhigh，也支持 max 作为 xhigh 的别名。');
-                return;
-              }
-              applyDefaultModelSelection(model || settings.defaultModel, reasoningEffort ?? settings.defaultReasoningEffort ?? null);
-              setModelCommandPrompt(null);
-              return;
-            }
-            setModelCommandPrompt(null);
-            applyModelCommand(targetConversationId, value.trim().split(/\s+/), false);
-          }}
-        />
-          <PromptModal
-          visible={Boolean(threadCommandPrompt)}
-          title={threadCommandPrompt?.title ?? 'Thread'}
-          initialValue={threadCommandPrompt?.initialValue ?? ''}
-          placeholder={threadCommandPrompt?.placeholder ?? ''}
-          warning={threadCommandPrompt?.warning}
-          multiline={threadCommandPrompt?.multiline}
-          submitTitle="发送"
-          onCancel={() => setThreadCommandPrompt(null)}
-          onSubmit={(value) => {
-            if (threadCommandPrompt) {
-              submitThreadCommandPrompt(threadCommandPrompt, value);
-            }
-          }}
-        />
-          <ThreadInfoModal
-          visible={Boolean(threadInfoModal)}
-          title={threadInfoModal?.title ?? ''}
-          detail={threadInfoModal?.detail ?? ''}
-          raw={threadInfoModal?.raw}
-          onClose={() => setThreadInfoModal(null)}
-        />
-          <SkillPickerModal
-            visible={skillListVisible}
-            workspace={getConversationContext(skillListConversationId)?.workspace ?? activeWorkspace}
-            conversationId={skillListConversationId}
-            status={skillListStatus}
-            error={skillListError}
-            skills={skillListItems}
-            selectedSkills={selectedSkills[skillListConversationId] ?? EMPTY_SKILLS}
-            onRefresh={() => void requestSkillList(skillListConversationId || activeConversationRef.current, true)}
-            onToggleSkill={(skill) => toggleSelectedSkill(skillListConversationId || activeConversationRef.current, skill)}
-            onClose={() => setSkillListVisible(false)}
-          />
-          <ModelPickerModal
-          visible={Boolean(modelPickerPrompt)}
-          title={modelPickerPrompt?.target === 'settings' ? '默认模型' : '当前对话模型'}
-          catalog={modelCatalog}
-          selectedModel={
-            modelPickerPrompt?.target === 'settings'
-              ? settings.defaultModel
-              : (() => {
-                  const context = modelPickerPrompt?.conversationId
-                    ? getConversationContext(modelPickerPrompt.conversationId)
-                    : null;
-                  return context?.workspace.model || settings.defaultModel;
-                })()
-          }
-          selectedReasoningEffort={
-            modelPickerPrompt?.target === 'settings'
-              ? normalizeReasoningEffort(settings.defaultReasoningEffort)
-              : (() => {
-                  const context = modelPickerPrompt?.conversationId
-                    ? getConversationContext(modelPickerPrompt.conversationId)
-                    : null;
-                  return normalizeReasoningEffort(context?.workspace.reasoningEffort ?? settings.defaultReasoningEffort);
-                })()
-          }
-          loading={modelCatalogStatus === 'loading'}
-          error={modelCatalogError}
-          onRefresh={requestModelCatalog}
-          onCancel={() => setModelPickerPrompt(null)}
-          onSubmit={(model, reasoningEffort) => {
-            const prompt = modelPickerPrompt;
-            setModelPickerPrompt(null);
-            if (prompt?.target === 'settings') {
-              applyDefaultModelSelection(model, reasoningEffort);
-              return;
-            }
-            if (prompt?.conversationId) {
-              applyWorkspaceModelSelection(prompt.conversationId, model, reasoningEffort);
-            }
-          }}
-          onManual={() => {
-            const prompt = modelPickerPrompt;
-            setModelPickerPrompt(null);
-            if (prompt?.target === 'settings') {
-              setModelCommandPrompt({
-                conversationId: activeConversationRef.current,
-                initialValue: [settings.defaultModel, normalizeReasoningEffort(settings.defaultReasoningEffort)].filter(Boolean).join(' '),
-                target: 'settings',
-              });
-              return;
-            }
-            if (prompt?.conversationId) {
-              const context = getConversationContext(prompt.conversationId);
-              if (context) {
-                setModelCommandPrompt({
-                  conversationId: context.conversation.id,
-                  initialValue: modelCommandInitialValue(context.workspace, settings),
-                });
-              }
-            }
-          }}
-            />
+              <ToastBridge />
+              <ConnectionRuntimeEffects />
+              <AppNavigator />
+              <AppOverlayHost />
             </AppRuntimeProvider>
           </HeroUINativeProvider>
         </KeyboardProvider>

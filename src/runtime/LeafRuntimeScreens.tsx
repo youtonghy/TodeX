@@ -5,15 +5,24 @@ import { ExperimentalScreen } from '../screens/ExperimentalScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
 import { UsageScreen, type UsageScreenProps } from '../screens/UsageScreen';
 import type { AppScreenProps } from '../navigation/routes';
-import { useAppRuntime, useKeyedStoreValue, useRouteSnapshot } from './appRuntime';
+import {
+  useAppRuntime,
+  useConnectionHealth,
+  useConnectionState,
+  useKeyedStoreValue,
+  useRouteSnapshot,
+} from './appRuntime';
 
 export type ExperimentalRouteSnapshot = Omit<
   ComponentProps<typeof ExperimentalScreen>,
   'navigation' | 'route' | 'workspace' | 'conversation'
 >;
-export type SettingsRouteSnapshot = Omit<ComponentProps<typeof SettingsScreen>, 'navigation' | 'route'>;
+export type SettingsRouteSnapshot = Omit<
+  ComponentProps<typeof SettingsScreen>,
+  'navigation' | 'route' | 'connectionState' | 'connectionHealth' | 'connect' | 'closeSocket'
+>;
 export type UsageRouteSnapshot = UsageScreenProps;
-export type AboutRouteSnapshot = AboutScreenProps;
+export type AboutRouteSnapshot = Omit<AboutScreenProps, 'connectionState'>;
 
 export const EXPERIMENTAL_ROUTE_SNAPSHOT = 'route:experimental';
 export const SETTINGS_ROUTE_SNAPSHOT = 'route:settings';
@@ -38,9 +47,22 @@ export const ExperimentalRouteScreen = memo(function ExperimentalRouteScreen({ n
 });
 
 export const SettingsRouteScreen = memo(function SettingsRouteScreen({ navigation, route }: AppScreenProps<'Settings'>) {
+  const runtime = useAppRuntime();
   const snapshot = useRouteSnapshot<SettingsRouteSnapshot>(SETTINGS_ROUTE_SNAPSHOT);
+  const connectionState = useConnectionState();
+  const connectionHealth = useConnectionHealth();
   if (!snapshot) return null;
-  return <SettingsScreen navigation={navigation} route={route} {...snapshot} />;
+  return (
+    <SettingsScreen
+      navigation={navigation}
+      route={route}
+      {...snapshot}
+      connectionState={connectionState}
+      connectionHealth={connectionHealth}
+      connect={runtime.connection.connect}
+      closeSocket={runtime.connection.disconnect}
+    />
+  );
 });
 
 export const UsageRouteScreen = memo(function UsageRouteScreen() {
@@ -50,5 +72,6 @@ export const UsageRouteScreen = memo(function UsageRouteScreen() {
 
 export const AboutRouteScreen = memo(function AboutRouteScreen() {
   const snapshot = useRouteSnapshot<AboutRouteSnapshot>(ABOUT_ROUTE_SNAPSHOT);
-  return snapshot ? <AboutScreen {...snapshot} /> : null;
+  const connectionState = useConnectionState();
+  return snapshot ? <AboutScreen {...snapshot} connectionState={connectionState} /> : null;
 });
