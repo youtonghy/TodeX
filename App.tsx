@@ -6492,8 +6492,8 @@ export default function App() {
     return (
       <GestureHandlerRootView style={{ flex: 1 }}>
         <SafeAreaProvider>
-          <HeroUINativeProvider>
-            <KeyboardProvider>
+          <KeyboardProvider>
+            <HeroUINativeProvider>
               <Surface variant="transparent" className="flex-1 items-center justify-center bg-background px-8">
                 <StatusBar style={statusBarStyle} />
                 <View className="h-16 w-16 items-center justify-center rounded-3xl bg-accent">
@@ -6503,8 +6503,8 @@ export default function App() {
                 <HeroText type="body-sm" color="muted" className="mt-2 text-center">正在加载设置和工作区…</HeroText>
                 <Spinner size="sm" className="mt-6" />
               </Surface>
-            </KeyboardProvider>
-          </HeroUINativeProvider>
+            </HeroUINativeProvider>
+          </KeyboardProvider>
         </SafeAreaProvider>
       </GestureHandlerRootView>
     );
@@ -6513,9 +6513,9 @@ export default function App() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
-        <HeroUINativeProvider>
-          <ToastBridge />
-          <KeyboardProvider>
+        <KeyboardProvider>
+          <HeroUINativeProvider>
+            <ToastBridge />
             <NavigationContainer ref={navigationRef} theme={navigationTheme}>
             <StatusBar style={statusBarStyle} />
             <Stack.Navigator
@@ -7089,8 +7089,8 @@ export default function App() {
             }
           }}
             />
-          </KeyboardProvider>
-        </HeroUINativeProvider>
+          </HeroUINativeProvider>
+        </KeyboardProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );
