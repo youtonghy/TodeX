@@ -131,8 +131,7 @@ export function BrowserScreen({ client, initialUrl = 'http://127.0.0.1:7345', in
               returnKeyType="go"
               onSubmitEditing={() => void load(draft)}
               accessibilityLabel="本机地址"
-              containerClassName="min-h-11 flex-1 rounded-full"
-              className="px-4 font-mono text-sm"
+              className="min-h-11 flex-1 rounded-full px-4 font-mono text-sm"
             />
             <Button isIconOnly size="md" variant="primary" accessibilityLabel="打开" isDisabled={loading} onPress={() => void load(draft)} className="h-11 w-11 rounded-full">
               <StyledIonicons name={loading ? 'hourglass-outline' : 'arrow-forward'} size={18} className="text-accent-foreground" />

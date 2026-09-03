@@ -480,8 +480,7 @@ export function TerminalScreen({
           autoCorrect={false}
           returnKeyType="send"
           onSubmitEditing={submitInput}
-          containerClassName="min-h-11 flex-1 rounded-2xl"
-          className="font-mono text-sm"
+          className="min-h-11 flex-1 rounded-2xl font-mono text-sm"
         />
         <Button isIconOnly size="md" variant="primary" accessibilityLabel="发送命令" isDisabled={!isRunning || !inputDraft.trim()} onPress={submitInput} className="h-11 w-11 rounded-full">
           <StyledIonicons name="return-down-forward" size={18} className="text-accent-foreground" />

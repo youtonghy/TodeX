@@ -209,7 +209,7 @@ export function ConversationListScreen({
         <SearchField value={query} onChange={setQuery}>
           <SearchField.Group>
             <SearchField.SearchIcon />
-            <SearchField.Input placeholder="搜索对话" containerClassName="min-h-11" />
+            <SearchField.Input placeholder="搜索对话" className="min-h-11" />
             <SearchField.ClearButton />
           </SearchField.Group>
         </SearchField>

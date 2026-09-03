@@ -73,7 +73,7 @@ an explicit entry or byte limit before it reaches React rendering.
 ### Prerequisites
 
 - Node.js 22+
-- npm or pnpm
+- npm
 - Running instance of [`todex-agentd`](../TodeX_backend)
 - Expo Go on your mobile device (or iOS Simulator / Android Emulator)
 
@@ -83,6 +83,18 @@ an explicit entry or byte limit before it reaches React rendering.
 cd TodeX_app
 npm install
 ```
+
+HeroUI Native Pro distributes its component sources through an authenticated
+installer. On a fresh machine, authenticate and fetch those artifacts before
+running the checks or native builds:
+
+```bash
+npx heroui-pro login
+npx heroui-pro install
+```
+
+CI performs the equivalent non-interactive setup with the `HEROUI_KEY` secret.
+The downloaded Pro sources stay in `node_modules` and must not be committed.
 
 Verify dependency alignment with Expo Doctor:
 

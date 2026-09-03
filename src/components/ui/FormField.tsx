@@ -21,10 +21,7 @@ type BaseFieldProps = {
   trailing?: ReactNode;
 };
 
-/**
- * Single-line text field. Layout classes go on `containerClassName` so the
- * Glass theme's frosted background layer stays intact.
- */
+/** Single-line text field. */
 export function FormField({
   label,
   value,
@@ -57,8 +54,7 @@ export function FormField({
           onSubmitEditing={onSubmitEditing}
           autoCapitalize="none"
           autoCorrect={false}
-          containerClassName="min-h-12 flex-1"
-          className={monospace ? 'font-mono text-sm' : undefined}
+          className={`min-h-12 flex-1${monospace ? ' font-mono text-sm' : ''}`}
         />
         {trailing}
       </View>
@@ -89,8 +85,7 @@ export function FormTextArea({
         placeholder={placeholder}
         autoCapitalize="none"
         autoCorrect={false}
-        containerClassName={minHeightClassName}
-        className={monospace ? 'font-mono text-sm' : undefined}
+        className={`${minHeightClassName}${monospace ? ' font-mono text-sm' : ''}`}
       />
       {description ? <Description>{description}</Description> : null}
     </TextField>

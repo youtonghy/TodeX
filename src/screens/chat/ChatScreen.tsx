@@ -1404,8 +1404,7 @@ export function ChatScreen({
                 autoCapitalize="none"
                 autoCorrect={false}
                 multiline={false}
-                containerClassName="h-11 min-h-11 rounded-2xl"
-                className="h-11 min-h-11 text-[15px] leading-5"
+                className="h-11 min-h-11 rounded-2xl text-[15px] leading-5"
               />
               <InputGroup.Suffix className="px-1.5">
                 <Button
@@ -1481,8 +1480,7 @@ export function ChatScreen({
               autoCorrect={false}
               multiline
               textAlignVertical="top"
-              containerClassName="m-4 flex-1 rounded-2xl"
-              className="h-full min-h-0 flex-1 p-4 text-[16px] leading-6"
+              className="m-4 h-full min-h-0 flex-1 rounded-2xl p-4 text-[16px] leading-6"
             />
             <View
               className="flex-row items-center justify-end border-t border-separator px-4 pt-3"
