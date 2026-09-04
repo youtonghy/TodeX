@@ -223,7 +223,7 @@ export function ConversationListScreen({
       <FlatList
         data={visibleConversations}
         keyExtractor={(conversation) => conversation.id}
-        contentContainerClassName="px-4 pb-12 pt-3"
+        contentContainerClassName="w-full max-w-5xl self-center px-4 pb-12 pt-3"
         initialNumToRender={10}
         maxToRenderPerBatch={8}
         updateCellsBatchingPeriod={40}

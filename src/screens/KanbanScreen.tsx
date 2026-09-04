@@ -147,7 +147,7 @@ export function KanbanScreen({ conversations = [], onOpenConversation, onRefresh
           </View>
         )}
         stickySectionHeadersEnabled={false}
-        contentContainerClassName="pb-10 pt-3"
+        contentContainerClassName="w-full max-w-5xl self-center pb-10 pt-3"
         refreshControl={onRefresh ? <RefreshControl refreshing={refreshing} onRefresh={onRefresh} /> : undefined}
         ListHeaderComponent={
           <View className="gap-3 px-4 pb-1">

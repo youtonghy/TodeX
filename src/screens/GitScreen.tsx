@@ -14,6 +14,7 @@ import {
   ScreenScrollView,
   SectionHeader,
   StyledIonicons,
+  useResponsive,
 } from '../components/ui';
 
 export type GitClient = Pick<V2ApiClient, 'scanGit' | 'runGit'>;
@@ -62,6 +63,7 @@ export function GitScreen({
   onRefresh,
   onRun,
 }: GitScreenProps) {
+  const { isLandscapeOrWide } = useResponsive();
   const [activeRepoPath, setActiveRepoPath] = useState('');
   const [message, setMessage] = useState('');
   const [includeUnstaged, setIncludeUnstaged] = useState(true);
@@ -107,6 +109,128 @@ export function GitScreen({
       });
   };
 
+  const repoSummaryCard = activeRepo ? (
+    <Surface className="gap-4 rounded-3xl p-4">
+      <View className="flex-row items-center gap-3">
+        <View className="h-11 w-11 items-center justify-center rounded-2xl bg-default">
+          <StyledIonicons name="git-branch-outline" size={22} className="text-foreground" />
+        </View>
+        <View className="min-w-0 flex-1">
+          <Text type="h5" className="text-foreground" numberOfLines={1}>
+            {activeRepo.name}
+          </Text>
+          <Text type="body-xs" color="muted" numberOfLines={1} className="font-mono">
+            {activeRepo.branch || 'UNINITIALIZED'}
+          </Text>
+        </View>
+        <Chip size="sm" variant="soft" color={activeRepo.initialEligible ? 'warning' : 'default'}>
+          <Chip.Label>{activeRepo.initialEligible ? '未初始化' : `${activeRepo.files.length} 个文件`}</Chip.Label>
+        </Chip>
+      </View>
+      <View className="flex-row gap-3">
+        <Surface variant="secondary" className="flex-1 gap-1 rounded-2xl px-4 py-3">
+          <Text type="body-xs" weight="semibold" className="uppercase tracking-wide text-muted">
+            新增
+          </Text>
+          <View className="flex-row items-baseline gap-0.5">
+            <Text type="h4" className="text-success">
+              +
+            </Text>
+            <NumberValue value={formatChangeCount(activeRepo.additions)} classNames={{ value: 'text-2xl font-semibold text-success' }} />
+          </View>
+        </Surface>
+        <Surface variant="secondary" className="flex-1 gap-1 rounded-2xl px-4 py-3">
+          <Text type="body-xs" weight="semibold" className="uppercase tracking-wide text-muted">
+            删除
+          </Text>
+          <View className="flex-row items-baseline gap-0.5">
+            <Text type="h4" className="text-danger">
+              -
+            </Text>
+            <NumberValue value={formatChangeCount(activeRepo.deletions)} classNames={{ value: 'text-2xl font-semibold text-danger' }} />
+          </View>
+        </Surface>
+      </View>
+    </Surface>
+  ) : null;
+
+  const commitCard = activeRepo ? (
+    <View className="gap-2">
+      <SectionHeader title="提交" />
+      <Surface className="gap-4 rounded-3xl p-4">
+        <FormTextArea
+          value={message}
+          onChangeText={setMessage}
+          placeholder="提交信息（留空将自动生成）"
+          editable={!busy}
+          minHeightClassName="min-h-24"
+        />
+        <ListSection variant="secondary">
+          <ListRow
+            title="包含未暂存的更改"
+            description="提交前自动 git add 工作区改动"
+            icon="layers-outline"
+            suffix={<Switch isDisabled={busy} isSelected={includeUnstaged} onSelectedChange={setIncludeUnstaged} />}
+          />
+        </ListSection>
+        <View className="gap-2">
+          <Button size="lg" variant="primary" isDisabled={busy} onPress={() => run(activeRepo.initialEligible ? 'initial' : 'commit')} className="rounded-2xl">
+            <StyledIonicons name="git-commit-outline" size={18} className="text-accent-foreground" />
+            <Button.Label>{actionLabel(activeRepo.initialEligible ? 'initial' : 'commit')}</Button.Label>
+          </Button>
+          <View className="flex-row gap-2">
+            <Button size="md" variant="secondary" isDisabled={busy || activeRepo.initialEligible} onPress={() => run('commit-push')} className="flex-1 rounded-2xl">
+              <StyledIonicons name="cloud-upload-outline" size={16} className="text-foreground" />
+              <Button.Label>{actionLabel('commit-push')}</Button.Label>
+            </Button>
+            <Button size="md" variant="ghost" isDisabled={busy || activeRepo.initialEligible} onPress={() => run('push')} className="flex-1 rounded-2xl">
+              <StyledIonicons name="arrow-up-circle-outline" size={16} className="text-foreground" />
+              <Button.Label>{actionLabel('push')}</Button.Label>
+            </Button>
+          </View>
+        </View>
+      </Surface>
+    </View>
+  ) : null;
+
+  const filesSection = activeRepo && activeRepo.files.length > 0 ? (
+    <View className="gap-2">
+      <SectionHeader title="变更文件" description={`${activeRepo.files.length} 个`} />
+      <ListSection>
+        {activeRepo.files.slice(0, 80).map((file) => (
+          <ListRow
+            key={file.path}
+            title={file.path}
+            description={`+${formatChangeCount(file.additions)} / -${formatChangeCount(file.deletions)}`}
+            icon="document-text-outline"
+            className="min-h-12 py-2"
+            suffix={
+              <Chip size="sm" variant="soft" color={fileStatusColor(file.status)}>
+                <Chip.Label className="font-mono">{file.status.trim() || '--'}</Chip.Label>
+              </Chip>
+            }
+          />
+        ))}
+      </ListSection>
+      {activeRepo.files.length > 80 ? (
+        <Text type="body-xs" color="muted" className="px-1">
+          还有 {activeRepo.files.length - 80} 个文件未显示
+        </Text>
+      ) : null}
+    </View>
+  ) : null;
+
+  const outputSection = output ? (
+    <View className="gap-2">
+      <SectionHeader title="最近一次 Git 输出" />
+      <Surface variant="secondary" className="rounded-3xl p-4">
+        <Text selectable type="code" className="bg-transparent px-0 text-[11px] leading-[17px] text-foreground">
+          {output}
+        </Text>
+      </Surface>
+    </View>
+  ) : null;
+
   return (
     <Screen>
       <View className="gap-2 px-4 pb-1 pt-3">
@@ -131,10 +255,10 @@ export function GitScreen({
       >
         {repositories.length > 1 ? (
           <View className="gap-2">
-            <SectionHeader title="仓库" description={`${repositories.length} 个`} />
+            <SectionHeader title="仓库" description={`共 ${repositories.length} 个`} />
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerClassName="gap-2">
               {repositories.map((repository) => {
-                const selected = activeRepo?.path === repository.path;
+                const selected = repository.path === (activeRepo?.path ?? '');
                 return (
                   <Chip
                     key={repository.path}
@@ -156,114 +280,25 @@ export function GitScreen({
         ) : null}
 
         {activeRepo ? (
-          <>
-            <Surface className="gap-4 rounded-3xl p-4">
-              <View className="flex-row items-center gap-3">
-                <View className="h-11 w-11 items-center justify-center rounded-2xl bg-default">
-                  <StyledIonicons name="git-branch-outline" size={22} className="text-foreground" />
-                </View>
-                <View className="min-w-0 flex-1">
-                  <Text type="h5" className="text-foreground" numberOfLines={1}>
-                    {activeRepo.name}
-                  </Text>
-                  <Text type="body-xs" color="muted" numberOfLines={1} className="font-mono">
-                    {activeRepo.branch || 'UNINITIALIZED'}
-                  </Text>
-                </View>
-                <Chip size="sm" variant="soft" color={activeRepo.initialEligible ? 'warning' : 'default'}>
-                  <Chip.Label>{activeRepo.initialEligible ? '未初始化' : `${activeRepo.files.length} 个文件`}</Chip.Label>
-                </Chip>
+          isLandscapeOrWide ? (
+            <View className="flex-row items-start gap-4">
+              <View className="flex-1 gap-4">
+                {repoSummaryCard}
+                {commitCard}
+                {outputSection}
               </View>
-              <View className="flex-row gap-3">
-                <Surface variant="secondary" className="flex-1 gap-1 rounded-2xl px-4 py-3">
-                  <Text type="body-xs" weight="semibold" className="uppercase tracking-wide text-muted">
-                    新增
-                  </Text>
-                  <View className="flex-row items-baseline gap-0.5">
-                    <Text type="h4" className="text-success">
-                      +
-                    </Text>
-                    <NumberValue value={formatChangeCount(activeRepo.additions)} classNames={{ value: 'text-2xl font-semibold text-success' }} />
-                  </View>
-                </Surface>
-                <Surface variant="secondary" className="flex-1 gap-1 rounded-2xl px-4 py-3">
-                  <Text type="body-xs" weight="semibold" className="uppercase tracking-wide text-muted">
-                    删除
-                  </Text>
-                  <View className="flex-row items-baseline gap-0.5">
-                    <Text type="h4" className="text-danger">
-                      -
-                    </Text>
-                    <NumberValue value={formatChangeCount(activeRepo.deletions)} classNames={{ value: 'text-2xl font-semibold text-danger' }} />
-                  </View>
-                </Surface>
+              <View className="flex-1 gap-4">
+                {filesSection}
               </View>
-            </Surface>
-
-            {activeRepo.files.length > 0 ? (
-              <View className="gap-2">
-                <SectionHeader title="变更文件" description={`${activeRepo.files.length} 个`} />
-                <ListSection>
-                  {activeRepo.files.slice(0, 80).map((file) => (
-                    <ListRow
-                      key={file.path}
-                      title={file.path}
-                      description={`+${formatChangeCount(file.additions)} / -${formatChangeCount(file.deletions)}`}
-                      icon="document-text-outline"
-                      className="min-h-12 py-2"
-                      suffix={
-                        <Chip size="sm" variant="soft" color={fileStatusColor(file.status)}>
-                          <Chip.Label className="font-mono">{file.status.trim() || '--'}</Chip.Label>
-                        </Chip>
-                      }
-                    />
-                  ))}
-                </ListSection>
-                {activeRepo.files.length > 80 ? (
-                  <Text type="body-xs" color="muted" className="px-1">
-                    还有 {activeRepo.files.length - 80} 个文件未显示
-                  </Text>
-                ) : null}
-              </View>
-            ) : null}
-
-            <View className="gap-2">
-              <SectionHeader title="提交" />
-              <Surface className="gap-4 rounded-3xl p-4">
-                <FormTextArea
-                  value={message}
-                  onChangeText={setMessage}
-                  placeholder="提交信息（留空将自动生成）"
-                  editable={!busy}
-                  minHeightClassName="min-h-24"
-                />
-                <ListSection variant="secondary">
-                  <ListRow
-                    title="包含未暂存的更改"
-                    description="提交前自动 git add 工作区改动"
-                    icon="layers-outline"
-                    suffix={<Switch isDisabled={busy} isSelected={includeUnstaged} onSelectedChange={setIncludeUnstaged} />}
-                  />
-                </ListSection>
-                <View className="gap-2">
-                  <Button size="lg" variant="primary" isDisabled={busy} onPress={() => run(activeRepo.initialEligible ? 'initial' : 'commit')} className="rounded-2xl">
-                    <StyledIonicons name="git-commit-outline" size={18} className="text-accent-foreground" />
-                    <Button.Label>{actionLabel(activeRepo.initialEligible ? 'initial' : 'commit')}</Button.Label>
-                  </Button>
-                  <View className="flex-row gap-2">
-                    <Button size="md" variant="secondary" isDisabled={busy || activeRepo.initialEligible} onPress={() => run('commit-push')} className="flex-1 rounded-2xl">
-                      <StyledIonicons name="cloud-upload-outline" size={16} className="text-foreground" />
-                      <Button.Label>{actionLabel('commit-push')}</Button.Label>
-                    </Button>
-                    <Button size="md" variant="ghost" isDisabled={busy || activeRepo.initialEligible} onPress={() => run('push')} className="flex-1 rounded-2xl">
-                      <StyledIonicons name="arrow-up-circle-outline" size={16} className="text-foreground" />
-                      <Button.Label>{actionLabel('push')}</Button.Label>
-                    </Button>
-                  </View>
-                </View>
-              </Surface>
             </View>
-          </>
+          ) : (
+            <>
+              {repoSummaryCard}
+              {filesSection}
+              {commitCard}
+              {outputSection}
+            </>
+          )
         ) : (
           <EmptyStateView
             icon="git-branch-outline"
@@ -273,16 +308,6 @@ export function GitScreen({
             onAction={refresh}
           />
         )}
-        {output ? (
-          <View className="gap-2">
-            <SectionHeader title="最近一次 Git 输出" />
-            <Surface variant="secondary" className="rounded-3xl p-4">
-              <Text selectable type="code" className="bg-transparent px-0 text-[11px] leading-[17px] text-foreground">
-                {output}
-              </Text>
-            </Surface>
-          </View>
-        ) : null}
       </ScreenScrollView>
     </Screen>
   );

@@ -1077,7 +1077,7 @@ export function ChatScreen({
   return (
     <Screen>
       {lastError ? (
-        <View className="px-3 pt-2">
+        <View className="w-full max-w-5xl self-center px-3 pt-2">
           <InlineNotice status="danger" title="连接异常" description={lastError} />
         </View>
       ) : null}
@@ -1089,7 +1089,7 @@ export function ChatScreen({
           renderItem={renderConversationRenderItem}
           keyExtractor={keyConversationRenderItem}
           className="flex-1"
-          contentContainerClassName="px-2 pb-3 pt-3"
+          contentContainerClassName="w-full max-w-5xl self-center px-2 pb-3 pt-3"
           keyboardShouldPersistTaps="handled"
           ListEmptyComponent={
             <EmptyStateView
@@ -1120,13 +1120,14 @@ export function ChatScreen({
       </View>
 
       <KeyboardStickyView offset={composerKeyboardOffset}>
-        <Surface variant="secondary" className="gap-2 rounded-t-3xl px-3 pt-2.5" style={{ paddingBottom: composerPaddingBottom }}>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            keyboardShouldPersistTaps="handled"
-            contentContainerClassName="items-center gap-2 pr-2"
-          >
+        <Surface variant="secondary" className="items-center rounded-t-3xl px-3 pt-2.5" style={{ paddingBottom: composerPaddingBottom }}>
+          <View className="w-full max-w-5xl gap-2">
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+              contentContainerClassName="items-center gap-2 pr-2"
+            >
             <Button
               size="sm"
               variant="primary"
@@ -1331,8 +1332,9 @@ export function ChatScreen({
               <StyledIonicons name="arrow-up" size={20} className="text-accent-foreground" />
             </Button>
           </View>
-        </Surface>
-      </KeyboardStickyView>
+        </View>
+      </Surface>
+    </KeyboardStickyView>
 
       <Modal
         visible={composerExpanded}
@@ -1344,49 +1346,51 @@ export function ChatScreen({
         onRequestClose={() => setComposerExpanded(false)}
       >
         <Surface variant="secondary" className="flex-1 bg-background" style={{ paddingTop: insets.top }}>
-          <View className="h-14 flex-row items-center justify-between border-b border-separator px-4">
-            <Text type="h5" className="text-foreground">编辑消息</Text>
-            <Button
-              isIconOnly
-              size="md"
-              variant="ghost"
-              accessibilityLabel="退出全屏编辑"
-              onPress={() => setComposerExpanded(false)}
-              className="h-10 w-10 rounded-full"
-            >
-              <StyledIonicons name="contract-outline" size={20} className="text-foreground" />
-            </Button>
-          </View>
-          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} className="flex-1">
-            <TextArea
-              ref={expandedComposerInputRef}
-              value={chatDraft}
-              onChangeText={setChatDraft}
-              onSelectionChange={(event) => setComposerSelection(event.nativeEvent.selection)}
-              onBlur={persistComposerState}
-              onKeyPress={(event) => {
-                if (event.nativeEvent.key === 'Escape' && isThinking) {
-                  stopThinking(route.params.conversationId);
-                }
-              }}
-              selection={composerSelection}
-              placeholder="输入消息，#能力，@文件，/命令"
-              autoCapitalize="none"
-              autoCorrect={false}
-              multiline
-              textAlignVertical="top"
-              className="m-4 h-full min-h-0 flex-1 rounded-2xl p-4 text-[16px] leading-6"
-            />
-            <View
-              className="flex-row items-center justify-end border-t border-separator px-4 pt-3"
-              style={{ paddingBottom: Math.max(insets.bottom, 12) }}
-            >
-              <Button variant="primary" onPress={() => setComposerExpanded(false)} className="min-w-28 rounded-xl">
-                <StyledIonicons name="contract-outline" size={16} className="text-accent-foreground" />
-                <Button.Label>完成</Button.Label>
+          <View className="w-full max-w-5xl self-center flex-1">
+            <View className="h-14 flex-row items-center justify-between border-b border-separator px-4">
+              <Text type="h5" className="text-foreground">编辑消息</Text>
+              <Button
+                isIconOnly
+                size="md"
+                variant="ghost"
+                accessibilityLabel="退出全屏编辑"
+                onPress={() => setComposerExpanded(false)}
+                className="h-10 w-10 rounded-full"
+              >
+                <StyledIonicons name="contract-outline" size={20} className="text-foreground" />
               </Button>
             </View>
-          </KeyboardAvoidingView>
+            <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} className="flex-1">
+              <TextArea
+                ref={expandedComposerInputRef}
+                value={chatDraft}
+                onChangeText={setChatDraft}
+                onSelectionChange={(event) => setComposerSelection(event.nativeEvent.selection)}
+                onBlur={persistComposerState}
+                onKeyPress={(event) => {
+                  if (event.nativeEvent.key === 'Escape' && isThinking) {
+                    stopThinking(route.params.conversationId);
+                  }
+                }}
+                selection={composerSelection}
+                placeholder="输入消息，#能力，@文件，/命令"
+                autoCapitalize="none"
+                autoCorrect={false}
+                multiline
+                textAlignVertical="top"
+                className="m-4 h-full min-h-0 flex-1 rounded-2xl p-4 text-[16px] leading-6"
+              />
+              <View
+                className="flex-row items-center justify-end border-t border-separator px-4 pt-3"
+                style={{ paddingBottom: Math.max(insets.bottom, 12) }}
+              >
+                <Button variant="primary" onPress={() => setComposerExpanded(false)} className="min-w-28 rounded-xl">
+                  <StyledIonicons name="contract-outline" size={16} className="text-accent-foreground" />
+                  <Button.Label>完成</Button.Label>
+                </Button>
+              </View>
+            </KeyboardAvoidingView>
+          </View>
         </Surface>
       </Modal>
 

@@ -3,7 +3,7 @@ import { RefreshControl, ScrollView, View } from 'react-native';
 import { Chip, Surface, Text } from 'heroui-native';
 import { NumberValue, ProgressBar, TrendChip, Widget } from 'heroui-native-pro';
 
-import { EmptyStateView, ListRow, ListSection, Screen, ScreenIntro, ScreenScrollView, SectionHeader, StyledIonicons } from '../components/ui';
+import { EmptyStateView, ListRow, ListSection, Screen, ScreenIntro, ScreenScrollView, SectionHeader, StyledIonicons, useResponsive } from '../components/ui';
 
 export type UsageRecord = {
   id?: string;
@@ -184,6 +184,7 @@ function TokenDistributionChart({ data }: { data: readonly UsageChartDatum[] }) 
 }
 
 export function UsageScreen({ records = [], onRefresh, refreshing = false }: UsageScreenProps) {
+  const { isLandscapeOrWide } = useResponsive();
   const [provider, setProvider] = useState('all');
   const [model, setModel] = useState('all');
   const normalizedRecords = useMemo(
@@ -274,16 +275,25 @@ export function UsageScreen({ records = [], onRefresh, refreshing = false }: Usa
               ) : null}
             </View>
 
-            <View className="gap-2">
+            {isLandscapeOrWide ? (
               <View className="flex-row gap-2">
                 <MetricTile label="总用量" value={totalTokens(totals)} detail={`${filteredRecords.length} 条记录`} icon="bar-chart-outline" tone="accent" />
                 <MetricTile label="输入" value={totals.inputTokens} detail="Input tokens" icon="download-outline" tone="success" />
-              </View>
-              <View className="flex-row gap-2">
                 <MetricTile label="输出" value={totals.outputTokens} detail={`${outputRatio}% 占比`} icon="cloud-upload-outline" tone="default" />
                 <MetricTile label="缓存命中" value={totals.cachedInputTokens} detail={`${cacheRate}% 命中率`} icon="flash-outline" tone="warning" />
               </View>
-            </View>
+            ) : (
+              <View className="gap-2">
+                <View className="flex-row gap-2">
+                  <MetricTile label="总用量" value={totalTokens(totals)} detail={`${filteredRecords.length} 条记录`} icon="bar-chart-outline" tone="accent" />
+                  <MetricTile label="输入" value={totals.inputTokens} detail="Input tokens" icon="download-outline" tone="success" />
+                </View>
+                <View className="flex-row gap-2">
+                  <MetricTile label="输出" value={totals.outputTokens} detail={`${outputRatio}% 占比`} icon="cloud-upload-outline" tone="default" />
+                  <MetricTile label="缓存命中" value={totals.cachedInputTokens} detail={`${cacheRate}% 命中率`} icon="flash-outline" tone="warning" />
+                </View>
+              </View>
+            )}
 
             {chartData.length > 0 ? (
               <Widget>

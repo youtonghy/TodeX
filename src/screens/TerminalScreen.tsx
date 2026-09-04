@@ -472,6 +472,7 @@ export function TerminalScreen({
           $
         </Text>
         <Input
+          containerClassName="flex-1"
           value={inputDraft}
           onChangeText={setInputDraft}
           placeholder={isRunning ? '输入命令' : '启动终端后输入命令'}

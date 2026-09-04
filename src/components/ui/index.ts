@@ -8,3 +8,4 @@ export { AppDialog, ConfirmDialog } from './AppDialog';
 export { FormField, FormTextArea, PathField } from './FormField';
 export { InlineNotice, EmptyStateView, LoadingState, ConnectionChip, useAppToast } from './Feedback';
 export { ToastBridge, notify } from './notify';
+export { useResponsive, type ResponsiveMetrics } from '../../theme/responsive';

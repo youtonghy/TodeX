@@ -122,6 +122,7 @@ export function BrowserScreen({ client, initialUrl = 'http://127.0.0.1:7345', in
               <View className="h-2.5 w-2.5 rounded-full bg-success/70" />
             </View>
             <Input
+              containerClassName="flex-1"
               value={draft}
               onChangeText={setDraft}
               placeholder="http://127.0.0.1:7345"

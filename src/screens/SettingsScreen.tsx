@@ -35,6 +35,7 @@ import {
   SectionHeader,
   StyledIonicons,
   useAppToast,
+  useResponsive,
 } from '../components/ui';
 
 const ENCRYPTION_OPTIONS: Array<{ value: ConnectionSettings['encryptionProtocol']; label: string }> = [
@@ -74,6 +75,7 @@ export function SettingsScreen({
 }) {
   const toast = useAppToast();
   const insets = useSafeAreaInsets();
+  const { isLandscapeOrWide } = useResponsive();
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [pairingScannerVisible, setPairingScannerVisible] = useState(false);
   const [pairingScannerStatus, setPairingScannerStatus] = useState('对准后端配对二维码。');
@@ -198,6 +200,141 @@ export function SettingsScreen({
     })();
   }, [applyPairingText, toast]);
 
+  const backendConfigSection = (
+    <View className="gap-2">
+      <SectionHeader
+        title="后端配置"
+        description={`${backendProfiles.length} 个连接 · 当前 ${activeBackendProfile?.name || '未选择'}`}
+        trailing={
+          <Button
+            size="sm"
+            variant="ghost"
+            onPress={() => {
+              const created = addBackendProfile({ name: `后端 ${backendProfiles.length + 1}` });
+              if (created) toast.success('已新增后端配置', '请填写地址和凭据后再连接。');
+            }}
+            className="rounded-full"
+          >
+            <StyledIonicons name="add" size={16} className="text-foreground" />
+            <Button.Label>新增</Button.Label>
+          </Button>
+        }
+      />
+      <Surface className="gap-4 rounded-3xl p-4">
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerClassName="gap-2">
+          {backendProfiles.map((profile) => {
+            const selected = profile.id === activeBackendConnectionId;
+            return (
+              <Chip
+                key={profile.id}
+                size="md"
+                variant={selected ? 'primary' : 'soft'}
+                color={selected ? 'accent' : 'default'}
+                onPress={() => selectBackendProfile(profile.id)}
+                accessibilityRole="button"
+                accessibilityState={{ selected }}
+              >
+                <Chip.Label numberOfLines={1} className="max-w-[180px]">
+                  {profile.name}
+                </Chip.Label>
+              </Chip>
+            );
+          })}
+        </ScrollView>
+        {activeBackendProfile ? (
+          <FormField
+            label="配置名称"
+            value={activeBackendProfile.name}
+            onChangeText={(value) => updateBackendProfile(activeBackendProfile.id, { name: value })}
+            placeholder="我的后端"
+            trailing={
+              backendProfiles.length > 1 ? (
+                <Button
+                  isIconOnly
+                  variant="danger-soft"
+                  accessibilityLabel="删除后端配置"
+                  onPress={() => setDeleteProfileVisible(true)}
+                  className="h-12 w-12 rounded-xl"
+                >
+                  <StyledIonicons name="trash-outline" size={18} className="text-danger" />
+                </Button>
+              ) : undefined
+            }
+          />
+        ) : null}
+      </Surface>
+    </View>
+  );
+
+  const serverConfigSection = (
+    <View className="gap-2">
+      <SectionHeader title="服务器" />
+      <Surface className="gap-4 rounded-3xl p-4">
+        <FormField
+          label="Server URL"
+          value={settings.serverUrl}
+          onChangeText={(value) => setSettings((current) => ({ ...current, serverUrl: value }))}
+          onBlur={() => setSettings((current) => ({ ...current, serverUrl: normalizeServerUrl(current.serverUrl) }))}
+          placeholder="http://127.0.0.1:7345"
+          keyboardType="url"
+          monospace
+        />
+        <FormField
+          label="Auth token"
+          value={settings.authToken}
+          onChangeText={(value) => setSettings((current) => ({ ...current, authToken: value }))}
+          placeholder="Bearer token"
+          secureTextEntry
+        />
+        <FormField
+          label="Tenant id"
+          value={settings.tenantId}
+          onChangeText={(value) => setSettings((current) => ({ ...current, tenantId: value }))}
+          placeholder="local"
+        />
+      </Surface>
+    </View>
+  );
+
+  const encryptionConfigSection = (
+    <View className="gap-2">
+      <SectionHeader title="传输加密" description="扫描后端配对二维码可一键填写地址、令牌与密钥" />
+      <Surface className="gap-4 rounded-3xl p-4">
+        <Segment
+          value={settings.encryptionProtocol}
+          onValueChange={(value) => setSettings((current) => ({ ...current, encryptionProtocol: value as ConnectionSettings['encryptionProtocol'] }))}
+        >
+          <Segment.Group>
+            <Segment.Indicator />
+            {ENCRYPTION_OPTIONS.map((option) => (
+              <Segment.Item key={option.value} value={option.value} className="flex-1">
+                <Segment.Label>{option.label}</Segment.Label>
+              </Segment.Item>
+            ))}
+          </Segment.Group>
+        </Segment>
+        <FormTextArea
+          label="Key 密钥"
+          value={settings.encryptionPublicKey}
+          onChangeText={(value) => setSettings((current) => ({ ...current, encryptionPublicKey: value }))}
+          placeholder="扫描一键配对二维码后自动填充"
+          minHeightClassName="min-h-24"
+          monospace
+        />
+        <View className="flex-row gap-2">
+          <Button variant="primary" onPress={() => void openPairingScanner()} className="flex-1 rounded-xl">
+            <StyledIonicons name="qr-code-outline" size={16} className="text-accent-foreground" />
+            <Button.Label>扫码配对</Button.Label>
+          </Button>
+          <Button variant="secondary" onPress={() => void pastePairingFromClipboard()} className="flex-1 rounded-xl">
+            <StyledIonicons name="clipboard-outline" size={16} className="text-foreground" />
+            <Button.Label>粘贴配对内容</Button.Label>
+          </Button>
+        </View>
+      </Surface>
+    </View>
+  );
+
   return (
     <Screen>
       <ScreenScrollView>
@@ -251,134 +388,23 @@ export function SettingsScreen({
           </Button>
         </Surface>
 
-        <View className="gap-2">
-          <SectionHeader
-            title="后端配置"
-            description={`${backendProfiles.length} 个连接 · 当前 ${activeBackendProfile?.name || '未选择'}`}
-            trailing={
-              <Button
-                size="sm"
-                variant="ghost"
-                onPress={() => {
-                  const created = addBackendProfile({ name: `后端 ${backendProfiles.length + 1}` });
-                  if (created) toast.success('已新增后端配置', '请填写地址和凭据后再连接。');
-                }}
-                className="rounded-full"
-              >
-                <StyledIonicons name="add" size={16} className="text-foreground" />
-                <Button.Label>新增</Button.Label>
-              </Button>
-            }
-          />
-          <Surface className="gap-4 rounded-3xl p-4">
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerClassName="gap-2">
-              {backendProfiles.map((profile) => {
-                const selected = profile.id === activeBackendConnectionId;
-                return (
-                  <Chip
-                    key={profile.id}
-                    size="md"
-                    variant={selected ? 'primary' : 'soft'}
-                    color={selected ? 'accent' : 'default'}
-                    onPress={() => selectBackendProfile(profile.id)}
-                    accessibilityRole="button"
-                    accessibilityState={{ selected }}
-                  >
-                    <Chip.Label numberOfLines={1} className="max-w-[180px]">
-                      {profile.name}
-                    </Chip.Label>
-                  </Chip>
-                );
-              })}
-            </ScrollView>
-            {activeBackendProfile ? (
-              <FormField
-                label="配置名称"
-                value={activeBackendProfile.name}
-                onChangeText={(value) => updateBackendProfile(activeBackendProfile.id, { name: value })}
-                placeholder="我的后端"
-                trailing={
-                  backendProfiles.length > 1 ? (
-                    <Button
-                      isIconOnly
-                      variant="danger-soft"
-                      accessibilityLabel="删除后端配置"
-                      onPress={() => setDeleteProfileVisible(true)}
-                      className="h-12 w-12 rounded-xl"
-                    >
-                      <StyledIonicons name="trash-outline" size={18} className="text-danger" />
-                    </Button>
-                  ) : undefined
-                }
-              />
-            ) : null}
-          </Surface>
-        </View>
-
-        <View className="gap-2">
-          <SectionHeader title="服务器" />
-          <Surface className="gap-4 rounded-3xl p-4">
-            <FormField
-              label="Server URL"
-              value={settings.serverUrl}
-              onChangeText={(value) => setSettings((current) => ({ ...current, serverUrl: value }))}
-              onBlur={() => setSettings((current) => ({ ...current, serverUrl: normalizeServerUrl(current.serverUrl) }))}
-              placeholder="http://127.0.0.1:7345"
-              keyboardType="url"
-              monospace
-            />
-            <FormField
-              label="Auth token"
-              value={settings.authToken}
-              onChangeText={(value) => setSettings((current) => ({ ...current, authToken: value }))}
-              placeholder="Bearer token"
-              secureTextEntry
-            />
-            <FormField
-              label="Tenant id"
-              value={settings.tenantId}
-              onChangeText={(value) => setSettings((current) => ({ ...current, tenantId: value }))}
-              placeholder="local"
-            />
-          </Surface>
-        </View>
-
-        <View className="gap-2">
-          <SectionHeader title="传输加密" description="扫描后端配对二维码可一键填写地址、令牌与密钥" />
-          <Surface className="gap-4 rounded-3xl p-4">
-            <Segment
-              value={settings.encryptionProtocol}
-              onValueChange={(value) => setSettings((current) => ({ ...current, encryptionProtocol: value as ConnectionSettings['encryptionProtocol'] }))}
-            >
-              <Segment.Group>
-                <Segment.Indicator />
-                {ENCRYPTION_OPTIONS.map((option) => (
-                  <Segment.Item key={option.value} value={option.value} className="flex-1">
-                    <Segment.Label>{option.label}</Segment.Label>
-                  </Segment.Item>
-                ))}
-              </Segment.Group>
-            </Segment>
-            <FormTextArea
-              label="Key 密钥"
-              value={settings.encryptionPublicKey}
-              onChangeText={(value) => setSettings((current) => ({ ...current, encryptionPublicKey: value }))}
-              placeholder="扫描一键配对二维码后自动填充"
-              minHeightClassName="min-h-24"
-              monospace
-            />
-            <View className="flex-row gap-2">
-              <Button variant="primary" onPress={() => void openPairingScanner()} className="flex-1 rounded-xl">
-                <StyledIonicons name="qr-code-outline" size={16} className="text-accent-foreground" />
-                <Button.Label>扫码配对</Button.Label>
-              </Button>
-              <Button variant="secondary" onPress={() => void pastePairingFromClipboard()} className="flex-1 rounded-xl">
-                <StyledIonicons name="clipboard-outline" size={16} className="text-foreground" />
-                <Button.Label>粘贴配对内容</Button.Label>
-              </Button>
+        {isLandscapeOrWide ? (
+          <View className="flex-row items-start gap-4">
+            <View className="flex-1 gap-4">
+              {backendConfigSection}
             </View>
-          </Surface>
-        </View>
+            <View className="flex-1 gap-4">
+              {serverConfigSection}
+              {encryptionConfigSection}
+            </View>
+          </View>
+        ) : (
+          <>
+            {backendConfigSection}
+            {serverConfigSection}
+            {encryptionConfigSection}
+          </>
+        )}
       </ScreenScrollView>
 
       <ConfirmDialog
@@ -406,8 +432,8 @@ export function SettingsScreen({
               <StyledIonicons name="close" size={20} className="text-foreground" />
             </Button>
           </View>
-          <View className="absolute inset-x-0 bottom-0 px-4" style={{ paddingBottom: insets.bottom + 16 }}>
-            <Surface className="gap-3 rounded-3xl p-4">
+          <View className="absolute inset-x-0 bottom-0 items-center px-4" style={{ paddingBottom: insets.bottom + 16 }}>
+            <Surface className="w-full max-w-lg gap-3 rounded-3xl p-4">
               <View className="flex-row items-center gap-3">
                 <View className="h-10 w-10 items-center justify-center rounded-2xl bg-accent/15">
                   <StyledIonicons name="qr-code-outline" size={20} className="text-accent" />

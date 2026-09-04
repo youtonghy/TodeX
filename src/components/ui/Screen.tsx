@@ -10,17 +10,24 @@ export function Screen({ children, className = '' }: { children: ReactNode; clas
 /**
  * Standard scrolling page body with consistent horizontal padding and a
  * comfortable bottom inset so content clears the home indicator.
+ * Automatically centers and constrains maximum width on large/landscape screens.
  */
 export function ScreenScrollView({
   children,
   contentContainerClassName = '',
+  centerOnWide = true,
   ...props
-}: ScrollViewProps & { children: ReactNode; contentContainerClassName?: string }) {
+}: ScrollViewProps & {
+  children: ReactNode;
+  contentContainerClassName?: string;
+  centerOnWide?: boolean;
+}) {
+  const containerClass = `${centerOnWide ? 'w-full max-w-5xl self-center ' : ''}gap-4 px-4 pb-10 pt-3 ${contentContainerClassName}`;
   return (
     <ScrollView
       keyboardShouldPersistTaps="handled"
       contentInsetAdjustmentBehavior="automatic"
-      contentContainerClassName={`gap-4 px-4 pb-10 pt-3 ${contentContainerClassName}`}
+      contentContainerClassName={containerClass}
       {...props}
     >
       {children}

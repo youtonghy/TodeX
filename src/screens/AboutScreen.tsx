@@ -2,7 +2,7 @@ import { View } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { Button, Chip, Surface, Text } from 'heroui-native';
 
-import { ConnectionChip, ListRow, ListSection, Screen, ScreenScrollView, SectionHeader, StyledIonicons, useAppToast } from '../components/ui';
+import { ConnectionChip, ListRow, ListSection, Screen, ScreenScrollView, SectionHeader, StyledIonicons, useAppToast, useResponsive } from '../components/ui';
 
 export type AboutScreenProps = {
   appVersion?: string;
@@ -26,6 +26,7 @@ export function AboutScreen({
   onCopy,
 }: AboutScreenProps) {
   const toast = useAppToast();
+  const { isLandscapeOrWide } = useResponsive();
 
   const copy = async (value: string, label: string) => {
     if (!value) return;
@@ -42,6 +43,53 @@ export function AboutScreen({
     <Button isIconOnly size="sm" variant="ghost" accessibilityLabel={`复制${label}`} onPress={() => void copy(value, label)} className="h-8 w-8 rounded-full">
       <StyledIonicons name="copy-outline" size={15} className="text-muted" />
     </Button>
+  );
+
+  const runtimeSection = (
+    <View className="gap-2">
+      <SectionHeader title="运行信息" />
+      <ListSection>
+        <ListRow icon="phone-portrait-outline" title="移动端版本" suffix={<Text type="body-sm" weight="medium" className="font-mono text-foreground">{appVersion}</Text>} />
+        <ListRow icon="server-outline" title="后端版本" suffix={<Text type="body-sm" weight="medium" className="font-mono text-foreground">{backendVersion}</Text>} />
+        <ListRow
+          icon="link-outline"
+          title="后端地址"
+          description={backendUrl || '未配置'}
+          descriptionLines={2}
+          suffix={backendUrl ? copyButton(backendUrl, '后端地址') : undefined}
+        />
+        <ListRow
+          icon="folder-open-outline"
+          title="工作区"
+          description={workspacePath || '未选择'}
+          descriptionLines={2}
+          suffix={workspacePath ? copyButton(workspacePath, '工作区') : undefined}
+        />
+        <ListRow
+          icon="file-tray-full-outline"
+          title="数据目录"
+          description={dataDirectory || '未获取'}
+          descriptionLines={2}
+          suffix={dataDirectory ? copyButton(dataDirectory, '数据目录') : undefined}
+        />
+      </ListSection>
+    </View>
+  );
+
+  const projectSection = (
+    <View className="gap-2">
+      <SectionHeader title="项目" />
+      <ListSection>
+        <ListRow
+          icon="logo-github"
+          title="项目地址"
+          description={projectUrl}
+          descriptionLines={2}
+          onPress={() => void copy(projectUrl, '项目地址')}
+          suffix={copyButton(projectUrl, '项目地址')}
+        />
+      </ListSection>
+    </View>
   );
 
   return (
@@ -69,48 +117,21 @@ export function AboutScreen({
           <ConnectionChip state={connectionState} size="md" />
         </Surface>
 
-        <View className="gap-2">
-          <SectionHeader title="运行信息" />
-          <ListSection>
-            <ListRow icon="phone-portrait-outline" title="移动端版本" suffix={<Text type="body-sm" weight="medium" className="font-mono text-foreground">{appVersion}</Text>} />
-            <ListRow icon="server-outline" title="后端版本" suffix={<Text type="body-sm" weight="medium" className="font-mono text-foreground">{backendVersion}</Text>} />
-            <ListRow
-              icon="link-outline"
-              title="后端地址"
-              description={backendUrl || '未配置'}
-              descriptionLines={2}
-              suffix={backendUrl ? copyButton(backendUrl, '后端地址') : undefined}
-            />
-            <ListRow
-              icon="folder-open-outline"
-              title="工作区"
-              description={workspacePath || '未选择'}
-              descriptionLines={2}
-              suffix={workspacePath ? copyButton(workspacePath, '工作区') : undefined}
-            />
-            <ListRow
-              icon="file-tray-full-outline"
-              title="数据目录"
-              description={dataDirectory || '未获取'}
-              descriptionLines={2}
-              suffix={dataDirectory ? copyButton(dataDirectory, '数据目录') : undefined}
-            />
-          </ListSection>
-        </View>
-
-        <View className="gap-2">
-          <SectionHeader title="项目" />
-          <ListSection>
-            <ListRow
-              icon="logo-github"
-              title="项目地址"
-              description={projectUrl}
-              descriptionLines={2}
-              onPress={() => void copy(projectUrl, '项目地址')}
-              suffix={copyButton(projectUrl, '项目地址')}
-            />
-          </ListSection>
-        </View>
+        {isLandscapeOrWide ? (
+          <View className="flex-row items-start gap-4">
+            <View className="flex-1">
+              {runtimeSection}
+            </View>
+            <View className="flex-1">
+              {projectSection}
+            </View>
+          </View>
+        ) : (
+          <>
+            {runtimeSection}
+            {projectSection}
+          </>
+        )}
       </ScreenScrollView>
     </Screen>
   );

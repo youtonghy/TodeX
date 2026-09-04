@@ -39,10 +39,11 @@ export function FormField({
   trailing,
 }: BaseFieldProps) {
   return (
-    <TextField isDisabled={!editable} className="gap-1.5">
+    <TextField isDisabled={!editable} className="w-full gap-1.5">
       {label ? <Label>{label}</Label> : null}
-      <View className="flex-row items-center gap-2">
+      <View className="w-full flex-row items-center gap-2">
         <Input
+          containerClassName="flex-1"
           value={value}
           onChangeText={onChangeText}
           onBlur={onBlur}
@@ -76,9 +77,10 @@ export function FormTextArea({
   monospace = false,
 }: Omit<BaseFieldProps, 'secureTextEntry' | 'trailing'> & { minHeightClassName?: string }) {
   return (
-    <TextField isDisabled={!editable} className="gap-1.5">
+    <TextField isDisabled={!editable} className="w-full gap-1.5">
       {label ? <Label>{label}</Label> : null}
       <TextArea
+        containerClassName="w-full"
         value={value}
         onChangeText={onChangeText}
         onBlur={onBlur}

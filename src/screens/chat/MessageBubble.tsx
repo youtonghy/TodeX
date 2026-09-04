@@ -12,7 +12,7 @@ import {
   type MobileContextUsage,
   type TimelineEntry,
 } from '../../lib/appCore';
-import { AppDialog, StyledIonicons, useAppToast } from '../../components/ui';
+import { AppDialog, StyledIonicons, useAppToast, useResponsive } from '../../components/ui';
 
 function ApprovalActions({
   request,
@@ -129,6 +129,7 @@ export const MessageBubble = memo(function MessageBubble({
   streaming?: boolean;
 }) {
   const toast = useAppToast();
+  const { isLandscapeOrWide } = useResponsive();
   const [usageVisible, setUsageVisible] = useState(false);
   const outgoing = entry.kind === 'outgoing';
   const system = entry.kind === 'system';
@@ -198,7 +199,7 @@ export const MessageBubble = memo(function MessageBubble({
 
   return (
     <View className={`mb-3 px-1 ${outgoing ? 'items-end' : 'items-start'}`}>
-      <Pressable onLongPress={copyText} delayLongPress={360} className="max-w-[88%]">
+      <Pressable onLongPress={copyText} delayLongPress={360} className={isLandscapeOrWide ? 'max-w-[72%]' : 'max-w-[88%]'}>
         {outgoing ? (
           <View className="gap-1 rounded-3xl rounded-br-lg bg-accent px-4 py-2.5">
             <Text selectable type="body" className="leading-6 text-accent-foreground">
