@@ -176,6 +176,20 @@ export class RuntimeActionRegistry {
         methods.set(property, method);
         return method;
       },
+      ownKeys: () => {
+        const implementation = this.implementations.get(namespace);
+        return implementation ? Reflect.ownKeys(implementation) : [];
+      },
+      getOwnPropertyDescriptor: (_target, property) => {
+        const implementation = this.implementations.get(namespace);
+        if (!implementation || !Object.prototype.hasOwnProperty.call(implementation, property)) {
+          return undefined;
+        }
+        return {
+          configurable: true,
+          enumerable: true,
+        };
+      },
     });
     this.facades.set(namespace, facade);
     return facade as Actions;

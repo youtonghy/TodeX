@@ -100,6 +100,25 @@ test('runtime action facades stay stable while dispatching to the latest impleme
   assert.equal(submit('two'), 'second:two');
 });
 
+test('runtime action facades remain callable when spread into component props', () => {
+  const registry = new RuntimeActionRegistry();
+  const actions = registry.get('workspaces');
+  registry.bind('workspaces', {
+    selectWorkspace: (workspaceId) => `first:${workspaceId}`,
+    openSettings: () => 'settings',
+  });
+
+  const props = { ...actions };
+  assert.deepEqual(Object.keys(props), ['selectWorkspace', 'openSettings']);
+  assert.equal(props.selectWorkspace('workspace-1'), 'first:workspace-1');
+  assert.equal(props.openSettings(), 'settings');
+
+  registry.bind('workspaces', {
+    selectWorkspace: (workspaceId) => `second:${workspaceId}`,
+  });
+  assert.equal(props.selectWorkspace('workspace-2'), 'second:workspace-2');
+});
+
 test('terminal output retention applies entry and character limits from the newest entries', () => {
   const entries = [
     { id: '1', text: '1234' },
