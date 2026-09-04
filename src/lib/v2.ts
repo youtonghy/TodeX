@@ -48,6 +48,7 @@ export type ProviderCapabilities = {
   modelSelection: boolean;
   /** Missing on older backends; clients must treat absence as unsupported. */
   imageInput?: boolean;
+  imageInputMode?: 'always' | 'model' | 'profile' | 'none';
 };
 
 export type ProviderDescriptor = {
@@ -108,6 +109,7 @@ export type ProviderModelDescriptor = {
   supportedReasoningEfforts: string[];
   defaultReasoningEffort?: string;
   contextWindow?: number;
+  imageInput?: boolean;
 };
 
 export type ProviderModelsResponse = {
@@ -115,6 +117,15 @@ export type ProviderModelsResponse = {
   models: ProviderModelDescriptor[];
   source: string;
   fetchedAt: string;
+};
+
+export type ProviderImageInputCapability = {
+  provider: ProviderKind;
+  profile?: string;
+  model?: string;
+  imageInput: boolean;
+  source: string;
+  reason?: string;
 };
 
 export type ProviderCommandDescriptor = {
@@ -354,6 +365,18 @@ export class V2ApiClient {
   async listProviderModels(provider: ProviderKind, workspace: string): Promise<ProviderModelsResponse> {
     const query = new URLSearchParams({ provider, workspace });
     return this.request(`/v2/providers/models?${query}`);
+  }
+
+  async getProviderImageInput(
+    provider: ProviderKind,
+    workspace: string,
+    profile?: string,
+    model?: string,
+  ): Promise<ProviderImageInputCapability> {
+    const query = new URLSearchParams({ provider, workspace });
+    if (profile) query.set('profile', profile);
+    if (model) query.set('model', model);
+    return this.request(`/v2/providers/image-input?${query}`);
   }
 
   async listProviderCommands(provider: ProviderKind, workspace: string): Promise<ProviderCommandsResponse> {

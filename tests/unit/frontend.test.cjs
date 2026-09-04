@@ -97,6 +97,25 @@ test('v2 API client sends bearer auth and JSON requests', async () => {
   assert.equal(requests[0].init.headers.get('Content-Type'), 'application/json');
 });
 
+test('v2 API client requests profile-scoped image capability', async () => {
+  const requests = [];
+  const client = new v2.V2ApiClient({
+    serverUrl: 'http://127.0.0.1:7345',
+    fetchImpl: async (url) => {
+      requests.push(url);
+      return new Response(JSON.stringify({
+        provider: 'acp',
+        profile: 'gemini',
+        imageInput: true,
+        source: 'profile',
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    },
+  });
+  const result = await client.getProviderImageInput('acp', '/workspace/app', 'gemini', 'vision');
+  assert.equal(result.imageInput, true);
+  assert.match(requests[0], /\/v2\/providers\/image-input\?provider=acp&workspace=%2Fworkspace%2Fapp&profile=gemini&model=vision/);
+});
+
 test('v2 API client preserves structured backend request errors', async () => {
   const client = new v2.V2ApiClient({
     serverUrl: 'http://127.0.0.1:7345',
