@@ -31,13 +31,32 @@ export type PromptSkillRef = {
   name?: string;
 };
 
+export type PromptContentRef =
+  | { type: 'text'; text: string }
+  | { type: 'localImage'; path: string }
+  | { type: 'image'; data: string; mimeType: string }
+  | { type: 'file'; path: string; name?: string };
+
+export type ProviderCapabilities = {
+  nativeResume: boolean;
+  cancel: boolean;
+  permissions: boolean;
+  toolEvents: boolean;
+  nativeSkills: boolean;
+  nativeMcp: boolean;
+  managedMcp: boolean;
+  modelSelection: boolean;
+  /** Missing on older backends; clients must treat absence as unsupported. */
+  imageInput?: boolean;
+};
+
 export type ProviderDescriptor = {
   id: ProviderKind;
   displayName: string;
   available: boolean;
   unavailableReason?: string;
   profiles: string[];
-  capabilities: Record<string, boolean>;
+  capabilities: ProviderCapabilities;
   models: ProviderModelDescriptor[];
 };
 
@@ -417,11 +436,13 @@ export class V2ApiClient {
     model?: string,
     skills?: PromptSkillRef[],
     reasoningEffort?: string,
+    content?: PromptContentRef[],
   ): Promise<{ conversationId: string; turnId: string }> {
     const body: Record<string, unknown> = { text };
     if (model) body.model = model;
     if (skills?.length) body.skills = skills;
     if (reasoningEffort?.trim()) body.reasoningEffort = reasoningEffort.trim();
+    if (content?.length) body.content = content;
     return this.request(`/v2/conversations/${encodeURIComponent(id)}/prompt`, {
       method: 'POST', body: JSON.stringify(body),
     });
@@ -635,13 +656,21 @@ export class V2ConversationSocket {
     this.send('conversation.subscribe', { conversationId, afterSequence, limit });
   }
 
-  sendPrompt(conversationId: string, text: string, model?: string, skills?: PromptSkillRef[], reasoningEffort?: string): void {
+  sendPrompt(
+    conversationId: string,
+    text: string,
+    model?: string,
+    skills?: PromptSkillRef[],
+    reasoningEffort?: string,
+    content?: PromptContentRef[],
+  ): void {
     this.send('conversation.prompt', {
       conversationId,
       text,
       ...(model ? { model } : {}),
       ...(reasoningEffort ? { reasoningEffort } : {}),
       ...(skills?.length ? { skills } : {}),
+      ...(content?.length ? { content } : {}),
     });
   }
   cancel(conversationId: string): void { this.send('conversation.cancel', { conversationId }); }

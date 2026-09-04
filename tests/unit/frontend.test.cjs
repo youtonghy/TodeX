@@ -175,6 +175,32 @@ test('v2 socket reconnects subscriptions from the latest sequence', () => {
   client.close();
 });
 
+test('v2 socket serializes typed prompt images with the camelCase MIME field', () => {
+  const sockets = [];
+  class FakeSocket {
+    static OPEN = 1;
+    readyState = 1;
+    sent = [];
+    constructor() { sockets.push(this); }
+    send(value) { this.sent.push(JSON.parse(value)); }
+    close() {}
+  }
+  const client = new v2.V2ConversationSocket({ serverUrl: 'http://127.0.0.1:7345', WebSocketImpl: FakeSocket });
+  client.connect();
+  sockets[0].onopen();
+  client.sendPrompt('c1', 'describe this', undefined, undefined, undefined, [
+    { type: 'image', data: 'cG5n', mimeType: 'image/png' },
+  ]);
+
+  const frame = sockets[0].sent.at(-1);
+  assert.equal(frame.type, 'conversation.prompt');
+  assert.deepEqual(frame.payload.content, [
+    { type: 'image', data: 'cG5n', mimeType: 'image/png' },
+  ]);
+  assert.equal('mime_type' in frame.payload.content[0], false);
+  client.close();
+});
+
 test('normalizes Codex reasoning effort aliases', () => {
   assert.equal(todex.normalizeReasoningEffort('high'), 'high');
   assert.equal(todex.normalizeReasoningEffort('extra-high'), 'xhigh');
