@@ -222,6 +222,7 @@ export type GitRepositorySummary = {
   files: GitFileChange[];
   additions: number;
   deletions: number;
+  ahead?: number;
   initialEligible: boolean;
   error?: string;
   filesTruncated?: boolean;

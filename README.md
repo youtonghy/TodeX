@@ -197,9 +197,13 @@ npm run check:protocol
 
 Android APK releases are created manually from **Actions > Release Android APK**.
 Enter a stable semantic version such as `1.2.3`; the workflow validates the app,
-runs EAS Build locally on the GitHub runner, and publishes the APK plus its SHA-256
-checksum to the `v1.2.3` GitHub Release. Android's internal version code is assigned
-from the workflow run number so releases remain upgradeable from older CI builds.
+injects that version into the native package metadata and About screen, runs EAS
+Build locally on the GitHub runner, and publishes the APK plus its SHA-256 checksum
+to the `v1.2.3` GitHub Release. Android's internal version code is assigned from the
+workflow run number so releases remain upgradeable from older CI builds.
+
+Development builds display `DEV0.0.0`; package manifests retain the valid placeholder
+version `0.0.0` until the release workflow injects a publishable version.
 
 The repository must define an `EXPO_TOKEN` Actions secret, and the linked Expo
 project must already have a permanent Android keystore. EAS is used for project

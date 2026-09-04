@@ -115,6 +115,11 @@ jobs:
           npm test
           npm run check:protocol
 
+      - name: Verify injected version
+        shell: bash
+        run: |
+          node -e 'const base = require("./app.json").expo; const resolved = require("./app.config")({ config: base }); if (resolved.version !== process.env.TODEX_BUILD_VERSION || resolved.extra?.todexBuildVersion !== process.env.TODEX_BUILD_VERSION) { throw new Error(`Version injection failed: ${JSON.stringify({ version: resolved.version, displayVersion: resolved.extra?.todexBuildVersion })}`); }'
+
       - name: Install EAS CLI
         run: npm install --global eas-cli@${EAS_CLI_VERSION}
 

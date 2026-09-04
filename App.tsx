@@ -10,6 +10,7 @@ import {
 } from 'react';
 import { Alert, AppState, View } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
+import Constants from 'expo-constants';
 import { StatusBar } from 'expo-status-bar';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { KeyboardProvider } from 'react-native-keyboard-controller';
@@ -310,6 +311,7 @@ import {
   type ToolRuntimeActions,
 } from './src/runtime/ToolRuntimeScreens';
 
+const APP_VERSION = Constants.expoConfig?.extra?.todexBuildVersion || 'DEV0.0.0';
 const EMPTY_ATTACHMENTS = Object.freeze([]) as unknown as ComposerAttachmentDraft[];
 const EMPTY_SKILLS = Object.freeze([]) as unknown as SelectedSkillAttachment[];
 
@@ -6430,7 +6432,7 @@ export default function App() {
 
   useEffect(() => {
     const snapshot: AboutRouteSnapshot = {
-      appVersion: '1.0.0',
+      appVersion: APP_VERSION,
       backendVersion: serverVersion?.version,
       backendUrl: settings.serverUrl,
       workspacePath: activeWorkspace?.path,

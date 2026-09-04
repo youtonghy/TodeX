@@ -175,8 +175,12 @@ npm run check:protocol
 
 Android APK 通过 **Actions > Release Android APK** 手动发布。输入 `1.2.3`
 这样的稳定语义版本后，工作流会先验证应用，再在 GitHub Runner 上执行
-EAS 本地构建，最后把 APK 和 SHA-256 校验文件发布到 `v1.2.3` GitHub Release。
+EAS 本地构建。输入版本会同时注入原生安装包元数据和“关于”页面，最后把 APK
+和 SHA-256 校验文件发布到 `v1.2.3` GitHub Release。
 Android 内部版本号根据工作流运行序号分配，确保可以从旧 CI 安装包继续覆盖升级。
+
+开发构建显示 `DEV0.0.0`；包清单保留格式合法的 `0.0.0` 占位版本，直到发布
+工作流注入可发布的正式版本。
 
 仓库必须配置 `EXPO_TOKEN` Actions Secret，关联的 Expo 项目也必须已经保存固定的
 Android keystore。EAS 仅负责项目认证和读取托管签名凭据，编译不会使用 EAS 云端构建

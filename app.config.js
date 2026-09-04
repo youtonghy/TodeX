@@ -8,7 +8,8 @@ function readPositiveInteger(value) {
 }
 
 module.exports = ({ config }) => {
-  const buildVersion = process.env.TODEX_BUILD_VERSION;
+  const buildVersion = process.env.TODEX_BUILD_VERSION?.trim();
+  const displayVersion = buildVersion || 'DEV0.0.0';
   const androidVersionCode = readPositiveInteger(
     process.env.TODEX_ANDROID_VERSION_CODE,
   );
@@ -16,6 +17,10 @@ module.exports = ({ config }) => {
   return {
     ...config,
     version: buildVersion || config.version,
+    extra: {
+      ...config.extra,
+      todexBuildVersion: displayVersion,
+    },
     ios: {
       ...config.ios,
       ...(buildVersion ? { buildNumber: buildVersion } : {}),
