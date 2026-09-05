@@ -192,6 +192,10 @@ export function providerCapabilityMatrix(capabilities: ProviderCapabilities) {
   } as const;
 }
 
+export function supportsControlAction(capabilities: ProviderCapabilities, action: ConversationControlAction): boolean {
+  return providerCapabilityMatrix(capabilities).controlActions.includes(action);
+}
+
 export type ProviderDescriptor = {
   id: ProviderKind;
   displayName: string;
