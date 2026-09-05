@@ -296,6 +296,29 @@ export type ConversationEvent = {
   payload: unknown;
 };
 
+export type AgentEventType =
+  | 'session.started' | 'session.resumed' | 'turn.started' | 'turn.completed' | 'turn.cancelled' | 'turn.failed'
+  | 'assistant.delta' | 'reasoning.delta' | 'tool.started' | 'tool.arguments.delta' | 'tool.awaitingApproval'
+  | 'tool.completed' | 'tool.failed' | 'terminal.started' | 'terminal.output' | 'terminal.exited'
+  | 'compaction.started' | 'compaction.completed' | 'subagent.started' | 'subagent.completed' | 'protocol.error';
+
+export type AgentEventEnvelope = {
+  schemaVersion: number;
+  eventId: string;
+  sequence: number;
+  conversationId: string;
+  threadId?: string;
+  turnId?: string;
+  itemId?: string;
+  parentItemId?: string;
+  provider?: ProviderKind | string;
+  rawType: string;
+  type: AgentEventType | string;
+  timestamp: string;
+  payload: unknown;
+  raw?: unknown;
+};
+
 export function normalizeConversationEvent(value: unknown): ConversationEvent | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
@@ -306,6 +329,28 @@ export function normalizeConversationEvent(value: unknown): ConversationEvent | 
   const time = typeof record.time === 'string' ? record.time : typeof record.createdAt === 'string' ? record.createdAt : '';
   if (!eventId || !conversationId || !type || sequence < 0 || !time) return null;
   return { schemaVersion: typeof record.schemaVersion === 'number' ? record.schemaVersion : 1, eventId, conversationId, sequence, time, type, payload: record.payload ?? {} };
+}
+
+export function toAgentEventEnvelope(event: ConversationEvent, provider?: ProviderKind | string): AgentEventEnvelope {
+  const payload = event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload) ? event.payload as Record<string, unknown> : {};
+  const stringValue = (key: string): string | undefined => typeof payload[key] === 'string' ? payload[key] as string : undefined;
+  const rawType = event.type;
+  return {
+    schemaVersion: event.schemaVersion,
+    eventId: event.eventId,
+    sequence: event.sequence,
+    conversationId: event.conversationId,
+    threadId: stringValue('threadId') ?? stringValue('thread_id'),
+    turnId: stringValue('turnId') ?? stringValue('turn_id'),
+    itemId: stringValue('itemId') ?? stringValue('item_id'),
+    parentItemId: stringValue('parentItemId') ?? stringValue('parent_item_id'),
+    ...(provider ? { provider } : {}),
+    rawType,
+    type: rawType,
+    timestamp: event.time,
+    payload: event.payload,
+    raw: event.payload,
+  };
 }
 
 export type ConversationReplay = {
