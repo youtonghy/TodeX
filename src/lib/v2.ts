@@ -73,7 +73,10 @@ export function resolveConfigValue<T>(
 }
 
 export type AgentCompletionReason = 'completed' | 'cancelled' | 'interrupted' | 'failed' | 'approvalRequired' | 'contextExhausted' | 'rateLimited' | 'connectionLost' | 'providerShutdown';
-export type ConversationControlAction = 'cancel' | 'interrupt' | 'queue';
+export type ConversationControlAction = 'cancel' | 'interrupt' | 'steer' | 'followUp' | 'retry' | 'resume' | 'fork' | 'stop' | 'queue';
+export function conversationControlMethod(action: ConversationControlAction): string {
+  return action.replace(/[A-Z]/g, (letter) => `.${letter.toLowerCase()}`);
+}
 export type ContextCompactionStatus = 'idle' | 'recommended' | 'running' | 'completed' | 'failed';
 export type ContextCompactionState = {
   status: ContextCompactionStatus;
@@ -649,7 +652,7 @@ export class V2ApiClient {
   }
 
   async control(id: string, action: ConversationControlAction, payload: Record<string, unknown> = {}): Promise<{ conversationId: string; accepted: boolean }> {
-    const path = action === 'cancel' ? 'cancel' : action;
+    const path = conversationControlMethod(action);
     return this.request(`/v2/conversations/${encodeURIComponent(id)}/${path}`, {
       method: 'POST', body: JSON.stringify(payload),
     });
@@ -878,7 +881,7 @@ export class V2ConversationSocket {
   }
   cancel(conversationId: string): void { this.send('conversation.cancel', { conversationId }); }
   control(conversationId: string, action: ConversationControlAction, payload: Record<string, unknown> = {}): void {
-    const type = action === 'cancel' ? 'conversation.cancel' : `conversation.${action}`;
+    const type = `conversation.${conversationControlMethod(action)}`;
     this.send(type, { conversationId, ...payload });
   }
   respondPermission(conversationId: string, permissionId: string, decision: Record<string, unknown>): void {
