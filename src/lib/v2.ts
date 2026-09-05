@@ -183,11 +183,11 @@ export function providerCapabilityMatrix(capabilities: ProviderCapabilities) {
     structuredOutput: capabilities.structuredOutput ?? capabilities.toolEvents,
     interjection: capabilities.interjection ?? false,
     steering: capabilities.steering ?? capabilities.cancel,
-    followUpQueue: capabilities.followUpQueue ?? true,
+    followUpQueue: capabilities.followUpQueue ?? false,
     controlActions: capabilities.controlActions ?? [
       ...(capabilities.cancel ? ['cancel' as const] : []),
       ...(capabilities.cancel ? ['interrupt' as const] : []),
-      ...(capabilities.followUpQueue ?? true ? ['queue' as const, 'followUp' as const] : []),
+      ...(capabilities.followUpQueue === true ? ['queue' as const, 'followUp' as const] : []),
     ],
   } as const;
 }
