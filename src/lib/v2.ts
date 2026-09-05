@@ -106,6 +106,20 @@ export type MemoryEntry = {
   createdAt: string;
   updatedAt: string;
 };
+export type PluginTrustLevel = 'unknown' | 'review' | 'trusted' | 'blocked';
+export type PluginDescriptor = {
+  id: string;
+  name: string;
+  version?: string;
+  source: string;
+  enabled: boolean;
+  trust: PluginTrustLevel;
+  permissions: string[];
+  reason?: string;
+};
+export function canInvokePlugin(plugin: Pick<PluginDescriptor, 'enabled' | 'trust'>): boolean {
+  return plugin.enabled && plugin.trust === 'trusted';
+}
 
 export function contextCompactionStatus(usedTokens: number | undefined, contextWindow: number | undefined): ContextCompactionStatus {
   if (!Number.isFinite(usedTokens) || !Number.isFinite(contextWindow) || (contextWindow ?? 0) <= 0) return 'idle';
