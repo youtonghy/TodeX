@@ -59,6 +59,19 @@ export type ProviderCapabilities = {
 export type ConfigValueSource = 'system' | 'workspace' | 'profile' | 'provider' | 'conversation' | 'turn' | 'default';
 export type ResolvedConfigValue<T> = { value: T; source: ConfigValueSource; locked?: boolean; overridden?: boolean };
 
+export function resolveConfigValue<T>(
+  layers: Partial<Record<ConfigValueSource, T>>,
+  order: readonly ConfigValueSource[] = ['turn', 'conversation', 'provider', 'profile', 'workspace', 'system', 'default'],
+): ResolvedConfigValue<T> | undefined {
+  for (const source of order) {
+    if (Object.prototype.hasOwnProperty.call(layers, source)) {
+      const value = layers[source];
+      if (value !== undefined) return { value, source, overridden: source !== order[order.length - 1] };
+    }
+  }
+  return undefined;
+}
+
 export type AgentCompletionReason = 'completed' | 'cancelled' | 'interrupted' | 'failed' | 'approvalRequired' | 'contextExhausted' | 'rateLimited' | 'connectionLost' | 'providerShutdown';
 export type ConversationControlAction = 'cancel' | 'interrupt' | 'queue';
 export type ToolCallStatus = 'queued' | 'streaming' | 'awaitingApproval' | 'running' | 'completed' | 'failed' | 'cancelled';
