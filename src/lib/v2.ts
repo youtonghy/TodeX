@@ -310,6 +310,8 @@ export type ConversationEvent = {
   sequence: number;
   time: string;
   type: string;
+  rawType?: string;
+  provider?: ProviderKind | string;
   payload: unknown;
 };
 
@@ -373,13 +375,19 @@ export function normalizeConversationEvent(value: unknown): ConversationEvent | 
   const sequence = typeof record.sequence === 'number' && Number.isFinite(record.sequence) ? Math.max(0, Math.floor(record.sequence)) : -1;
   const time = typeof record.time === 'string' ? record.time : typeof record.createdAt === 'string' ? record.createdAt : '';
   if (!eventId || !conversationId || !type || sequence < 0 || !time) return null;
-  return { schemaVersion: typeof record.schemaVersion === 'number' ? record.schemaVersion : 1, eventId, conversationId, sequence, time, type, payload: record.payload ?? {} };
+  return {
+    schemaVersion: typeof record.schemaVersion === 'number' ? record.schemaVersion : 1,
+    eventId, conversationId, sequence, time, type, payload: record.payload ?? {},
+    ...(typeof record.rawType === 'string' ? { rawType: record.rawType } : {}),
+    ...(typeof record.provider === 'string' ? { provider: record.provider } : {}),
+  };
 }
 
 export function toAgentEventEnvelope(event: ConversationEvent, provider?: ProviderKind | string): AgentEventEnvelope {
   const payload = event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload) ? event.payload as Record<string, unknown> : {};
   const stringValue = (key: string): string | undefined => typeof payload[key] === 'string' ? payload[key] as string : undefined;
-  const rawType = event.type;
+  const rawType = event.rawType ?? stringValue('providerMethod') ?? event.type;
+  const resolvedProvider = event.provider ?? provider;
   return {
     schemaVersion: event.schemaVersion,
     eventId: event.eventId,
@@ -389,9 +397,9 @@ export function toAgentEventEnvelope(event: ConversationEvent, provider?: Provid
     turnId: stringValue('turnId') ?? stringValue('turn_id'),
     itemId: stringValue('itemId') ?? stringValue('item_id'),
     parentItemId: stringValue('parentItemId') ?? stringValue('parent_item_id'),
-    ...(provider ? { provider } : {}),
+    ...(resolvedProvider ? { provider: resolvedProvider } : {}),
     rawType,
-    type: rawType,
+    type: event.type,
     timestamp: event.time,
     payload: event.payload,
     raw: event.payload,
