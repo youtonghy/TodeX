@@ -830,7 +830,7 @@ export function shouldAppendV2ConversationEvent(event: ConversationEvent): boole
   const eventRecord = asRecord(event);
   const payload = asRecord(eventRecord?.payload);
   const delta = asRecord(payload?.delta);
-  const type = readString(eventRecord, ['type', 'eventType', 'event_type']);
+  const type = readString(eventRecord, ['normalizedType', 'normalized_type', 'type', 'eventType', 'event_type']);
   const deltaType = readString(delta, ['type', 'deltaType', 'delta_type']);
   const block = payload ? conversationBlock(payload, '') : null;
   if (block) return block.phase === 'delta';
@@ -900,7 +900,7 @@ export function classifyV2ConversationEvent(
   const payload = asRecord(eventRecord?.payload) || {};
   const message = asRecord(payload.message);
   const delta = asRecord(payload.delta);
-  const type = readString(eventRecord, ['type', 'eventType', 'event_type']) || normalizeEventType(eventRecord?.type);
+  const type = readString(eventRecord, ['normalizedType', 'normalized_type', 'type', 'eventType', 'event_type']) || normalizeEventType(eventRecord?.type);
   const eventId = readString(eventRecord, ['eventId', 'event_id', 'id']) || `sequence-${readNumber(eventRecord, ['sequence'], 0)}`;
   const conversationId = readString(eventRecord, ['conversationId', 'conversation_id']);
   const content = conversationContent(payload, message, delta);
