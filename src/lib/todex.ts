@@ -136,6 +136,7 @@ export type WorkspaceRecord = {
   localAdapterState?: LocalAdapterState;
   createdAt: number;
   updatedAt: number;
+  sortOrder?: number;
 };
 
 export type CapabilityHashTrigger = {
