@@ -11,11 +11,12 @@ import type {
   LocalAdapterState,
 } from './todex';
 import type {
+  AgentEventEnvelope,
   ConversationEvent,
   ConversationManifest,
   ProviderKind,
 } from './v2';
-import { normalizeConversationEvent } from './v2';
+import { normalizeConversationEvent, toAgentEventEnvelope } from './v2';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -843,6 +844,7 @@ export type ConversationReplayState = {
   activeTurnId: string;
   lastSequence: number;
   missingSequences: number[];
+  normalizedEvents: AgentEventEnvelope[];
 };
 
 /** Reduce live and replayed events through one idempotent, gap-aware path. */
@@ -853,6 +855,7 @@ export function reduceConversationEvents(
   const timeline: TimelineEntry[] = [];
   const seen = new Set<string>();
   const missingSequences: number[] = [];
+  const replayEnvelopes: AgentEventEnvelope[] = [];
   let activeTurnId = '';
   let lastSequence = 0;
   const normalizedEvents = events.map(normalizeConversationEvent).filter((event): event is ConversationEvent => event !== null);
@@ -860,6 +863,7 @@ export function reduceConversationEvents(
     const key = event.eventId || `${event.conversationId}:${event.sequence}:${event.type}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    replayEnvelopes.push(toAgentEventEnvelope(event));
     if (event.sequence > lastSequence + 1) {
       const end = Math.min(event.sequence, lastSequence + 10_001);
       for (let sequence = lastSequence + 1; sequence < end; sequence += 1) missingSequences.push(sequence);
@@ -882,7 +886,7 @@ export function reduceConversationEvents(
     if (event.type === 'turn.completed' || event.type === 'turn.cancelled' || event.type === 'turn.failed') activeTurnId = '';
     lastSequence = Math.max(lastSequence, event.sequence);
   }
-  return { timeline, activeTurnId, lastSequence, missingSequences };
+  return { timeline, activeTurnId, lastSequence, missingSequences, normalizedEvents: replayEnvelopes };
 }
 
 /** Convert a v2 event into a render-neutral timeline entry. */
