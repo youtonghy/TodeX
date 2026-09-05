@@ -54,6 +54,7 @@ export type ProviderCapabilities = {
   interjection?: boolean;
   steering?: boolean;
   followUpQueue?: boolean;
+  controlActions?: ConversationControlAction[];
 };
 
 export type ConfigValueSource = 'system' | 'workspace' | 'profile' | 'provider' | 'conversation' | 'turn' | 'default';
@@ -183,6 +184,11 @@ export function providerCapabilityMatrix(capabilities: ProviderCapabilities) {
     interjection: capabilities.interjection ?? false,
     steering: capabilities.steering ?? capabilities.cancel,
     followUpQueue: capabilities.followUpQueue ?? true,
+    controlActions: capabilities.controlActions ?? [
+      ...(capabilities.cancel ? ['cancel' as const] : []),
+      ...(capabilities.cancel ? ['interrupt' as const] : []),
+      ...(capabilities.followUpQueue ?? true ? ['queue' as const, 'followUp' as const] : []),
+    ],
   } as const;
 }
 
