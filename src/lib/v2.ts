@@ -106,6 +106,36 @@ export type MemoryEntry = {
   createdAt: string;
   updatedAt: string;
 };
+export type WorkflowRunStatus = 'queued' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';
+export type WorkflowRun = {
+  id: string;
+  conversationId: string;
+  status: WorkflowRunStatus;
+  currentStepId?: string;
+  startedAt: string;
+  updatedAt: string;
+  error?: string;
+};
+export type WorkflowStep = {
+  id: string;
+  workflowId: string;
+  title: string;
+  status: WorkflowRunStatus;
+  dependsOn: string[];
+  input?: unknown;
+  output?: unknown;
+  error?: string;
+};
+export type DurableToolCheckpoint = {
+  id: string;
+  conversationId: string;
+  toolCallId: string;
+  status: 'pending' | 'committed' | 'rolledBack';
+  input?: unknown;
+  output?: unknown;
+  createdAt: string;
+  committedAt?: string;
+};
 export type PluginTrustLevel = 'unknown' | 'review' | 'trusted' | 'blocked';
 export type PluginDescriptor = {
   id: string;
