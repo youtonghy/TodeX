@@ -319,6 +319,34 @@ export type AgentEventEnvelope = {
   raw?: unknown;
 };
 
+export type ProviderAdapterContext = {
+  conversationId: string;
+  provider: ProviderKind | string;
+  threadId?: string;
+};
+
+export type ProviderAdapter = {
+  readonly provider: ProviderKind | string;
+  capabilities: ProviderCapabilities;
+  normalizeEvent(raw: unknown, context: ProviderAdapterContext): AgentEventEnvelope | null;
+  control?(action: ConversationControlAction, payload?: Record<string, unknown>): Record<string, unknown>;
+};
+
+export function createGenericProviderAdapter(
+  provider: ProviderKind | string,
+  capabilities: ProviderCapabilities,
+): ProviderAdapter {
+  return {
+    provider,
+    capabilities,
+    normalizeEvent(raw, context) {
+      const event = normalizeConversationEvent(raw);
+      if (!event) return null;
+      return toAgentEventEnvelope({ ...event, conversationId: context.conversationId }, provider);
+    },
+  };
+}
+
 export function normalizeConversationEvent(value: unknown): ConversationEvent | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
