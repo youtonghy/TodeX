@@ -310,6 +310,7 @@ export type ConversationEvent = {
   sequence: number;
   time: string;
   type: string;
+  normalizedType?: string;
   rawType?: string;
   provider?: ProviderKind | string;
   payload: unknown;
@@ -378,6 +379,7 @@ export function normalizeConversationEvent(value: unknown): ConversationEvent | 
   return {
     schemaVersion: typeof record.schemaVersion === 'number' ? record.schemaVersion : 1,
     eventId, conversationId, sequence, time, type, payload: record.payload ?? {},
+    ...(typeof record.normalizedType === 'string' ? { normalizedType: record.normalizedType } : {}),
     ...(typeof record.rawType === 'string' ? { rawType: record.rawType } : {}),
     ...(typeof record.provider === 'string' ? { provider: record.provider } : {}),
   };
@@ -399,7 +401,7 @@ export function toAgentEventEnvelope(event: ConversationEvent, provider?: Provid
     parentItemId: stringValue('parentItemId') ?? stringValue('parent_item_id'),
     ...(resolvedProvider ? { provider: resolvedProvider } : {}),
     rawType,
-    type: event.type,
+    type: event.normalizedType ?? event.type,
     timestamp: event.time,
     payload: event.payload,
     raw: event.payload,
