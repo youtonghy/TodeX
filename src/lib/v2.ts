@@ -262,6 +262,18 @@ export type ConversationEvent = {
   payload: unknown;
 };
 
+export function normalizeConversationEvent(value: unknown): ConversationEvent | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const eventId = typeof record.eventId === 'string' ? record.eventId : typeof record.event_id === 'string' ? record.event_id : '';
+  const conversationId = typeof record.conversationId === 'string' ? record.conversationId : typeof record.conversation_id === 'string' ? record.conversation_id : '';
+  const type = typeof record.type === 'string' ? record.type : typeof record.eventType === 'string' ? record.eventType : '';
+  const sequence = typeof record.sequence === 'number' && Number.isFinite(record.sequence) ? Math.max(0, Math.floor(record.sequence)) : -1;
+  const time = typeof record.time === 'string' ? record.time : typeof record.createdAt === 'string' ? record.createdAt : '';
+  if (!eventId || !conversationId || !type || sequence < 0 || !time) return null;
+  return { schemaVersion: typeof record.schemaVersion === 'number' ? record.schemaVersion : 1, eventId, conversationId, sequence, time, type, payload: record.payload ?? {} };
+}
+
 export type ConversationReplay = {
   conversationId: string;
   fromSequence: number;

@@ -15,6 +15,7 @@ import type {
   ConversationManifest,
   ProviderKind,
 } from './v2';
+import { normalizeConversationEvent } from './v2';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -854,7 +855,8 @@ export function reduceConversationEvents(
   const missingSequences: number[] = [];
   let activeTurnId = '';
   let lastSequence = 0;
-  for (const event of [...events].sort((a, b) => a.sequence - b.sequence)) {
+  const normalizedEvents = events.map(normalizeConversationEvent).filter((event): event is ConversationEvent => event !== null);
+  for (const event of normalizedEvents.sort((a, b) => a.sequence - b.sequence)) {
     const key = event.eventId || `${event.conversationId}:${event.sequence}:${event.type}`;
     if (seen.has(key)) continue;
     seen.add(key);
