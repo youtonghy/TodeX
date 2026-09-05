@@ -49,7 +49,48 @@ export type ProviderCapabilities = {
   /** Missing on older backends; clients must treat absence as unsupported. */
   imageInput?: boolean;
   imageInputMode?: 'always' | 'model' | 'profile' | 'none';
+  streaming?: boolean;
+  structuredOutput?: boolean;
+  interjection?: boolean;
+  steering?: boolean;
+  followUpQueue?: boolean;
 };
+
+export type ConfigValueSource = 'system' | 'workspace' | 'profile' | 'provider' | 'conversation' | 'turn' | 'default';
+export type ResolvedConfigValue<T> = { value: T; source: ConfigValueSource; locked?: boolean; overridden?: boolean };
+
+export type AgentCompletionReason = 'completed' | 'cancelled' | 'interrupted' | 'failed' | 'approvalRequired' | 'contextExhausted' | 'rateLimited' | 'connectionLost' | 'providerShutdown';
+export type ConversationControlAction = 'cancel' | 'interrupt' | 'queue';
+export type ToolCallStatus = 'queued' | 'streaming' | 'awaitingApproval' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type ToolCallState = {
+  callId: string;
+  name: string;
+  argumentsText: string;
+  argumentsJson?: unknown;
+  resultText?: string;
+  resultJson?: unknown;
+  stdout?: string;
+  stderr?: string;
+  status: ToolCallStatus;
+  error?: string;
+  completionReason?: AgentCompletionReason;
+};
+
+export function providerCapabilityMatrix(capabilities: ProviderCapabilities) {
+  return {
+    resume: capabilities.nativeResume,
+    cancel: capabilities.cancel,
+    permissions: capabilities.permissions,
+    toolCalling: capabilities.toolEvents,
+    mcp: capabilities.nativeMcp || capabilities.managedMcp,
+    imageInput: capabilities.imageInput === true,
+    streaming: capabilities.streaming ?? true,
+    structuredOutput: capabilities.structuredOutput ?? capabilities.toolEvents,
+    interjection: capabilities.interjection ?? false,
+    steering: capabilities.steering ?? capabilities.cancel,
+    followUpQueue: capabilities.followUpQueue ?? true,
+  } as const;
+}
 
 export type ProviderDescriptor = {
   id: ProviderKind;
@@ -472,7 +513,14 @@ export class V2ApiClient {
   }
 
   async cancel(id: string): Promise<{ conversationId: string; accepted: boolean }> {
-    return this.request(`/v2/conversations/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
+    return this.control(id, 'cancel');
+  }
+
+  async control(id: string, action: ConversationControlAction, payload: Record<string, unknown> = {}): Promise<{ conversationId: string; accepted: boolean }> {
+    const path = action === 'cancel' ? 'cancel' : action;
+    return this.request(`/v2/conversations/${encodeURIComponent(id)}/${path}`, {
+      method: 'POST', body: JSON.stringify(payload),
+    });
   }
 
   async respondPermission(id: string, permissionId: string, decision: Record<string, unknown>): Promise<void> {
@@ -697,6 +745,10 @@ export class V2ConversationSocket {
     });
   }
   cancel(conversationId: string): void { this.send('conversation.cancel', { conversationId }); }
+  control(conversationId: string, action: ConversationControlAction, payload: Record<string, unknown> = {}): void {
+    const type = action === 'cancel' ? 'conversation.cancel' : `conversation.${action}`;
+    this.send(type, { conversationId, ...payload });
+  }
   respondPermission(conversationId: string, permissionId: string, decision: Record<string, unknown>): void {
     this.send('conversation.permission.respond', { conversationId, permissionId, decision });
   }
