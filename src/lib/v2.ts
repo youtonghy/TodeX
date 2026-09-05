@@ -74,6 +74,40 @@ export function resolveConfigValue<T>(
 
 export type AgentCompletionReason = 'completed' | 'cancelled' | 'interrupted' | 'failed' | 'approvalRequired' | 'contextExhausted' | 'rateLimited' | 'connectionLost' | 'providerShutdown';
 export type ConversationControlAction = 'cancel' | 'interrupt' | 'queue';
+export type ContextCompactionStatus = 'idle' | 'recommended' | 'running' | 'completed' | 'failed';
+export type ContextCompactionState = {
+  status: ContextCompactionStatus;
+  usedTokens?: number;
+  contextWindow?: number;
+  summary?: string;
+  updatedAt: string;
+  error?: string;
+};
+export type SubagentStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type SubagentRun = {
+  id: string;
+  conversationId: string;
+  title: string;
+  task: string;
+  status: SubagentStatus;
+  result?: string;
+  error?: string;
+  startedAt?: string;
+  finishedAt?: string;
+};
+export type MemoryEntry = {
+  id: string;
+  scope: 'workspace' | 'conversation' | 'user';
+  content: string;
+  source?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export function contextCompactionStatus(usedTokens: number | undefined, contextWindow: number | undefined): ContextCompactionStatus {
+  if (!Number.isFinite(usedTokens) || !Number.isFinite(contextWindow) || (contextWindow ?? 0) <= 0) return 'idle';
+  return (usedTokens ?? 0) / (contextWindow ?? 1) >= 0.8 ? 'recommended' : 'idle';
+}
 export type ToolCallStatus = 'queued' | 'streaming' | 'awaitingApproval' | 'running' | 'completed' | 'failed' | 'cancelled';
 export type ToolCallState = {
   callId: string;
