@@ -785,11 +785,12 @@ function blockContent(
       || readString(delta, ['thinking', 'reasoning', 'analysis', 'text', 'delta', 'content']);
   }
   if (category === 'tool') {
-    const toolCall = asRecord(delta?.toolCall);
-    if (payload.toolCallId || payload.tool_call_id) {
+    const toolCall = asRecord(delta?.toolCall) || asRecord(payload.toolCall) || asRecord(payload.tool_call);
+    const toolCallId = readString(payload, ['toolCallId', 'tool_call_id', 'callId', 'call_id']) || readString(toolCall, ['id', 'toolCallId', 'tool_call_id']);
+    if (toolCallId || toolCall) {
       return shortJsonValue({
-        toolName: payload.toolName ?? payload.tool_name,
-        arguments: payload.arguments,
+        toolName: payload.toolName ?? payload.tool_name ?? toolCall?.toolName ?? toolCall?.name ?? toolCall?.tool_name,
+        arguments: payload.arguments ?? payload.input ?? toolCall?.arguments ?? toolCall?.input,
         partialResult: payload.partialResult ?? payload.partial_result,
         result: payload.result,
         isError: payload.isError ?? payload.is_error,
@@ -834,6 +835,52 @@ export function shouldAppendV2ConversationEvent(event: ConversationEvent): boole
   return type === 'message.delta'
     || type === 'thought.delta'
     || /(?:thinking|text|toolcall)_delta$/i.test(deltaType);
+}
+
+export type ConversationReplayState = {
+  timeline: TimelineEntry[];
+  activeTurnId: string;
+  lastSequence: number;
+  missingSequences: number[];
+};
+
+/** Reduce live and replayed events through one idempotent, gap-aware path. */
+export function reduceConversationEvents(
+  events: ConversationEvent[],
+  workspaceId: string,
+): ConversationReplayState {
+  const timeline: TimelineEntry[] = [];
+  const seen = new Set<string>();
+  const missingSequences: number[] = [];
+  let activeTurnId = '';
+  let lastSequence = 0;
+  for (const event of [...events].sort((a, b) => a.sequence - b.sequence)) {
+    const key = event.eventId || `${event.conversationId}:${event.sequence}:${event.type}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (event.sequence > lastSequence + 1) {
+      const end = Math.min(event.sequence, lastSequence + 10_001);
+      for (let sequence = lastSequence + 1; sequence < end; sequence += 1) missingSequences.push(sequence);
+    }
+    const payload = asRecord(event.payload) || {};
+    const turnId = readString(payload, ['turnId', 'turn_id']);
+    if (event.type === 'turn.started' && turnId) activeTurnId = turnId;
+    const entry = classifyV2ConversationEvent(event, workspaceId, turnId || activeTurnId);
+    if (entry) {
+      const index = timeline.findIndex((item) => item.id === entry.id);
+      if (index < 0) timeline.unshift(entry);
+      else {
+        const previous = timeline[index];
+        timeline[index] = { ...previous, ...entry,
+          subtitle: shouldAppendV2ConversationEvent(event)
+            ? `${previous.subtitle === '正在回复...' ? '' : previous.subtitle}${entry.subtitle}`
+            : entry.subtitle };
+      }
+    }
+    if (event.type === 'turn.completed' || event.type === 'turn.cancelled' || event.type === 'turn.failed') activeTurnId = '';
+    lastSequence = Math.max(lastSequence, event.sequence);
+  }
+  return { timeline, activeTurnId, lastSequence, missingSequences };
 }
 
 /** Convert a v2 event into a render-neutral timeline entry. */
@@ -944,7 +991,7 @@ export function classifyV2ConversationEvent(
     || Boolean(payload.tool || payload.toolCall || payload.tool_call || payload.command || payload.function || payload.functionCall || payload.function_call);
   if (isToolEvent) {
     return {
-      id: `v2-tool-${conversationId}-${turnId || (contentIndex >= 0 ? `content-${contentIndex}` : eventId)}`,
+      id: `v2-tool-${conversationId}-${turnId || 'current'}-${readString(payload, ['toolCallId', 'tool_call_id', 'callId', 'call_id']) || readString(asRecord(payload.toolCall) || asRecord(payload.tool_call), ['id']) || (contentIndex >= 0 ? `content-${contentIndex}` : eventId)}`,
       kind: 'system',
       title: '工具调用',
       subtitle: content || shortJsonValue(payload),
