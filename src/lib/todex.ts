@@ -212,6 +212,7 @@ export type PermissionOptionKind =
   | 'allow_always'
   | 'reject_once'
   | 'reject_always'
+  | 'abort_turn'
   | 'answer';
 
 export type PermissionOption = {
@@ -231,6 +232,7 @@ const PERMISSION_OPTION_KINDS = new Set<PermissionOptionKind>([
   'allow_always',
   'reject_once',
   'reject_always',
+  'abort_turn',
   'answer',
 ]);
 
@@ -2231,3 +2233,5 @@ export type {
   WorkspaceLinkOptions,
   WorkspaceLinkTarget,
 } from './mobileParity';
+
+export * from './conversationRuntime';

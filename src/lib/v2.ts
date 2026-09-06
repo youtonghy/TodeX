@@ -55,6 +55,12 @@ export type ProviderCapabilities = {
   steering?: boolean;
   followUpQueue?: boolean;
   controlActions?: ConversationControlAction[];
+  permissionConfig?: {
+    sandboxModes?: string[];
+    approvalPolicies?: string[];
+    permissionProfiles?: string[];
+    enforcement?: string;
+  };
 };
 
 export type ConfigValueSource = 'system' | 'workspace' | 'profile' | 'provider' | 'conversation' | 'turn' | 'default';
@@ -74,7 +80,7 @@ export function resolveConfigValue<T>(
 }
 
 export type AgentCompletionReason = 'completed' | 'cancelled' | 'interrupted' | 'failed' | 'approvalRequired' | 'contextExhausted' | 'rateLimited' | 'connectionLost' | 'providerShutdown';
-export type ConversationControlAction = 'cancel' | 'interrupt' | 'steer' | 'followUp' | 'retry' | 'resume' | 'fork' | 'stop' | 'queue';
+export type ConversationControlAction = 'cancel' | 'interrupt' | 'steer' | 'followUp' | 'retry' | 'resume' | 'fork' | 'compact' | 'stop' | 'queue';
 export function conversationControlMethod(action: ConversationControlAction): string {
   return action.replace(/[A-Z]/g, (letter) => `.${letter.toLowerCase()}`);
 }
@@ -407,6 +413,21 @@ export function createGenericProviderAdapter(
   };
 }
 
+/** Resolve known wire aliases before trusting historical normalizedType values.
+ * Older servers incorrectly labelled message.completed as turn.completed. */
+export function canonicalConversationEventType(event: Pick<ConversationEvent, 'type' | 'normalizedType'>): string {
+  const aliases: Record<string, string> = {
+    'codex.turn.started': 'turn.started', 'codex.turn.completed': 'turn.completed',
+    'conversation.interrupted': 'turn.interrupted', 'conversation.failed': 'turn.failed',
+    'message.delta': 'assistant.delta', text_delta: 'assistant.delta',
+    'thought.delta': 'reasoning.delta', thinking_delta: 'reasoning.delta',
+    'tool.created': 'tool.started', 'tool.result': 'tool.completed', 'tool.error': 'tool.failed',
+  };
+  if (aliases[event.type]) return aliases[event.type];
+  if (/^(?:message|turn|permission|usage|subagent|compaction|memory)\./.test(event.type)) return event.type;
+  return event.normalizedType || event.type;
+}
+
 export function normalizeConversationEvent(value: unknown): ConversationEvent | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
@@ -419,7 +440,7 @@ export function normalizeConversationEvent(value: unknown): ConversationEvent | 
   return {
     schemaVersion: typeof record.schemaVersion === 'number' ? record.schemaVersion : 1,
     eventId, conversationId, sequence, time, type, payload: record.payload ?? {},
-    ...(typeof record.normalizedType === 'string' ? { normalizedType: record.normalizedType } : {}),
+    normalizedType: canonicalConversationEventType({ type, normalizedType: typeof record.normalizedType === 'string' ? record.normalizedType : undefined }),
     ...(typeof record.rawType === 'string' ? { rawType: record.rawType } : {}),
     ...(typeof record.provider === 'string' ? { provider: record.provider } : {}),
   };
@@ -441,7 +462,7 @@ export function toAgentEventEnvelope(event: ConversationEvent, provider?: Provid
     parentItemId: stringValue('parentItemId') ?? stringValue('parent_item_id'),
     ...(resolvedProvider ? { provider: resolvedProvider } : {}),
     rawType,
-    type: event.normalizedType ?? event.type,
+    type: canonicalConversationEventType(event),
     timestamp: event.time,
     payload: event.payload,
     raw: event.payload,
@@ -791,7 +812,8 @@ export type V2SocketOptions = {
   serverUrl: string;
   authToken?: string;
   WebSocketImpl?: typeof WebSocket;
-  onEvent?: (event: ConversationEvent) => void;
+  /** Return a promise for asynchronous projection; cursor advances only after success. */
+  onEvent?: (event: ConversationEvent) => unknown;
   onResult?: (message: V2Message) => void;
   onError?: (error: Error) => void;
   onStatus?: (status: 'connecting' | 'open' | 'closed' | 'error') => void;
@@ -805,6 +827,8 @@ type Subscription = { afterSequence: number; limit: number };
 export class V2ConversationSocket {
   private readonly options: V2SocketOptions;
   private readonly subscriptions = new Map<string, Subscription>();
+  private readonly eventApplications = new Map<string, Promise<void>>();
+  private readonly failedApplications = new Set<string>();
   private socket: WebSocket | null = null;
   private nextId = 1;
   private closedExplicitly = false;
@@ -845,6 +869,8 @@ export class V2ConversationSocket {
       socket = new WebSocketImpl(buildV2WebSocketUrlWithToken(this.options.serverUrl, this.options.authToken));
     }
     this.socket = socket;
+    this.eventApplications.clear();
+    this.failedApplications.clear();
 
     // 连接超时检测
     this.connectionTimer = setTimeout(() => {
@@ -872,7 +898,9 @@ export class V2ConversationSocket {
         this.send('conversation.subscribe', { conversationId, afterSequence: subscription.afterSequence, limit: subscription.limit });
       }
     };
-    socket.onmessage = (message) => this.handleMessage(typeof message.data === 'string' || message.data instanceof ArrayBuffer ? message.data : String(message.data));
+    socket.onmessage = (message) => {
+      if (this.socket === socket) this.handleMessage(typeof message.data === 'string' || message.data instanceof ArrayBuffer ? message.data : String(message.data));
+    };
     socket.onerror = () => {
       if (this.connectionTimer) {
         clearTimeout(this.connectionTimer);
@@ -1033,8 +1061,7 @@ export class V2ConversationSocket {
       const payload = message.payload ?? {};
       const event = payload as unknown as ConversationEvent;
       if (typeof event.conversationId === 'string' && Number.isInteger(event.sequence)) {
-        this.acknowledge(event.conversationId, event.sequence);
-        this.options.onEvent?.(event);
+        this.applyEventBeforeAcknowledging(event);
       }
     } else if (message.type === 'server.error') {
       // 后端在 payload.code 里给出结构化错误码（PROVIDER_UNAVAILABLE 等），
@@ -1047,6 +1074,34 @@ export class V2ConversationSocket {
     } else {
       this.options.onResult?.(message);
     }
+  }
+
+  private applyEventBeforeAcknowledging(event: ConversationEvent): void {
+    const apply = this.options.onEvent;
+    const socket = this.socket;
+    if (!apply || !socket) return;
+    const conversationId = event.conversationId;
+    const previous = this.eventApplications.get(conversationId) ?? Promise.resolve();
+    const pending = previous.then(async () => {
+      if (this.socket !== socket || this.failedApplications.has(conversationId)) return;
+      try {
+        await apply(event);
+        if (this.socket === socket) this.acknowledge(conversationId, event.sequence);
+      } catch (error) {
+        if (this.socket !== socket) return;
+        this.failedApplications.add(conversationId);
+        const failure = error instanceof Error ? error : new Error(String(error));
+        this.metrics.onError('event_application_failed', failure.message);
+        this.options.onError?.(failure);
+        // Reconnect from the last successfully projected event. Later events
+        // queued on this socket must not acknowledge over the failed event.
+        socket.close();
+      }
+    });
+    this.eventApplications.set(conversationId, pending);
+    void pending.then(() => {
+      if (this.eventApplications.get(conversationId) === pending) this.eventApplications.delete(conversationId);
+    });
   }
 
   private async setupNetworkListener(): Promise<void> {

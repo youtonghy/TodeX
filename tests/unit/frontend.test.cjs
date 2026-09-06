@@ -171,7 +171,7 @@ test('v2 API client builds read-only capability catalog requests', async () => {
   assert.match(requests[2], /\/v2\/catalog\/mcp\?provider=codex&workspace=%2Fworkspace%2Fapp/);
 });
 
-test('v2 socket reconnects subscriptions from the latest sequence', () => {
+test('v2 socket reconnects subscriptions from the latest sequence', async () => {
   const sockets = [];
   class FakeSocket {
     static OPEN = 1;
@@ -181,11 +181,12 @@ test('v2 socket reconnects subscriptions from the latest sequence', () => {
     send(value) { this.sent.push(JSON.parse(value)); }
     close() {}
   }
-  const client = new v2.V2ConversationSocket({ serverUrl: 'http://127.0.0.1:7345', WebSocketImpl: FakeSocket });
+  const client = new v2.V2ConversationSocket({ serverUrl: 'http://127.0.0.1:7345', WebSocketImpl: FakeSocket, onEvent: () => {} });
   client.connect();
   sockets[0].onopen();
   client.subscribe('c1', 0, 10);
   sockets[0].onmessage({ data: JSON.stringify({ type: 'conversation.event', payload: { conversationId: 'c1', sequence: 7 } }) });
+  await new Promise(resolve => setImmediate(resolve));
   sockets[0].onclose();
   client.connect();
   sockets[1].onopen();

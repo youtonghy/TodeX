@@ -16,7 +16,7 @@ import type {
   ConversationManifest,
   ProviderKind,
 } from './v2';
-import { normalizeConversationEvent, toAgentEventEnvelope } from './v2';
+import { canonicalConversationEventType, normalizeConversationEvent, toAgentEventEnvelope } from './v2';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -454,6 +454,11 @@ export type ConversationContextUsage = {
 };
 
 export type UsageRecord = {
+  turnId?: string;
+  sequence?: number;
+  scope?: 'request' | 'turn' | 'session' | 'unknown';
+  totalTokens?: number;
+  cacheSemantics?: 'included' | 'additional' | 'unknown';
   id: string;
   conversationId: string;
   provider: string;
@@ -521,6 +526,11 @@ export function normalizeUsageRecords(
       cachedInputTokens: usageField(raw, ['cachedInputTokens', 'cached_input_tokens', 'cacheRead', 'cache_read', 'cacheReadInputTokens', 'cache_read_input_tokens']),
       cacheWriteTokens: usageField(raw, ['cacheWriteTokens', 'cache_write_tokens', 'cacheWrite', 'cache_write', 'cacheCreationInputTokens', 'cache_creation_input_tokens']),
       updatedAt,
+      ...(typeof raw.turnId === 'string' ? { turnId: raw.turnId } : {}),
+      ...(typeof raw.sequence === 'number' ? { sequence: raw.sequence } : {}),
+      ...(typeof raw.totalTokens === 'number' ? { totalTokens: usageNumber(raw.totalTokens) } : {}),
+      ...(['request', 'turn', 'session', 'unknown'].includes(String(raw.scope)) ? { scope: raw.scope as UsageRecord['scope'] } : {}),
+      ...(['included', 'additional', 'unknown'].includes(String(raw.cacheSemantics)) ? { cacheSemantics: raw.cacheSemantics as UsageRecord['cacheSemantics'] } : {}),
     });
     if (records.length >= limit) break;
   }
@@ -599,12 +609,14 @@ export function contextUsageFromV2Event(
   const message = objectAt(payload, ['message']);
   const usage = objectAt(message, ['usage']) || objectAt(payload, ['usage']);
   const role = readString(message, ['role']) || readString(payload, ['role']);
-  if (eventType !== 'message.completed' || role.toLowerCase() !== 'assistant' || !usage) {
+  const flatUsageUpdate = eventType === 'usage.updated' && normalizedUsage
+    && ['input', 'inputTokens', 'input_tokens', 'output', 'outputTokens', 'output_tokens'].some(key => normalizedUsage[key] !== undefined);
+  if (!usage || (!flatUsageUpdate && (eventType !== 'message.completed' || role.toLowerCase() !== 'assistant'))) {
     return null;
   }
   const inputTokens = usageField(usage, ['input', 'inputTokens', 'input_tokens']);
   const outputTokens = usageField(usage, ['output', 'outputTokens', 'output_tokens']);
-  const cachedInputTokens = usageField(usage, ['cacheRead', 'cache_read', 'cachedInputTokens', 'cached_input_tokens', 'cacheReadInputTokens']);
+  const cachedInputTokens = usageField(usage, ['cacheRead', 'cache_read', 'cachedInputTokens', 'cached_input_tokens', 'cacheReadInputTokens', 'cache_read_input_tokens']);
   const cacheWriteTokens = usageField(usage, ['cacheWrite', 'cache_write', 'cacheWriteInputTokens', 'cache_write_input_tokens', 'cacheCreationInputTokens', 'cache_creation_input_tokens']);
   const total = usageField(usage, ['totalTokens', 'total_tokens', 'total']);
   return {
@@ -769,6 +781,14 @@ function textContent(value: unknown): string {
   }).filter(Boolean).join('');
 }
 
+// Text deltas can consist entirely of whitespace. Identifier trimming must never
+// alter content or streamed JSON fragments.
+function readContentString(record: JsonRecord | null | undefined, keys: string[]): string {
+  if (!record) return '';
+  for (const key of keys) if (typeof record[key] === 'string' && record[key]) return record[key] as string;
+  return '';
+}
+
 function blockContent(
   category: ConversationBlockCategory,
   payload: JsonRecord,
@@ -776,19 +796,19 @@ function blockContent(
   delta: JsonRecord | null,
 ): string {
   if (category === 'assistant_final' || category === 'assistant_progress') {
-    return readString(payload, ['text', 'content'])
+    return readContentString(payload, ['text', 'content'])
       || (typeof payload.delta === 'string' ? payload.delta : '')
-      || readString(delta, ['text', 'delta', 'content'])
+      || readContentString(delta, ['text', 'delta', 'content'])
       || textContent(message?.content)
-      || readString(message, ['text']);
+      || readContentString(message, ['text']);
   }
   if (category === 'reasoning') {
-    return readString(payload, ['thought', 'thoughtText', 'thought_text', 'reasoning', 'thinking', 'analysis'])
-      || readString(delta, ['thinking', 'reasoning', 'analysis', 'text', 'delta', 'content']);
+    return readContentString(payload, ['thought', 'thoughtText', 'thought_text', 'reasoning', 'thinking', 'analysis'])
+      || readContentString(delta, ['thinking', 'reasoning', 'analysis', 'text', 'delta', 'content']);
   }
   if (category === 'tool') {
     const toolCall = asRecord(delta?.toolCall) || asRecord(payload.toolCall) || asRecord(payload.tool_call);
-    const toolCallId = readString(payload, ['toolCallId', 'tool_call_id', 'callId', 'call_id']) || readString(toolCall, ['id', 'toolCallId', 'tool_call_id']);
+    const toolCallId = readContentString(payload, ['toolCallId', 'tool_call_id', 'callId', 'call_id']) || readContentString(toolCall, ['id', 'toolCallId', 'tool_call_id']);
     if (toolCallId || toolCall) {
       return shortJsonValue({
         toolName: payload.toolName ?? payload.tool_name ?? toolCall?.toolName ?? toolCall?.name ?? toolCall?.tool_name,
@@ -798,7 +818,7 @@ function blockContent(
         isError: payload.isError ?? payload.is_error,
       });
     }
-    const deltaText = readString(delta, ['delta']);
+    const deltaText = readContentString(delta, ['delta']);
     if (deltaText) return deltaText;
     const value = payload.partialResult ?? payload.partial_result ?? payload.result
       ?? payload.arguments ?? payload.item ?? payload.tool ?? payload.toolCall ?? payload.tool_call
@@ -806,14 +826,14 @@ function blockContent(
     return typeof value === 'string' ? value : shortJsonValue(value);
   }
   if (category === 'approval') {
-    return readString(payload, ['title', 'question', 'message'])
+    return readContentString(payload, ['title', 'question', 'message'])
       || (payload.details === undefined ? '' : shortJsonValue(payload.details));
   }
   if (category === 'error') {
-    return readString(payload, ['message', 'error', 'reason']) || shortJsonValue(payload.error ?? payload);
+    return readContentString(payload, ['message', 'error', 'reason']) || shortJsonValue(payload.error ?? payload);
   }
   if (category === 'status') {
-    return readString(payload, ['status', 'message', 'text']);
+    return readContentString(payload, ['status', 'message', 'text']);
   }
   return '';
 }
@@ -830,11 +850,13 @@ export function shouldAppendV2ConversationEvent(event: ConversationEvent): boole
   const eventRecord = asRecord(event);
   const payload = asRecord(eventRecord?.payload);
   const delta = asRecord(payload?.delta);
-  const type = readString(eventRecord, ['normalizedType', 'normalized_type', 'type', 'eventType', 'event_type']);
+  const type = canonicalConversationEventType(event);
   const deltaType = readString(delta, ['type', 'deltaType', 'delta_type']);
   const block = payload ? conversationBlock(payload, '') : null;
   if (block) return block.phase === 'delta';
-  return type === 'message.delta'
+  return type === 'assistant.delta'
+    || type === 'reasoning.delta'
+    || type === 'message.delta'
     || type === 'thought.delta'
     || /(?:thinking|text|toolcall)_delta$/i.test(deltaType);
 }
@@ -870,7 +892,8 @@ export function reduceConversationEvents(
     }
     const payload = asRecord(event.payload) || {};
     const turnId = readString(payload, ['turnId', 'turn_id']);
-    if (event.type === 'turn.started' && turnId) activeTurnId = turnId;
+    const type = canonicalConversationEventType(event);
+    if (type === 'turn.started' && turnId) activeTurnId = turnId;
     const entry = classifyV2ConversationEvent(event, workspaceId, turnId || activeTurnId);
     if (entry) {
       const index = timeline.findIndex((item) => item.id === entry.id);
@@ -883,7 +906,7 @@ export function reduceConversationEvents(
             : entry.subtitle };
       }
     }
-    if (event.type === 'turn.completed' || event.type === 'turn.cancelled' || event.type === 'turn.failed') activeTurnId = '';
+    if (['turn.completed', 'turn.cancelled', 'turn.interrupted', 'turn.failed'].includes(type) && (!turnId || turnId === activeTurnId)) activeTurnId = '';
     lastSequence = Math.max(lastSequence, event.sequence);
   }
   return { timeline, activeTurnId, lastSequence, missingSequences, normalizedEvents: replayEnvelopes };
@@ -900,7 +923,7 @@ export function classifyV2ConversationEvent(
   const payload = asRecord(eventRecord?.payload) || {};
   const message = asRecord(payload.message);
   const delta = asRecord(payload.delta);
-  const type = readString(eventRecord, ['normalizedType', 'normalized_type', 'type', 'eventType', 'event_type']) || normalizeEventType(eventRecord?.type);
+  const type = canonicalConversationEventType(event);
   const eventId = readString(eventRecord, ['eventId', 'event_id', 'id']) || `sequence-${readNumber(eventRecord, ['sequence'], 0)}`;
   const conversationId = readString(eventRecord, ['conversationId', 'conversation_id']);
   const content = conversationContent(payload, message, delta);
@@ -912,7 +935,7 @@ export function classifyV2ConversationEvent(
   const providerMethod = readString(payload, ['providerMethod', 'provider_method', 'method']);
   const messageRole = readString(message, ['role']).toLowerCase();
   const at = eventTime(event, now);
-  const base = { raw: '', at, workspaceId, conversationId };
+  const base = { raw: '', at, workspaceId, conversationId, turnId, sequence: event.sequence };
   const block = conversationBlock(payload, turnId);
 
   if (type === 'provider.event' && isProviderLifecycleMethod(providerMethod)) {
@@ -940,6 +963,7 @@ export function classifyV2ConversationEvent(
     const subtitle = blockContent(block.category, payload, message, delta);
     const id = `v2-block-${conversationId}-${block.turnId || 'turnless'}-${block.category}-${block.id}`;
     const semantic = {
+      ...base,
       id,
       subtitle,
       category: block.category,
@@ -948,7 +972,6 @@ export function classifyV2ConversationEvent(
       blockId: block.id,
       contentIndex: block.contentIndex,
       sequence: readNumber(eventRecord, ['sequence'], 0),
-      ...base,
     };
     switch (block.category) {
       case 'assistant_final':
@@ -1009,7 +1032,7 @@ export function classifyV2ConversationEvent(
     if (!content && type === 'turn.started') return null;
     if (content || type === 'message.created') {
       return {
-        id: type === 'message.delta' || type === 'message.completed'
+        id: type === 'assistant.delta' || type === 'message.delta' || type === 'message.completed'
           ? `v2-assistant-${conversationId}-${turnId || 'current'}`
           : eventId,
         kind: 'incoming',
