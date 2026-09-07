@@ -9,6 +9,9 @@ import { MetricsCollector, type ConnectionMetrics } from './connectionMetrics';
  */
 export const MAX_MESSAGE_SIZE = 4 * 1024 * 1024;
 
+export type PermissionMode = 'ask' | 'auto' | 'full-access';
+export type WorkMode = 'plan' | 'implement';
+
 export type ProviderKind = 'acp' | 'codex' | 'pi' | 'claude-code' | 'grok-build';
 
 export const PROVIDER_DISPLAY_NAMES: Record<ProviderKind, string> = {
@@ -57,6 +60,10 @@ export type ProviderCapabilities = {
   followUpQueue?: boolean;
   controlActions?: ConversationControlAction[];
   permissionConfig?: {
+    /** Modes supported by the adapter; runtime policy may still reject a mode. */
+    modes?: PermissionMode[];
+    defaultMode?: PermissionMode;
+    supportsPlan?: boolean;
     sandboxModes?: string[];
     approvalPolicies?: string[];
     permissionProfiles?: string[];
