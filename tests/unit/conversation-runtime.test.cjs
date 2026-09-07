@@ -238,3 +238,47 @@ test('repeated delivery after a long journal is a projection no-op', () => {
   assert.deepEqual(replay.appliedEvents, []);
   assert.equal(replay.state.appliedSequence, 8000);
 });
+
+test('final turn usage replaces all early request snapshots without losing prior turns', () => {
+  const events = [event(1, 'turn.started', { turnId: 't' }),
+    event(2, 'usage.updated', { provider: 'grok-build', turnId: 'old', usage: { last: { input: 4, output: 1 } } }),
+    event(3, 'usage.updated', { provider: 'grok-build', turnId: 't', requestId: 'r1', usage: { last: { input: 10, output: 2 } } }),
+    event(4, 'usage.updated', { provider: 'grok-build', turnId: 't', requestId: 'r2', usage: { last: { input: 20, output: 3 } } }),
+    event(5, 'usage.updated', { provider: 'grok-build', turnId: 't', scope: 'turn', aggregation: 'snapshot', final: true,
+      usage: { cacheSemantics: 'included', last: { input: 30, output: 5, cacheRead: 10, total: 35 } } })];
+  const state = apply(empty(), ...events).state;
+  assert.equal(state.usageRecords.length, 2);
+  assert.equal(state.usageRecords.reduce((sum, record) => sum + runtime.usageTotalTokens(record), 0), 40);
+  assert.deepEqual(apply(state, ...events).state.usageRecords, state.usageRecords);
+});
+
+test('commentary deltas preserve their started phase and stay visible in progress', () => {
+  const state = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
+    event(2, 'message.started', { turnId: 't', block: { id: 'm', category: 'assistant_progress', phase: 'started', text: '' } }),
+    event(3, 'message.delta', { turnId: 't', block: { id: 'm', category: 'assistant_final', phase: 'delta', text: 'Checking files' }, text: 'Checking files' })).state;
+  const progress = state.timeline.find(entry => entry.category === 'assistant_progress');
+  assert.ok(progress);
+  assert.equal(parity.isStepProgressEntry(progress), true);
+  assert.equal(state.timeline.some(entry => entry.kind === 'assistant'), false);
+});
+
+test('configuration requires provider readback and failures preserve last effective value', () => {
+  let state = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
+    event(2, 'turn.configuration', { turnId: 't', effective: { model: 'old', source: 'provider-confirmed' } }),
+    event(3, 'control.requested', { turnId: 't', requestId: 'r', control: { action: 'configure', model: 'new' } }),
+    event(4, 'control.completed', { turnId: 't', requestId: 'r', result: {} })).state;
+  assert.equal(state.effectiveConfig.model, 'old'); assert.equal(state.configurationStatus, 'unknown');
+  state = apply(state, event(5, 'control.unknown', { turnId: 't', requestId: 'r', message: 'ACK lost' })).state;
+  assert.equal(state.effectiveConfig.model, 'old'); assert.equal(state.configurationStatus, 'unknown');
+  state = apply(state, event(6, 'turn.configuration', { turnId: 't', effective: { model: 'new', source: 'provider-confirmed' } })).state;
+  assert.equal(state.effectiveConfig.model, 'new'); assert.equal(state.configurationStatus, 'provider-confirmed');
+});
+
+test('native queue snapshots replay deterministically and failures pause pending entries', () => {
+  const events = [event(1, 'turn.started', { turnId: 't' }),
+    event(2, 'queue.updated', { turnId: 't', items: [{ id: 'q', text: 'Next', status: 'delivering' }] }),
+    event(3, 'turn.failed', { turnId: 't' })];
+  const state = apply(empty(), ...events).state;
+  assert.equal(state.queueItems[0].status, 'delivering'); assert.equal(state.queuePaused, true);
+  assert.deepEqual(apply(state, ...events).state.queueItems, state.queueItems);
+});

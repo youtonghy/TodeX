@@ -53,6 +53,7 @@ export type ProviderCapabilities = {
   structuredOutput?: boolean;
   interjection?: boolean;
   steering?: boolean;
+  liveConfiguration?: boolean;
   followUpQueue?: boolean;
   controlActions?: ConversationControlAction[];
   permissionConfig?: {
@@ -188,7 +189,7 @@ export function providerCapabilityMatrix(capabilities: ProviderCapabilities) {
     streaming: capabilities.streaming ?? true,
     structuredOutput: capabilities.structuredOutput ?? capabilities.toolEvents,
     interjection: capabilities.interjection ?? false,
-    steering: capabilities.steering ?? capabilities.cancel,
+    steering: capabilities.steering ?? false,
     followUpQueue: capabilities.followUpQueue ?? false,
     controlActions: capabilities.controlActions ?? [
       ...(capabilities.cancel ? ['cancel' as const] : []),

@@ -977,7 +977,7 @@ export function classifyV2ConversationEvent(
       case 'assistant_final':
         return subtitle ? { ...semantic, kind: 'incoming', title: 'Agent' } : null;
       case 'assistant_progress':
-        return null;
+        return subtitle ? { ...semantic, kind: 'system', title: '进展' } : null;
       case 'reasoning':
         return subtitle ? { ...semantic, kind: 'system', title: '思考中' } : null;
       case 'tool':
@@ -1101,7 +1101,7 @@ export function isVisibleConversationEntry(entry: TimelineEntry): boolean {
 export function isStepProgressEntry(entry: TimelineEntry): boolean {
   if (entry.kind !== 'system') return false;
   if (entry.category) {
-    return ['reasoning', 'tool', 'approval', 'status'].includes(entry.category);
+    return ['reasoning', 'assistant_progress', 'tool', 'approval', 'status'].includes(entry.category);
   }
   return (
     entry.title === '执行步骤'

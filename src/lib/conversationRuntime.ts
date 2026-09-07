@@ -10,6 +10,7 @@ const string = (value: unknown): string => typeof value === 'string' ? value : '
 const number = (value: unknown): number => typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0;
 export type RuntimePermission = { id: string; turnId: string; event: ConversationEvent; payload: RecordValue };
 export type RuntimeCompaction = ContextCompactionState & { recommended: boolean };
+export type NativeQueueItem = { id: string; text: string; status: string };
 export type ConversationRuntime = {
   conversationId: string;
   workspaceId: string;
@@ -28,7 +29,13 @@ export type ConversationRuntime = {
   pendingPermissions: RuntimePermission[];
   requestedConfig: RecordValue | null;
   effectiveConfig: RecordValue | null;
-  configurationStatus: 'unknown' | 'validated' | 'provider-confirmed';
+  configurationStatus: 'unknown' | 'validated' | 'provider-confirmed' | 'pending' | 'rejected';
+  configurationRequestId?: string;
+  pendingControl?: { requestId: string; turnId: string; status: 'pending' | 'unknown' };
+  configurationError?: string;
+  messageCategories: Record<string, string>;
+  queueItems: NativeQueueItem[];
+  queuePaused: boolean;
   lastProgressAt: string | null;
 };
 export function createConversationRuntime(conversationId: string, workspaceId: string): ConversationRuntime {
@@ -36,6 +43,7 @@ export function createConversationRuntime(conversationId: string, workspaceId: s
     conversationId, workspaceId, appliedSequence: 0, highWaterSequence: 0, pendingEvents: {},
     timeline: [], activeTurnId: '', status: 'idle', usageRecords: [], contextUsage: null, cumulativeUsage: null,
     subagents: [], compaction: { status: 'idle', recommended: false, updatedAt: '' }, memoryEntries: [],
+    messageCategories: {}, queueItems: [], queuePaused: false,
     pendingPermissions: [], requestedConfig: null, effectiveConfig: null, configurationStatus: 'unknown', lastProgressAt: null,
   };
 }
@@ -98,6 +106,11 @@ function usageProjection(state: ConversationRuntime, event: ConversationEvent, t
       ?? object(message.usage).totalTokens ?? object(message.usage).total_tokens ?? object(message.usage).total;
     if (typeof explicitTotal === 'number') record.totalTokens = number(explicitTotal);
   }
+  // A provider's final turn snapshot supersedes its earlier per-request usage.
+  if (payload.scope === 'turn' && payload.aggregation === 'snapshot' && payload.final === true && turnId) {
+    state.usageRecords = state.usageRecords.filter(item => item.turnId !== turnId);
+    record = { ...record, id: `${state.conversationId}:usage:${turnId}`, scope: 'turn' };
+  }
   state.usageRecords = upsertUsageRecord(state.usageRecords, record);
 }
 
@@ -109,13 +122,25 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent): voi
   const turnId = explicitTurnId || state.activeTurnId;
   if (type === 'turn.started') {
     state.activeTurnId = explicitTurnId;
+    state.messageCategories = {};
     state.status = 'running';
     state.requestedConfig = payload.requestedPermissions ? object(payload.requestedPermissions) : null;
     state.effectiveConfig = payload.effectivePermissions
       ? { ...object(payload.effectivePermissions), source: 'locally-validated' } : null;
     state.configurationStatus = payload.configurationStatus === 'validated' ? 'validated' : 'unknown';
   }
-  const entry = classifyV2ConversationEvent(event, state.workspaceId, turnId);
+  // Codex deltas have no phase. Keep the category advertised by item/started
+  // for this native item instead of promoting commentary into the final answer.
+  const messageKey = `${turnId}:${string(block.id)}`;
+  let projectedEvent = event;
+  if (block.category === 'assistant_final' || block.category === 'assistant_progress') {
+    if (block.phase === 'started' || block.phase === 'completed') {
+      state.messageCategories = { ...state.messageCategories, [messageKey]: string(block.category) };
+    } else if (state.messageCategories[messageKey]) {
+      projectedEvent = { ...event, payload: { ...payload, block: { ...block, category: state.messageCategories[messageKey] } } };
+    }
+  }
+  const entry = classifyV2ConversationEvent(projectedEvent, state.workspaceId, turnId);
   if (entry) {
     const existing = state.timeline.find(item => item.id === entry.id);
     const next = existing && shouldAppendV2ConversationEvent(event)
@@ -137,7 +162,7 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent): voi
     state.pendingPermissions = state.pendingPermissions.filter(item => explicitTurnId && item.turnId !== explicitTurnId);
     if (!explicitTurnId || !state.activeTurnId || explicitTurnId === state.activeTurnId) {
       state.activeTurnId = '';
-      state.status = type === 'turn.failed' ? 'failed' : type === 'turn.cancelled' ? 'cancelled' : type === 'turn.interrupted' ? 'interrupted' : 'completed';
+      state.status = type === 'turn.failed' || (type === 'turn.completed' && payload.stopReason === 'error') ? 'failed' : type === 'turn.cancelled' ? 'cancelled' : type === 'turn.interrupted' ? 'interrupted' : 'completed';
     }
   }
   usageProjection(state, event, turnId);
@@ -184,8 +209,45 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent): voi
     && (type === 'turn.configuration' || payload.effectiveConfig)) {
     if (payload.requested) state.requestedConfig = object(payload.requested);
     const effective = object(payload.effective ?? payload.effectiveConfig);
-    state.effectiveConfig = effective;
+    state.effectiveConfig = { ...state.effectiveConfig, ...effective };
+    state.configurationError = undefined;
     state.configurationStatus = effective.source === 'provider-confirmed' ? 'provider-confirmed' : 'unknown';
+  }
+  if (type === 'control.requested' && explicitTurnId === state.activeTurnId) {
+    state.pendingControl = { requestId: string(payload.requestId), turnId: explicitTurnId, status: 'pending' };
+  }
+  if (type === 'control.unknown' && payload.requestId === state.pendingControl?.requestId) {
+    state.pendingControl = { ...state.pendingControl!, status: 'unknown' };
+  }
+  if ((type === 'control.completed' || type === 'control.rejected') && payload.requestId === state.pendingControl?.requestId) {
+    state.pendingControl = undefined;
+  }
+  if (!state.activeTurnId) state.pendingControl = undefined;
+  if (type === 'control.requested' && object(payload.control).action === 'configure') {
+    const { action: _, ...requested } = object(payload.control);
+    state.requestedConfig = { ...state.requestedConfig, ...requested };
+    state.configurationRequestId = string(payload.requestId);
+    state.configurationStatus = 'pending';
+    state.configurationError = undefined;
+  }
+  if ((type === 'control.rejected' || type === 'control.unknown') && payload.requestId === state.configurationRequestId) {
+    state.configurationStatus = type === 'control.unknown' ? 'unknown' : 'rejected';
+    state.configurationError = string(payload.message) || 'Agent 未应用这次配置';
+  }
+  if (type === 'control.completed' && payload.requestId === state.configurationRequestId
+    && state.configurationStatus === 'pending') {
+    // A transport ACK alone is not an effective-value readback.
+    state.configurationStatus = 'unknown';
+  }
+  if (type === 'queue.updated' && Array.isArray(payload.items)) {
+    state.queueItems = payload.items.flatMap((value) => {
+      const item = object(value); const id = string(item.id ?? item.itemId);
+      return id ? [{ id, text: string(item.text), status: string(item.status) || 'queued' }] : [];
+    });
+    state.queuePaused = payload.paused === true;
+  }
+  if (type === 'queue.paused' || ['turn.failed', 'turn.cancelled', 'turn.interrupted'].includes(type)) {
+    state.queuePaused = state.queueItems.length > 0;
   }
   state.lastProgressAt = event.time;
 }
