@@ -2,7 +2,7 @@ import type { ComponentProps, ReactNode } from 'react';
 import { useCallback, useMemo } from 'react';
 import { View } from 'react-native';
 import { Alert, Button, Chip, Spinner, Text, useToast } from 'heroui-native';
-import { EmptyState } from 'heroui-native-pro';
+import { EmptyState } from 'heroui-native-pro/empty-state';
 
 import { StyledIonicons } from './StyledIonicons';
 

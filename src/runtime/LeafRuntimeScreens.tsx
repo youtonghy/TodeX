@@ -1,4 +1,6 @@
-import { memo, type ComponentProps } from 'react';
+import { CliManagerScreen } from '../screens/CliManagerScreen';
+import { apiClientForConnection } from '../lib/appCore';
+import { memo, useMemo, type ComponentProps } from 'react';
 
 import { AboutScreen, type AboutScreenProps } from '../screens/AboutScreen';
 import { ExperimentalScreen } from '../screens/ExperimentalScreen';
@@ -74,4 +76,11 @@ export const AboutRouteScreen = memo(function AboutRouteScreen() {
   const snapshot = useRouteSnapshot<AboutRouteSnapshot>(ABOUT_ROUTE_SNAPSHOT);
   const connectionState = useConnectionState();
   return snapshot ? <AboutScreen {...snapshot} connectionState={connectionState} /> : null;
+});
+
+export const CliManagerRouteScreen = memo(function CliManagerRouteScreen() {
+  const snapshot = useRouteSnapshot<SettingsRouteSnapshot>(SETTINGS_ROUTE_SNAPSHOT);
+  const settings = snapshot?.settings;
+  const client = useMemo(() => settings ? apiClientForConnection(settings) : null, [settings]);
+  return client ? <CliManagerScreen client={client} backendLabel={settings?.serverUrl} /> : null;
 });

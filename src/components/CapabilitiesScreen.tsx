@@ -1,12 +1,12 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { FlatList, RefreshControl, ScrollView, View } from 'react-native';
 import { Button, Chip, Surface, Switch, Text } from 'heroui-native';
-import { Segment } from 'heroui-native-pro';
+import { Segment } from 'heroui-native-pro/segment';
 
 import type { McpServerCatalogDescriptor, ProviderDescriptor, ProviderKind, SkillCatalogDescriptor } from '../lib/v2';
 import type { CatalogState } from '../lib/capabilityCatalog';
 import { ProviderIcon } from './ProviderIcon';
-import { EmptyStateView, InlineNotice, LoadingState, Screen, StyledIonicons } from './ui';
+import { AppDialog, EmptyStateView, InlineNotice, LoadingState, Screen, StyledIonicons } from './ui';
 
 export type CapabilitiesScreenProps = {
   workspacePath: string;
@@ -18,6 +18,8 @@ export type CapabilitiesScreenProps = {
   canInvoke?: boolean;
   onToggleSkill?: (skill: SkillCatalogDescriptor, provider: ProviderKind) => void;
   onCallMcp?: (resourceId: string, toolName: string) => void;
+  onReadSkill?: (provider: ProviderKind, resourceId: string) => Promise<string>;
+  onRefreshMcp?: (resourceId: string) => Promise<void>;
 };
 
 type ViewMode = 'skills' | 'mcp';
@@ -47,11 +49,13 @@ function SkillRow({
   selected,
   canSelect,
   onToggle,
+  onPreview,
 }: {
   item: SkillCatalogDescriptor;
   selected: boolean;
   canSelect: boolean;
   onToggle?: () => void;
+  onPreview?: () => void;
 }) {
   const enabled = item.active && item.valid;
   const status = selected ? '已附加' : enabled ? '当前启用' : item.shadowedBy ? '被覆盖' : item.valid ? '未启用' : '无效';
@@ -82,6 +86,7 @@ function SkillRow({
           {item.error ? <InlineNotice status="danger" title={item.error} className="mt-1" /> : null}
         </View>
       </View>
+      {onPreview ? <Button variant="secondary" onPress={onPreview}><Button.Label>查看完整指令</Button.Label></Button> : null}
       {canSelect ? (
         <View className="flex-row items-center justify-between gap-3 rounded-2xl bg-surface-secondary px-3 py-2 pl-[52px]">
           <Text type="body-sm" className="text-foreground">
@@ -98,11 +103,22 @@ function McpRow({
   item,
   canInvoke,
   onCall,
+  onRefresh,
 }: {
   item: McpServerCatalogDescriptor;
   canInvoke: boolean;
   onCall?: (toolName: string) => void;
+  onRefresh?: () => Promise<void>;
 }) {
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState('');
+  const refreshLock = useRef(false);
+  const refresh = async () => {
+    if (!onRefresh || refreshLock.current) return;
+    refreshLock.current = true; setRefreshing(true); setRefreshError('');
+    try { await onRefresh(); } catch (cause) { setRefreshError(cause instanceof Error ? cause.message : '工具刷新失败'); }
+    finally { refreshLock.current = false; setRefreshing(false); }
+  };
   const active = item.enabled && item.active;
   const status = active ? '当前启用' : item.shadowedBy ? '被覆盖' : item.enabled ? '可用' : '已禁用';
   return (
@@ -125,10 +141,13 @@ function McpRow({
           </Text>
         </View>
       </View>
-      {item.tools?.length && canInvoke ? (
+      {item.error || refreshError ? <InlineNotice status="danger" title="MCP 读取失败" description={refreshError || item.error} /> : null}
+      {canInvoke && onRefresh ? <Button variant="secondary" isDisabled={refreshing} onPress={() => void refresh()}><Button.Label>{refreshing ? '正在刷新…' : '刷新工具'}</Button.Label></Button> : null}
+      {!item.tools?.length ? <Text type="body-xs" color="muted">尚未列出工具，刷新后由后端发现。</Text> : null}
+      {item.tools?.length ? (
         <View className="flex-row flex-wrap gap-2 pl-[52px]">
           {item.tools.map((tool) => (
-            <Button key={tool.name} size="sm" variant="secondary" className="h-9 rounded-full" onPress={() => onCall?.(tool.name)}>
+            <Button key={tool.name} size="md" variant="secondary" isDisabled={!canInvoke || !onCall || refreshing} onPress={() => onCall?.(tool.name)}>
               <StyledIonicons name="play-outline" size={13} className="text-foreground" />
               <Button.Label>{tool.name}</Button.Label>
             </Button>
@@ -148,7 +167,22 @@ export function CapabilitiesScreen({
   canInvoke = false,
   onToggleSkill,
   onCallMcp,
+  onReadSkill, onRefreshMcp,
 }: CapabilitiesScreenProps) {
+  const [preview, setPreview] = useState<{ title: string; content: string; loading: boolean; error: string }>();
+  const previewGeneration = useRef(0);
+  useEffect(() => { previewGeneration.current++; setPreview(undefined); return () => { previewGeneration.current++; }; }, [workspacePath, onReadSkill]);
+  const readSkill = async (item: SkillCatalogDescriptor, provider: ProviderKind) => {
+    if (!onReadSkill) return;
+    const revision = ++previewGeneration.current;
+    setPreview({ title: item.name, content: '', loading: true, error: '' });
+    try {
+      const content = await onReadSkill(provider, item.resourceId);
+      if (revision === previewGeneration.current) setPreview({ title: item.name, content, loading: false, error: '' });
+    } catch (cause) {
+      if (revision === previewGeneration.current) setPreview({ title: item.name, content: '', loading: false, error: cause instanceof Error ? cause.message : '无法读取 Skill' });
+    }
+  };
   const [viewMode, setViewMode] = useState<ViewMode>('skills');
   const [providerChoice, setProviderChoice] = useState<ProviderChoice>('common');
   const provider = providerChoice === 'common' ? undefined : providers.find((item) => item.id === providerChoice);
@@ -178,7 +212,7 @@ export function CapabilitiesScreen({
   const isLoading = state?.status === 'loading';
   const error = state?.error;
   const refreshControl = (
-    <RefreshControl refreshing={false} onRefresh={() => providerChoice !== 'common' && onRefresh(providerChoice)} />
+    <RefreshControl refreshing={Boolean(isLoading)} onRefresh={() => providerChoice === 'common' ? providerKeys.forEach(onRefresh) : onRefresh(providerChoice)} />
   );
 
   return (
@@ -193,11 +227,11 @@ export function CapabilitiesScreen({
               {provider ? `${provider.displayName} · ${providerStatus(provider).label}` : '通用能力'} · {workspacePath}
             </Text>
           </View>
-          {providerChoice !== 'common' ? (
-            <Button isIconOnly size="sm" variant="secondary" accessibilityLabel="刷新能力目录" onPress={() => onRefresh(providerChoice)} className="h-9 w-9 rounded-full">
+          {(
+            <Button isIconOnly size="sm" variant="secondary" accessibilityLabel="刷新能力目录" onPress={() => providerChoice === 'common' ? providerKeys.forEach(onRefresh) : onRefresh(providerChoice)} className="h-11 w-11 rounded-full">
               <StyledIonicons name="refresh-outline" size={16} className="text-foreground" />
             </Button>
-          ) : null}
+          )}
         </View>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerClassName="gap-2">
           <Chip
@@ -259,6 +293,7 @@ export function CapabilitiesScreen({
               selected={selectedSkills.some((skill) => skill.resourceId === item.skill.resourceId || skill.name === item.skill.name)}
               canSelect={Boolean(canInvoke && onToggleSkill)}
               onToggle={() => onToggleSkill?.(item.skill, item.provider)}
+              onPreview={onReadSkill ? () => void readSkill(item.skill, item.provider) : undefined}
             />
           )}
           contentContainerClassName="px-4 pb-10 pt-2"
@@ -271,13 +306,18 @@ export function CapabilitiesScreen({
           data={mcpServers}
           keyExtractor={(item) => `${item.resourceId}:${item.name}`}
           renderItem={({ item }) => (
-            <McpRow item={item} canInvoke={canInvoke} onCall={(toolName) => onCallMcp?.(item.resourceId, toolName)} />
+            <McpRow item={item} canInvoke={canInvoke} onRefresh={onRefreshMcp ? () => onRefreshMcp(item.resourceId) : undefined} onCall={onCallMcp ? (toolName) => onCallMcp(item.resourceId, toolName) : undefined} />
           )}
           contentContainerClassName="px-4 pb-10 pt-2"
           refreshControl={refreshControl}
           ListEmptyComponent={<EmptyStateView icon="git-network-outline" title="没有找到 MCP Server" description="切换 Provider 或刷新目录后再试。" />}
         />
       ) : null}
+      <AppDialog isOpen={Boolean(preview)} onOpenChange={open => { if (!open) { previewGeneration.current++; setPreview(undefined); } }} title={preview?.title || 'Skill 指令'} actions={<Button variant="secondary" onPress={() => { previewGeneration.current++; setPreview(undefined); }}><Button.Label>关闭</Button.Label></Button>}>
+        {preview?.loading ? <LoadingState label="正在读取完整指令…" /> : null}
+        {preview?.error ? <InlineNotice status="danger" title="读取失败" description={preview.error} /> : null}
+        <ScrollView style={{ maxHeight: 420 }}><Text selectable type="body-sm" className="font-mono">{preview?.content || (!preview?.loading && !preview?.error ? '内容为空' : '')}</Text></ScrollView>
+      </AppDialog>
     </Screen>
   );
 }

@@ -282,7 +282,13 @@ test('uses normalized block semantics before misleading payload fields', () => {
   const progress = parity.classifyV2ConversationEvent(normalized('assistant_progress', 'progress-1', 'delta', {
     delta: { text: 'intermediate' },
   }), 'workspace-1');
-  assert.equal(progress, null);
+  // Preserve progress semantics for runtime projection, but keep it out of final answers.
+  assert.equal(progress.category, 'assistant_progress');
+  assert.equal(progress.kind, 'system');
+  assert.equal(progress.title, '进展');
+  assert.equal(progress.subtitle, 'intermediate');
+  assert.equal(parity.isStepProgressEntry(progress), true);
+  assert.equal(parity.isVisibleConversationEntry(progress), false);
 });
 
 test('does not promote unknown context content into an assistant answer', () => {

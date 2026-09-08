@@ -45,3 +45,7 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# Local browser validation artifacts.
+/.playwright-cli/
+/output/playwright/

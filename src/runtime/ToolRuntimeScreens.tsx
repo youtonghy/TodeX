@@ -1,9 +1,10 @@
-import { memo } from 'react';
+import { memo, useMemo } from 'react';
 
 import { BrowserPreviewWebView } from '../components/BrowserPreviewWebView';
 import {
   DEFAULT_WORKBENCH_STATE,
   apiClientForConnection,
+  profileSettings,
   type GitRepositorySummary,
   type MobileWorkbenchState,
 } from '../lib/appCore';
@@ -15,7 +16,7 @@ import { FilesScreen } from '../screens/FilesScreen';
 import { GitScreen } from '../screens/GitScreen';
 import { WorkbenchScreen } from '../screens/WorkbenchScreen';
 import { GitDiffRuntimePanel, TerminalRuntimePanel } from './OutputRuntimeScreens';
-import { useAppRuntime, useKeyedStoreValue, useRouteSnapshot } from './appRuntime';
+import { useAppRuntime, useConnectionState, useKeyedStoreValue, useRouteSnapshot } from './appRuntime';
 
 export type ToolRouteSnapshot = {
   settings: ConnectionSettings;
@@ -32,6 +33,8 @@ export type ToolRouteSnapshot = {
 };
 
 export type ToolRuntimeActions = {
+  sendGitAgentPrompt: (conversationId: string, text: string) => Promise<boolean>;
+  openWorktree: (conversationId: string, path: string) => void;
   resolveBackendProfile: (workspaceId?: string, conversationId?: string) => BackendConnectionProfile | null;
   updateWorkbenchState: (conversationId: string, patch: Partial<MobileWorkbenchState>) => void;
   setConversationChatDraft: (conversationId: string, value: string | ((current: string) => string)) => void;
@@ -46,6 +49,15 @@ export type ToolRuntimeActions = {
   ) => Promise<boolean>;
 };
 
+export function captureBrowserElement(actions: ToolRuntimeActions, conversationId: string, element: NonNullable<MobileWorkbenchState['inspectedElement']>) {
+  actions.updateWorkbenchState(conversationId, { inspectedElement: element });
+  const description = [
+    `[浏览器元素 ${element.tagName.toLowerCase() || 'element'}${element.selector ? ` ${element.selector}` : ''}]`,
+    element.text,
+  ].filter(Boolean).join(' ');
+  actions.setConversationChatDraft(conversationId, current => `${current}${current.trim() ? '\n' : ''}${description}`);
+}
+
 export const TOOL_ROUTE_SNAPSHOT = 'route:tools';
 export const TOOL_ACTIONS = 'actions:tools';
 
@@ -56,26 +68,24 @@ function useToolContext(workspaceId: string, conversationId: string) {
   const conversation = useKeyedStoreValue(runtime.conversations, conversationId);
   const actions = runtime.actions.get<ToolRuntimeActions>(TOOL_ACTIONS);
   const profile = actions.resolveBackendProfile(workspaceId, conversationId);
-  return { snapshot, workspace, conversation, actions, profile };
+  const client = useMemo(() => snapshot ? apiClientForConnection(snapshot.settings, profile) : null, [snapshot?.settings, profile]);
+  return { snapshot, workspace, conversation, actions, profile, client };
 }
 
 export const BrowserRouteScreen = memo(function BrowserRouteScreen(props: AppScreenProps<'Browser'>) {
-  const { snapshot, actions, profile } = useToolContext(props.route.params.workspaceId, props.route.params.conversationId);
-  if (!snapshot) return null;
+  const { snapshot, actions, profile, client } = useToolContext(props.route.params.workspaceId, props.route.params.conversationId);
+  if (!snapshot || !client) return null;
   const backendUrl = profile?.serverUrl || snapshot.settings.serverUrl;
   return (
     <BrowserScreen
-      client={apiClientForConnection(snapshot.settings, profile)}
+      client={client}
       initialUrl={props.route.params.url || backendUrl}
       initialFilePath={props.route.params.filePath}
       renderWebView={(result) => (
         <BrowserPreviewWebView
           result={result}
           backendUrl={backendUrl}
-          onInspect={(inspectedElement) => actions.updateWorkbenchState(
-            props.route.params.conversationId,
-            { inspectedElement },
-          )}
+          onInspect={(element) => captureBrowserElement(actions, props.route.params.conversationId, element)}
         />
       )}
     />
@@ -83,24 +93,24 @@ export const BrowserRouteScreen = memo(function BrowserRouteScreen(props: AppScr
 });
 
 export const FilesRouteScreen = memo(function FilesRouteScreen(props: AppScreenProps<'Files'>) {
-  const { snapshot, workspace, actions, profile } = useToolContext(props.route.params.workspaceId, props.route.params.conversationId);
-  if (!snapshot) return null;
+  const { snapshot, workspace, actions, client } = useToolContext(props.route.params.workspaceId, props.route.params.conversationId);
+  if (!snapshot || !client) return null;
   return (
     <FilesScreen
-      client={apiClientForConnection(snapshot.settings, profile)}
+      client={client}
       rootPath={workspace?.path || snapshot.settings.defaultWorkspacePath}
       initialFilePath={props.route.params.filePath}
-      onFileSelected={(path) => actions.updateWorkbenchState(props.route.params.conversationId, { browserFilePath: path })}
+      onFileSelected={(path) => actions.updateWorkbenchState(props.route.params.conversationId, { selectedFilePath: path })}
     />
   );
 });
 
 export const WorkbenchRouteScreen = memo(function WorkbenchRouteScreen(props: AppScreenProps<'Workbench'>) {
-  const { snapshot, workspace, conversation, actions, profile } = useToolContext(
+  const { snapshot, workspace, conversation, actions, profile, client } = useToolContext(
     props.route.params.workspaceId,
     props.route.params.conversationId,
   );
-  if (!snapshot) return null;
+  if (!snapshot || !client) return null;
   const conversationId = props.route.params.conversationId;
   const workbench = snapshot.workbenchByConversation[conversationId] || DEFAULT_WORKBENCH_STATE;
   const tab = props.route.params.tab || workbench.activeTab;
@@ -109,23 +119,19 @@ export const WorkbenchRouteScreen = memo(function WorkbenchRouteScreen(props: Ap
     <WorkbenchScreen
       activeTab={tab}
       visibleTabs={workbench.tabs}
-      onTabChange={(next) => actions.updateWorkbenchState(conversationId, { activeTab: next })}
+      onTabChange={(next) => {
+        actions.updateWorkbenchState(conversationId, { activeTab: next });
+        props.navigation.setParams({ tab: next });
+      }}
       title={workspace?.name || '工作台'}
       subtitle={conversation?.title || workspace?.path}
       action={workbench.inspectedElement
         ? {
-            label: '插入元素',
+            label: '返回对话',
             icon: 'add-circle-outline',
             onPress: () => {
               const element = workbench.inspectedElement;
               if (!element) return;
-              const description = [
-                `[浏览器元素 ${element.tagName.toLowerCase() || 'element'}${element.selector ? ` ${element.selector}` : ''}]`,
-                element.text,
-              ].filter(Boolean).join(' ');
-              actions.setConversationChatDraft(conversationId, (current) => (
-                `${current}${current.trim() ? '\n' : ''}${description}`
-              ));
               actions.updateWorkbenchState(conversationId, { inspectedElement: null });
               props.navigation.navigate('Chat', {
                 workspaceId: props.route.params.workspaceId,
@@ -134,41 +140,49 @@ export const WorkbenchRouteScreen = memo(function WorkbenchRouteScreen(props: Ap
             },
           }
         : { label: 'Git', icon: 'git-branch-outline', onPress: () => actions.openGit(conversationId) }}
-      renderTerminal={<TerminalRuntimePanel workspaceId={props.route.params.workspaceId} conversationId={conversationId} />}
+      renderTerminal={<TerminalRuntimePanel visible={tab === 'terminal'} workspaceId={props.route.params.workspaceId} conversationId={conversationId} />}
       renderGitDiff={<GitDiffRuntimePanel workspaceId={props.route.params.workspaceId} conversationId={conversationId} />}
       renderBrowser={<BrowserScreen
-        client={apiClientForConnection(snapshot.settings, profile)}
+        client={client}
         initialUrl={workbench.browserUrl || backendUrl}
         initialFilePath={workbench.browserFilePath || undefined}
-        onResult={(result) => actions.updateWorkbenchState(conversationId, { browserUrl: result.url })}
+        onResult={(result) => actions.updateWorkbenchState(conversationId, /^https?:\/\//i.test(result.url) ? { browserUrl: result.url, browserFilePath: '' } : { browserUrl: '', browserFilePath: result.url })}
         renderWebView={(result) => (
           <BrowserPreviewWebView
             result={result}
             backendUrl={backendUrl}
-            onInspect={(inspectedElement) => actions.updateWorkbenchState(conversationId, { inspectedElement })}
+            onInspect={(element) => captureBrowserElement(actions, conversationId, element)}
           />
         )}
       />}
       renderFiles={<FilesScreen
-        client={apiClientForConnection(snapshot.settings, profile)}
+        client={client}
         rootPath={workspace?.path || snapshot.settings.defaultWorkspacePath}
-        initialFilePath={workbench.browserFilePath || undefined}
-        onFileSelected={(path) => actions.updateWorkbenchState(conversationId, { browserFilePath: path })}
+        initialFilePath={workbench.selectedFilePath || undefined}
+        onFileSelected={(path) => actions.updateWorkbenchState(conversationId, { selectedFilePath: path })}
       />}
     />
   );
 });
 
 export const GitRouteScreen = memo(function GitRouteScreen(props: AppScreenProps<'Git'>) {
-  const { snapshot, workspace, actions, profile } = useToolContext(props.route.params.workspaceId, props.route.params.conversationId);
-  if (!snapshot) return null;
+  const runtime = useAppRuntime();
+  const thinking = useKeyedStoreValue(runtime.thinkingConversations, props.route.params.conversationId);
+  const connection = useConnectionState();
+  const { snapshot, workspace, actions, profile, client } = useToolContext(props.route.params.workspaceId, props.route.params.conversationId);
+  if (!snapshot || !client) return null;
   const workspacePath = workspace?.path || snapshot.settings.defaultWorkspacePath;
   const target = `${profile?.id || snapshot.activeBackendConnectionId || 'default'}\n${workspacePath}`;
   const targetMatches = snapshot.gitRepositoryTarget === target;
   return (
     <GitScreen
       key={target}
-      client={apiClientForConnection(snapshot.settings, profile)}
+      settings={profile ? profileSettings(profile, snapshot.settings) : snapshot.settings}
+      onSendAgentPrompt={(text) => actions.sendGitAgentPrompt(props.route.params.conversationId, text)}
+      onOpenWorktree={(path) => actions.openWorktree(props.route.params.conversationId, path)}
+      writingBlocked={thinking === true || connection !== 'open'}
+      agentUnavailableReason={connection !== 'open' ? '请先连接后端' : thinking ? '请等待当前任务完成' : undefined}
+      client={client}
       workspacePath={workspacePath}
       repositories={targetMatches ? snapshot.gitRepositories : []}
       status={targetMatches ? snapshot.gitRepositoryStatus : 'loading'}

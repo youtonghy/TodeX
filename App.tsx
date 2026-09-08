@@ -1,3 +1,4 @@
+import type { LiveConversationControl } from './src/components/ConversationControls';
 import 'react-native-get-random-values';
 import {
   useCallback,
@@ -66,6 +67,9 @@ import {
   saveSecret,
 } from './src/lib/storage';
 import { ConnectionError } from './src/lib/connectionError';
+import { ConversationRecovery } from './src/lib/conversationRecovery';
+import type { ConversationRuntime } from './src/lib/conversationRuntime';
+import { ConversationCommands, CommandOutcomeUnknown, promptContentFromAttachments, controlFrame } from './src/lib/conversationCommands';
 import { TimelineStore } from './src/lib/timelineStore';
 import { retainTerminalOutput } from './src/lib/outputModels';
 import { tokenMatchesOrigin, type BackendProbeResult } from './src/lib/connectionProbe';
@@ -73,6 +77,8 @@ import {
   V2ApiClient,
   providerDisplayName,
   type ConversationEvent,
+  type ConversationReplay,
+  type ConversationControlAction,
   type ConversationManifest,
   type GitAction,
   type GitRepositorySummary as V2GitRepositorySummary,
@@ -668,6 +674,31 @@ export default function App() {
   const queuedChatDraftsRef = useRef<Record<string, QueuedChatSubmission[]>>({});
   const queuedChatDispatchingRef = useRef(new Set<string>());
   const sendQueuedChatDraftRef = useRef<(submission: QueuedChatSubmission, conversationId: string) => Promise<boolean>>(async () => false);
+  const commandsRef = useRef(new ConversationCommands());
+  const backendEpochRef = useRef(0);
+  const controlRequestsRef = useRef(new Map<string, string>());
+  const pendingV2SubmissionsRef = useRef(new Map<string, { conversationId: string; submission: QueuedChatSubmission }>());
+  const confirmedV2RequestsRef = useRef(new Set<string>());
+  const projectedV2Ref = useRef(new Map<string, ConversationRuntime>());
+  const replayV2Ref = useRef<(id: string, cursor: number, limit: number) => Promise<ConversationReplay>>(async () => { throw new Error('恢复尚未就绪'); });
+  const projectV2Ref = useRef<(state: ConversationRuntime, events: ConversationEvent[], recovering: boolean) => void>(() => undefined);
+  const recoveryRef = useRef<ConversationRecovery | null>(null);
+  if (!recoveryRef.current) recoveryRef.current = new ConversationRecovery(
+    (...args) => replayV2Ref.current(...args),
+    (...args) => projectV2Ref.current(...args),
+    (error) => setLastError(error),
+  );
+  useEffect(() => {
+    backendEpochRef.current++;
+    recoveryRef.current?.reset();
+    commandsRef.current.disconnect();
+    appRuntime.agentStates.replace({});
+    appRuntime.controlStatuses.replace({});
+    controlRequestsRef.current.clear();
+    confirmedV2RequestsRef.current.clear();
+    projectedV2Ref.current.clear();
+  }, [settings.serverUrl, settings.authToken, settings.tenantId]);
+
 
   const modelCatalog = useMemo(
     () => mergeModelCatalog(
@@ -894,6 +925,7 @@ export default function App() {
   }, []);
 
   const resetTransportPipeline = useCallback(() => {
+    commandsRef.current.disconnect();
     if (workspaceBackendSyncTimerRef.current) {
       clearTimeout(workspaceBackendSyncTimerRef.current);
       workspaceBackendSyncTimerRef.current = null;
@@ -2577,6 +2609,86 @@ export default function App() {
     scheduleServerEventDrain();
   }, [scheduleServerEventDrain]);
 
+  replayV2Ref.current = async (id, cursor, limit) => {
+    const conversation = conversationsRef.current.find(item => item.id === id || item.v2ConversationId === id);
+    const profile = backendProfileForContext(conversation?.workspaceId, conversation?.id);
+    return apiClientForConnection(settings, profile).replayEvents(id, cursor, limit);
+  };
+  projectV2Ref.current = (state, events, recovering) => {
+    const conversation = conversationsRef.current.find(item => item.id === state.conversationId || item.v2ConversationId === state.conversationId);
+    if (!conversation) return;
+    const id = conversation.id;
+    appRuntime.agentStates.set(id, state);
+    if (state.pendingControl) {
+      controlRequestsRef.current.set(id, state.pendingControl.requestId);
+      appRuntime.controlStatuses.set(id, state.pendingControl.status);
+    } else if (!state.activeTurnId || (!recovering && !events.length && appRuntime.controlStatuses.getSnapshot(id) === 'unknown')) {
+      controlRequestsRef.current.delete(id);
+      appRuntime.controlStatuses.delete(id);
+    }
+    const previous = projectedV2Ref.current.get(id);
+    projectedV2Ref.current.set(id, state);
+    if (previous?.timeline !== state.timeline) {
+      const previousEntries = new Map(previous?.timeline.map(entry => [entry.id, entry]));
+      const changed = state.timeline.filter(entry => previousEntries.get(entry.id) !== entry);
+      timelineStore.upsertBatch(changed.map(entry => ({
+        entry: entry.conversationId === id ? entry : { ...entry, conversationId: id }, appendSubtitle: false,
+      })));
+    }
+    for (const event of events) {
+      const payload = event.payload && typeof event.payload === 'object' ? event.payload as Record<string, unknown> : {};
+      const controlId = typeof payload.requestId === 'string' ? payload.requestId : '';
+      if (['control.completed', 'control.rejected'].includes(event.type) && controlId === controlRequestsRef.current.get(id)) {
+        controlRequestsRef.current.delete(id);
+        appRuntime.controlStatuses.delete(id);
+        commandsRef.current.settle(controlId, payload, event.type === 'control.rejected' ? String(payload.message || '控制未应用') : undefined);
+      }
+      const requestId = payload.clientRequestId;
+      if (typeof requestId === 'string') {
+        confirmedV2RequestsRef.current.add(requestId);
+        if (confirmedV2RequestsRef.current.size > 512) confirmedV2RequestsRef.current.delete(confirmedV2RequestsRef.current.values().next().value!);
+        commandsRef.current.settle(requestId, { conversationId: state.conversationId, turnId: payload.turnId });
+        setQueuedChatDrafts(current => ({ ...current, [id]: (current[id] ?? []).filter(item => item.id !== requestId) }));
+      }
+    }
+    if (state.contextUsage && state.contextUsage !== previous?.contextUsage) {
+      const usage = state.contextUsage;
+      setContextUsageByConversation(current => ({ ...current, [id]: { ...usage } }));
+    }
+    if (state.usageRecords.length && state.usageRecords !== previous?.usageRecords) {
+      setUsageRecords(current => [
+        ...state.usageRecords.map(record => ({ ...record, conversationId: id, workspaceId: conversation.workspaceId })),
+        ...current.filter(record => record.conversationId !== id),
+      ].slice(0, MAX_USAGE_RECORDS));
+    }
+    if (recovering) return;
+    setConversationTurnId(id, state.activeTurnId);
+    const pending = [...pendingV2SubmissionsRef.current.values()].some(item => item.conversationId === id);
+    setConversationThinking(id, pending || state.status === 'running' || state.status === 'waitingPermission');
+    if (events.some(event => event.type.startsWith('turn.')) || !events.length || !previous) {
+      updateConversation(id, { lastSequence: state.appliedSequence });
+    }
+    if (!previous || previous.pendingPermissions !== state.pendingPermissions || !events.length) setPendingRequests(current => {
+      let next = current.filter(request => request.requestType !== 'conversation.permission.request'
+        || request.data.conversationId !== state.conversationId);
+      for (const permission of state.pendingPermissions) {
+        next = updatePendingRequestsFromEvent(next, {
+          type: 'conversation.permission.request',
+          payload: { ...permission.payload, requestId: permission.id, permissionId: permission.id,
+            conversationId: state.conversationId, sessionId: conversation.sessionId },
+        }, resolvedPendingRequestIdsRef.current);
+      }
+      return next;
+    });
+    const next = queuedChatDraftsRef.current[id]?.[0];
+    if (state.status === 'completed' && !pending && next && (!next.status || next.status === 'ready') && !queuedChatDispatchingRef.current.has(id)) {
+      queuedChatDispatchingRef.current.add(id);
+      void sendQueuedChatDraftRef.current(next, id).then(sent => {
+        if (sent) setQueuedChatDrafts(current => ({ ...current, [id]: (current[id] ?? []).filter(item => item.id !== next.id) }));
+      }).finally(() => queuedChatDispatchingRef.current.delete(id));
+    }
+  };
+
   const decodeSocketFrame = useCallback((frame: PendingSocketFrame) => {
     if (!appRuntime.connection.isCurrentGeneration(frame.generation)) {
       return;
@@ -2587,133 +2699,20 @@ export default function App() {
       const parsed = JSON.parse(text) as Record<string, unknown>;
       const messageType = typeof parsed.type === 'string' ? parsed.type : '';
       if (messageType === 'server.result') {
-        // v2 command acknowledgements (session.resume, conversation.*). The
-        // legacy plane answers through ServerEvents, nothing to enqueue.
+        commandsRef.current.settle(String(parsed.id), parsed.payload as Record<string, unknown>);
         return;
       }
-      if (messageType === 'server.error' && parsed.id !== undefined) {
-        // v2 command error envelope; surface the structured message.
-        const payload = parsed.payload as { code?: unknown; message?: unknown } | undefined;
-        const code = typeof payload?.code === 'string' ? payload.code : '';
-        const detail = typeof payload?.message === 'string' ? payload.message : 'v2 命令失败';
-        setLastError(code ? `[${code}] ${detail}` : detail);
+      if (messageType === 'server.error') {
+        const payload = parsed.payload as { code?: string; message?: string } | undefined;
+        const message = [payload?.code, payload?.message || 'v2 命令失败'].filter(Boolean).join(': ');
+        if (parsed.id !== undefined) commandsRef.current.settle(String(parsed.id), undefined, message);
+        setLastError(message);
         return;
       }
       if (messageType === 'conversation.event') {
-        const payload = parsed.payload && typeof parsed.payload === 'object'
-          ? parsed.payload as Record<string, unknown>
-          : parsed;
-        const conversationId = typeof payload.conversationId === 'string' ? payload.conversationId : '';
-        const sequence = typeof payload.sequence === 'number' && Number.isFinite(payload.sequence)
-          ? payload.sequence
-          : 0;
-        const conversation = conversationsRef.current.find((item) => item.id === conversationId || item.v2ConversationId === conversationId);
-        if (conversation && typeof payload.type === 'string') {
-          const event = payload as unknown as ConversationEvent;
-          const contextUsage = sharedContextUsageFromV2Event(event);
-          if (contextUsage) {
-            const nextUsage: MobileContextUsage = {
-              usedTokens: contextUsage.usedTokens,
-              contextWindow: contextUsage.contextWindow,
-              model: contextUsage.model,
-              inputTokens: contextUsage.inputTokens,
-              outputTokens: contextUsage.outputTokens,
-              cachedInputTokens: contextUsage.cachedInputTokens,
-              cacheWriteTokens: contextUsage.cacheWriteTokens,
-              updatedAt: contextUsage.updatedAt,
-            };
-            setContextUsageByConversation((current) => (
-              sameContextUsage(current[conversation.id], nextUsage)
-                ? current
-                : { ...current, [conversation.id]: nextUsage }
-            ));
-            const usage = sharedUsageRecordFromV2Event(event, {
-              conversationId: conversation.id,
-              provider: conversation.provider,
-              model: conversation.model,
-            });
-            if (usage) {
-              const record: MobileUsageRecord = {
-                ...usage,
-                workspaceId: conversation.workspaceId,
-                contextWindow: contextUsage.contextWindow,
-              };
-              setUsageRecords((current) => {
-                if (current.some((item) => item.id === record.id)) return current;
-                return [record, ...current].slice(0, MAX_USAGE_RECORDS);
-              });
-            }
-          }
-          const eventPayload = event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
-            ? event.payload as Record<string, unknown>
-            : {};
-          const payloadTurnId = typeof eventPayload.turnId === 'string'
-            ? eventPayload.turnId
-            : typeof eventPayload.turn_id === 'string' ? eventPayload.turn_id : '';
-          if (event.type === 'turn.started' && payloadTurnId) {
-            setConversationTurnId(conversation.id, payloadTurnId);
-          }
-          const entry = classifyV2ConversationEvent(
-            event,
-            conversation.workspaceId,
-            payloadTurnId || turnIdsRef.current[conversation.id] || '',
-          );
-          if (entry) {
-            upsertChatTimeline(entry, shouldAppendV2ConversationEvent(event));
-          }
-          if (event.type === 'turn.started') {
-            setConversationThinking(conversation.id, true);
-          }
-          if (event.type === 'turn.completed' || event.type === 'turn.cancelled' || event.type === 'turn.failed') {
-            setConversationThinking(conversation.id, false);
-            setConversationTurnId(conversation.id, '');
-          }
-          if (
-            sequence > 0
-            && (event.type === 'turn.started' || event.type === 'turn.completed' || event.type === 'turn.cancelled' || event.type === 'turn.failed')
-          ) {
-            updateConversation(conversation.id, {
-              lastSequence: sequence,
-              updatedAt: Date.parse(event.time) || Date.now(),
-            });
-          }
-          if (event.type === 'permission.requested') {
-            const inner = event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
-              ? event.payload as Record<string, unknown>
-              : {};
-            const permissionId = typeof inner.permissionId === 'string' ? inner.permissionId : '';
-            if (permissionId) {
-              enqueueServerEvent({
-                type: 'conversation.permission.request',
-                payload: {
-                  requestId: permissionId,
-                  permissionId,
-                  conversationId,
-                  sessionId: conversation.sessionId,
-                  title: inner.title,
-                  kind: inner.kind,
-                  details: inner.details,
-                  options: inner.options,
-                  providerRequestId: inner.providerRequestId,
-                },
-              });
-            }
-          } else if (event.type === 'permission.resolved') {
-            const permissionId = typeof eventPayload.permissionId === 'string'
-              ? eventPayload.permissionId
-              : typeof eventPayload.requestId === 'string' ? eventPayload.requestId : '';
-            if (permissionId) {
-              enqueueServerEvent({
-                type: 'permission.resolved',
-                payload: {
-                  requestId: permissionId,
-                  permissionId,
-                  conversationId,
-                },
-              });
-            }
-          }
-        }
+        const event = (parsed.payload ?? parsed) as ConversationEvent;
+        const conversation = conversationsRef.current.find(item => item.id === event.conversationId || item.v2ConversationId === event.conversationId);
+        if (conversation) recoveryRef.current?.receive(event.conversationId, conversation.workspaceId, [event]);
         return;
       }
       enqueueServerEvent(parsed as unknown as ServerEvent);
@@ -2763,8 +2762,12 @@ export default function App() {
     return appRuntime.connection.send(message);
   }, [appRuntime]);
 
+  const sendProtocolCommand = useCallback((message: { id: string; type: string; payload: Record<string, unknown> }, timeout = 30_000) => (
+    commandsRef.current.send(message, frame => appRuntime.connection.send(frame), timeout)
+  ), [appRuntime]);
+
   const subscribeV2Conversation = useCallback((conversationId: string) => {
-    return appRuntime.connection.subscribeConversation(conversationId);
+    return appRuntime.connection.subscribeConversation(conversationId, recoveryRef.current?.get(conversationId)?.appliedSequence ?? 0);
   }, [appRuntime]);
 
   const sendSessionResume = useCallback((sessionCursors: Record<string, number>) => {
@@ -2816,15 +2819,14 @@ export default function App() {
     sendSessionResume(getSessionCursorSnapshot());
     void refreshServerVersion();
     void syncWorkspacesFromBackend();
-    const activeConversation = conversationsRef.current.find(
-      (conversation) => conversation.id === activeConversationRef.current,
-    );
-    if (activeConversation?.v2ConversationId) {
-      try {
-        subscribeV2Conversation(activeConversation.v2ConversationId);
-      } catch {
-        // Opening the conversation retries the subscription.
-      }
+    for (const conversation of conversationsRef.current) {
+      const wanted = conversation.id === activeConversationRef.current || thinkingConversationsRef.current[conversation.id]
+        || (queuedChatDraftsRef.current[conversation.id]?.length ?? 0) > 0;
+      const matchesBackend = !conversation.backendConnectionId || conversation.backendConnectionId === activeBackendConnectionIdRef.current;
+      if (!wanted || !matchesBackend || !isV2Conversation(conversation)) continue;
+      const id = conversation.v2ConversationId || conversation.id;
+      void recoveryRef.current?.recover(id, conversation.workspaceId);
+      try { subscribeV2Conversation(id); } catch { /* Retried when the conversation is opened. */ }
     }
   }, [getSessionCursorSnapshot, refreshServerVersion, sendSessionResume, subscribeV2Conversation, syncWorkspacesFromBackend]);
 
@@ -2861,7 +2863,7 @@ export default function App() {
   );
 
   const seedTerminalState = useCallback((workspace: WorkspaceRecord, conversation: ConversationRecord, patch: Partial<TerminalClientState> = {}) => {
-    const terminalId = terminalIdForConversation(conversation.id);
+    const terminalId = patch.terminalId || terminalIdForConversation(conversation.id);
     setTerminalById((current) => {
       const existing = current[terminalId];
       const base: TerminalClientState = {
@@ -2892,13 +2894,14 @@ export default function App() {
   const startTerminalSession = useCallback((
     workspace: WorkspaceRecord,
     conversation: ConversationRecord,
-    options: { cwd: string; shell: string; rows: number; cols: number },
+    options: { cwd: string; shell: string; rows: number; cols: number; terminalId?: string },
   ) => {
     const cwd = options.cwd.trim() || workspace.path;
     const shell = options.shell.trim();
     const rows = Number.isFinite(options.rows) ? Math.round(options.rows) : DEFAULT_TERMINAL_ROWS;
     const cols = Number.isFinite(options.cols) ? Math.round(options.cols) : DEFAULT_TERMINAL_COLS;
     const terminalId = seedTerminalState(workspace, conversation, {
+      terminalId: options.terminalId || terminalIdForConversation(conversation.id),
       cwd,
       shell,
       rows,
@@ -2954,7 +2957,6 @@ export default function App() {
       data,
     }, createRequestId('terminal-input'));
     if (sent) {
-      appendTerminalOutput(terminalId, terminalOutputLine('input', data));
       return true;
     }
     if (terminal) {
@@ -3016,8 +3018,8 @@ export default function App() {
     }, createRequestId('terminal-resize'));
   }, [sendProtocolMessage]);
 
-  const requestTerminalStatus = useCallback((workspace: WorkspaceRecord, conversation: ConversationRecord) => {
-    const terminalId = seedTerminalState(workspace, conversation);
+  const requestTerminalStatus = useCallback((workspace: WorkspaceRecord, conversation: ConversationRecord, requestedTerminalId?: string) => {
+    const terminalId = seedTerminalState(workspace, conversation, requestedTerminalId ? { terminalId: requestedTerminalId } : {});
     return sendProtocolMessage('terminal.status', {
       tenantId: workspace.tenantId || settings.tenantId,
       workspaceId: workspace.id,
@@ -4625,6 +4627,7 @@ export default function App() {
         previous.activeTab === next.activeTab
         && previous.browserUrl === next.browserUrl
         && previous.browserFilePath === next.browserFilePath
+        && previous.selectedFilePath === next.selectedFilePath
         && JSON.stringify(previous.tabs) === JSON.stringify(next.tabs)
         && JSON.stringify(previous.inspectedElement) === JSON.stringify(next.inspectedElement)
       ) {
@@ -4911,6 +4914,29 @@ export default function App() {
       return null;
     }
     const { workspace, conversation } = context;
+    if (isV2Conversation(conversation)) {
+      const provider = v2ProvidersRef.current.find(item => item.id === conversation.provider);
+      if (!provider?.capabilities.controlActions?.includes('fork') || thinkingConversationsRef.current[conversationId]) {
+        setLastError('当前 Agent 不支持分叉，或当前任务尚未结束。');
+        return null;
+      }
+      void (async () => {
+        try {
+          const result = await sendProtocolCommand({ id: createRequestId('fork'), type: 'conversation.fork',
+            payload: { conversationId: conversation.v2ConversationId || conversation.id, title: `${conversation.title} · 分叉` } });
+          if (typeof result.conversationId !== 'string') throw new Error('未返回分叉标识，请刷新会话列表核对。');
+          const api = apiClientForConnection(settings, backendProfileForContext(workspace.id, conversation.id));
+          const manifest = await api.getConversation(result.conversationId);
+          const record = { ...conversationFromManifest(manifest, workspace.id), backendConnectionId: conversation.backendConnectionId,
+            model: conversation.model, reasoningEffort: conversation.reasoningEffort };
+          setConversations(current => [record, ...current.filter(item => item.id !== record.id)]);
+          setActiveWorkspaceId(workspace.id);
+          setActiveConversationId(record.id);
+          subscribeV2Conversation(manifest.id);
+        } catch (error) { setLastError(error instanceof Error ? error.message : '分叉失败'); }
+      })();
+      return null;
+    }
     const threadId = normalizeThreadId(conversation.threadId);
     if (!threadId) {
       setLastError('当前记录还没有可 fork 的原生 thread。');
@@ -4941,7 +4967,7 @@ export default function App() {
       { selectResult: true, resultConversationId: nextConversation.id },
     );
     return nextConversation;
-  }, [getConversationContext, sendNativeThreadAction, settings.approvalPolicy, settings.approvalsReviewer, settings.defaultModel, settings.sandboxMode]);
+  }, [backendProfileForContext, sendProtocolCommand, subscribeV2Conversation, settings, getConversationContext, sendNativeThreadAction, settings.approvalPolicy, settings.approvalsReviewer, settings.defaultModel, settings.sandboxMode]);
 
   const removeConversation = useCallback((conversationId: string) => {
     const context = getConversationContext(conversationId);
@@ -4999,6 +5025,7 @@ export default function App() {
       text: string,
       conversationId = activeConversationRef.current,
       skills: SelectedSkillAttachment[] = [],
+      attachments: ComposerAttachmentDraft[] = [],
     ) => {
       const context = getConversationContext(conversationId);
       if (!context) {
@@ -5006,11 +5033,26 @@ export default function App() {
         return false;
       }
       const { workspace, conversation } = context;
+      const backendId = conversation.backendConnectionId || workspace.backendConnectionId;
+      if (backendId && backendId !== activeBackendConnectionIdRef.current) { setLastError('请先连接此会话所属的 Backend。'); return false; }
       const v2Id = conversation.v2ConversationId || (isV2Conversation(conversation) ? conversation.id : '');
       if (!v2Id) {
         notify.warning('当前不是 v2 对话', '请新建对话后再发送。');
         return false;
       }
+      if (recoveryRef.current?.isRecovering(v2Id)) { setLastError('正在恢复会话记录，请完成核对后再发送。'); return false; }
+      if (appRuntime.connectionState.getSnapshot() !== 'open') {
+        setLastError('请先连接 Backend。');
+        return false;
+      }
+      if ([...pendingV2SubmissionsRef.current.values()].some(item => item.conversationId === conversationId)
+        || (queuedChatDraftsRef.current[conversationId] ?? []).some(item => item.status === 'unknown')) {
+        setLastError('上一条发送结果尚未确认，请先核对会话。');
+        return false;
+      }
+      let content;
+      try { content = promptContentFromAttachments(attachments); }
+      catch (error) { setLastError(error instanceof Error ? error.message : '附件无法发送'); return false; }
       const skillRefs = skills
         .filter((skill) => Boolean(skill.resourceId))
         .map((skill) => ({ resourceId: skill.resourceId as string, name: skill.name }));
@@ -5027,28 +5069,43 @@ export default function App() {
         category: 'status',
         phase: 'started',
       });
-      const sent = sendRawProtocolFrame({
-        id: createRequestId('prompt'),
-        type: 'conversation.prompt',
-        payload: {
-          conversationId: v2Id,
-          text,
-          ...(model ? { model } : {}),
-          ...(reasoningEffort ? { reasoningEffort } : {}),
-          ...(skillRefs.length ? { skills: skillRefs } : {}),
-        },
+      const epoch = backendEpochRef.current;
+      const requestId = createRequestId('prompt');
+      const protocolPayload = {
+        conversationId: v2Id, text,
+        ...(model ? { model } : {}),
+        ...(reasoningEffort ? { reasoningEffort } : {}),
+        ...(skillRefs.length ? { skills: skillRefs } : {}),
+        ...(content.length ? { content } : {}),
+      };
+      const submission: QueuedChatSubmission = { id: requestId, text, attachments, skills, protocolPayload };
+      pendingV2SubmissionsRef.current.set(requestId, { conversationId, submission });
+      void sendProtocolCommand({ id: requestId, type: 'conversation.prompt', payload: protocolPayload }).then(() => {
+        confirmedV2RequestsRef.current.add(requestId);
+        if (confirmedV2RequestsRef.current.size > 512) confirmedV2RequestsRef.current.delete(confirmedV2RequestsRef.current.values().next().value!);
+      }).catch(error => {
+        if (confirmedV2RequestsRef.current.has(requestId)) return;
+        const unknown = error instanceof CommandOutcomeUnknown;
+        setQueuedChatDrafts(current => ({ ...current, [conversationId]: [
+          { ...submission, status: unknown ? 'unknown' : 'failed' },
+          ...(current[conversationId] ?? []).filter(item => item.id !== requestId),
+        ] }));
+        if (epoch !== backendEpochRef.current) return;
+        const projected = recoveryRef.current?.get(v2Id);
+        setConversationThinking(conversationId, projected?.status === 'running' || projected?.status === 'waitingPermission');
+        setLastError(error instanceof Error ? error.message : '发送失败，内容已保留。');
+        if (unknown) void recoveryRef.current?.recover(v2Id, workspace.id);
+      }).finally(() => {
+        pendingV2SubmissionsRef.current.delete(requestId);
+        const state = epoch === backendEpochRef.current ? recoveryRef.current?.get(v2Id) : undefined;
+        if (state) projectV2Ref.current(state, [], recoveryRef.current?.isRecovering(v2Id) ?? false);
       });
-      if (!sent) {
-        setConversationThinking(conversation.id, false);
-        setLastError('请先连接 Backend。');
-        return false;
-      }
       if (conversation.title === '新对话' && text.trim()) {
         updateConversation(conversation.id, { title: text.slice(0, 18), updatedAt: Date.now() });
       }
       return true;
     },
-    [appendTimeline, getConversationContext, sendRawProtocolFrame, setConversationThinking, settings.defaultModel, settings.defaultReasoningEffort, updateConversation],
+    [appRuntime, appendTimeline, getConversationContext, sendProtocolCommand, setQueuedChatDrafts, setConversationThinking, settings.defaultModel, settings.defaultReasoningEffort, updateConversation],
   );
 
   const sendLocalTurn = useCallback(
@@ -5141,7 +5198,7 @@ export default function App() {
     sendQueuedChatDraftRef.current = async (submission, conversationId) => {
       const conversation = conversationsRef.current.find((item) => item.id === conversationId) ?? null;
       if (isV2Conversation(conversation)) {
-        return sendV2Prompt(submission.text, conversationId, submission.skills);
+        return sendV2Prompt(submission.text, conversationId, submission.skills, submission.attachments);
       }
       return sendLocalTurn(submission.text, 'implement', conversationId, submission.attachments, submission.skills);
     };
@@ -5481,10 +5538,26 @@ export default function App() {
     return true;
   }, [appendTimeline, getConversationContext]);
 
+  const runV2Control = useCallback(async (conversationId: string, action: ConversationControlAction): Promise<boolean> => {
+    const context = getConversationContext(conversationId);
+    if (!context || !isV2Conversation(context.conversation)) return false;
+    const conversation = context.conversation;
+    const provider = v2ProvidersRef.current.find(item => item.id === conversation.provider);
+    const supported = provider?.capabilities.controlActions?.includes(action)
+      || ((action === 'cancel' || action === 'interrupt' || action === 'stop') && provider?.capabilities.cancel);
+    if (!supported) { setLastError('当前 Agent 未提供此操作，请使用已支持的会话功能。'); return false; }
+    try {
+      await sendProtocolCommand({ id: createRequestId(action), ...controlFrame(action, conversation.v2ConversationId || conversation.id) });
+      return true;
+    } catch (error) { setLastError(error instanceof Error ? error.message : '操作失败'); return false; }
+  }, [getConversationContext, sendProtocolCommand]);
+
   const sendSlashCommand = useCallback(
     (input: string, conversationId = activeConversationRef.current) => {
       const trimmed = input.trim();
       if (!trimmed.startsWith('/')) {
+        const current = conversationsRef.current.find(item => item.id === conversationId);
+        if (isV2Conversation(current)) { sendV2Prompt(trimmed, conversationId); return; }
         sendLocalTurn(trimmed, 'implement', conversationId);
         return;
       }
@@ -5499,6 +5572,19 @@ export default function App() {
       }
 
       const { workspace, conversation } = context;
+      if (isV2Conversation(conversation)) {
+        if (['compact', 'resume', 'retry', 'cancel', 'interrupt', 'stop'].includes(lower)) {
+          void runV2Control(conversationId, lower as ConversationControlAction);
+        } else if (lower === 'fork') {
+          forkConversation(conversationId);
+        } else if (['history', 'status'].includes(lower)) {
+          void recoveryRef.current?.recover(conversation.v2ConversationId || conversation.id, workspace.id);
+        } else {
+          // Provider commands are dispatched as text to that provider, never to a legacy Codex adapter.
+          sendV2Prompt(trimmed, conversationId);
+        }
+        return;
+      }
       const addCommandNotice = (title: string, detail: string) => {
         appendTimeline(makeSystemEntry(title, detail, workspace.id, conversation.id));
       };
@@ -5971,7 +6057,7 @@ export default function App() {
 
       addCommandNotice(`/${lower} recognized`, '该命令不在当前内置命令清单中，已阻止作为普通 prompt 发送。');
     },
-    [
+    [runV2Control, forkConversation, sendV2Prompt,
       appRuntime,
       applyPermissionProfile,
       applyServiceTier,
@@ -6092,16 +6178,7 @@ export default function App() {
       return;
     }
     if (isV2Conversation(conversation)) {
-      const v2Id = conversation.v2ConversationId || conversation.id;
-      if (sendRawProtocolFrame({
-        id: createRequestId('cancel'),
-        type: 'conversation.cancel',
-        payload: { conversationId: v2Id },
-      })) {
-        appendTimeline(makeSystemEntry('已发送停止', '正在请求 Backend 取消当前回合。', workspace.id, conversation.id));
-      } else {
-        setLastError('请先连接 Backend。');
-      }
+      void runV2Control(conversation.id, 'cancel');
       return;
     }
     const threadId = normalizeThreadId(conversation.threadId);
@@ -6112,7 +6189,7 @@ export default function App() {
     if (sendWorkspaceCommand(workspace, 'codex.local.interrupt', { threadId, turnId: turnIdsRef.current[conversationId] || '' }, conversation)) {
       appendTimeline(makeSystemEntry('已发送停止', '正在请求 Codex 中断当前思考。', workspace.id, conversation.id));
     }
-  }, [appendTimeline, sendRawProtocolFrame, sendWorkspaceCommand]);
+  }, [runV2Control, appendTimeline, sendRawProtocolFrame, sendWorkspaceCommand]);
 
   const submitChat = useCallback((conversationId: string, draft: string) => {
     const text = draft.trim();
@@ -6142,6 +6219,11 @@ export default function App() {
     if (skills.length > 0) {
       appendTimeline(makeSystemEntry('已选择 Skill', selectedSkillSummary(skills), workspace.id, conversationId));
     }
+    if (isV2Conversation(conversation)) {
+      try { promptContentFromAttachments(attachments); }
+      catch (error) { setLastError(error instanceof Error ? error.message : '附件无法发送'); return false; }
+      if (!isThinking && !sendV2Prompt(text, conversationId, skills, attachments)) return false;
+    }
     setConversationChatDraft(conversationId, '');
     setConversationComposerSelection(conversationId, DEFAULT_COMPOSER_SELECTION);
     setConversationAttachments(conversationId, []);
@@ -6162,13 +6244,7 @@ export default function App() {
       appendTimeline(makeSystemEntry('消息已加入候选', '当前任务完成后会自动继续发送。', workspace.id, conversationId));
       return true;
     }
-    if (isV2Conversation(conversation)) {
-      if (attachments.length > 0) {
-        appendTimeline(makeSystemEntry('v2 对话暂不发送本地附件', '附件仅保留在时间线记录中。', workspace.id, conversationId));
-      }
-      sendV2Prompt(text, conversationId, skills);
-      return true;
-    }
+    if (isV2Conversation(conversation)) return true;
     if (attachments.length > 0 || skills.length > 0) {
       void sendLocalTurn(text, 'implement', conversationId, attachments, skills);
       return true;
@@ -6220,6 +6296,13 @@ export default function App() {
     }
     if (action === 'archive') {
       removeConversation(conversationId);
+      return;
+    }
+    const current = conversationsRef.current.find(item => item.id === conversationId);
+    if (current && isV2Conversation(current)) {
+      if (action === 'resume' || action === 'compact') void runV2Control(conversationId, action);
+      else if (['history', 'detail', 'turns'].includes(action)) void recoveryRef.current?.recover(current.v2ConversationId || current.id, current.workspaceId);
+      else setLastError('当前 Agent 未提供此会话操作。');
       return;
     }
     if (action === 'resume') {
@@ -6290,7 +6373,7 @@ export default function App() {
       return;
     }
     openThreadCommandPrompt(conversationId, action);
-  }, [forkConversation, openThreadCommandPrompt, removeConversation, sendNativeThreadAction, sendTrackedLocalMethod]);
+  }, [runV2Control, forkConversation, openThreadCommandPrompt, removeConversation, sendNativeThreadAction, sendTrackedLocalMethod]);
 
   const submitThreadCommandPrompt = useCallback((prompt: ThreadCommandPromptState, value: string) => {
     const trimmed = value.trim();
@@ -6447,6 +6530,51 @@ export default function App() {
     settings.serverUrl,
   ]);
 
+  const recoverConversation = async (conversationId: string) => {
+    const context = getConversationContext(conversationId);
+    if (!context || !isV2Conversation(context.conversation)) throw new Error('会话不可用。');
+    const backendId = context.conversation.backendConnectionId || context.workspace.backendConnectionId;
+    if (backendId && backendId !== activeBackendConnectionIdRef.current) throw new Error('请先连接此会话所属的 Backend。');
+    const v2Id = context.conversation.v2ConversationId || conversationId;
+    await recoveryRef.current?.recover(v2Id, context.workspace.id);
+    if (recoveryRef.current?.isRecovering(v2Id)) throw new Error('会话恢复尚未完成，请重新连接后再核对。');
+  };
+  const controlConversation = async (conversationId: string, control: LiveConversationControl): Promise<boolean> => {
+    const context = getConversationContext(conversationId);
+    const turnId = turnIdsRef.current[conversationId];
+    if (!context || !isV2Conversation(context.conversation) || !turnId || controlRequestsRef.current.has(conversationId)) {
+      setLastError('当前回合已结束或上一条控制尚未确认，请先核对记录。'); return false;
+    }
+    const backendId = context.conversation.backendConnectionId || context.workspace.backendConnectionId;
+    if (backendId && backendId !== activeBackendConnectionIdRef.current) { setLastError('请先连接此会话所属的 Backend。'); return false; }
+    const capabilities = v2ProvidersRef.current.find(item => item.id === context.conversation.provider)?.capabilities;
+    const supported = control.action === 'configure' ? capabilities?.liveConfiguration
+      : control.action === 'steer' ? capabilities?.steering || capabilities?.interjection : capabilities?.followUpQueue;
+    if (!supported) { setLastError('当前 Agent 不支持此实时操作。'); return false; }
+    const requestId = createRequestId('control');
+    const epoch = backendEpochRef.current;
+    controlRequestsRef.current.set(conversationId, requestId);
+    appRuntime.controlStatuses.set(conversationId, 'pending');
+    try {
+      const result = await sendProtocolCommand({ id: requestId, type: 'conversation.control', payload: {
+        conversationId: context.conversation.v2ConversationId || conversationId, expectedTurnId: turnId, control,
+      } }, 35_000);
+      if (result.status === 'targetUnavailable') throw new Error('当前回合已结束，控制未应用。');
+      if (epoch !== backendEpochRef.current) return false;
+      controlRequestsRef.current.delete(conversationId);
+      appRuntime.controlStatuses.delete(conversationId);
+      return true;
+    } catch (error) {
+      if (epoch !== backendEpochRef.current) return false;
+      const unknown = error instanceof CommandOutcomeUnknown;
+      if (unknown) appRuntime.controlStatuses.set(conversationId, 'unknown');
+      else { controlRequestsRef.current.delete(conversationId); appRuntime.controlStatuses.delete(conversationId); }
+      setLastError(error instanceof Error ? error.message : '控制失败');
+      if (unknown) await recoverConversation(conversationId);
+      return false;
+    }
+  };
+
   appRuntime.bindOutputActions({
     startTerminalSession,
     stopTerminalSession,
@@ -6478,6 +6606,55 @@ export default function App() {
     submitThreadCommandPrompt,
   });
   appRuntime.actions.bind<ChatRuntimeActions>(CHAT_ACTIONS, {
+    controlConversation,
+    recoverConversation,
+    retryUnknownDraft: async (conversationId, id) => {
+      const item = queuedChatDraftsRef.current[conversationId]?.find(draft => draft.id === id);
+      if (!item?.protocolPayload || item.status !== 'unknown' || pendingV2SubmissionsRef.current.has(id)) return false;
+      const epoch = backendEpochRef.current;
+      await recoverConversation(conversationId);
+      if (epoch !== backendEpochRef.current) return false;
+      if (confirmedV2RequestsRef.current.has(id)) return true;
+      pendingV2SubmissionsRef.current.set(id, { conversationId, submission: item });
+      try {
+        await sendProtocolCommand({ id, type: 'conversation.prompt', payload: item.protocolPayload });
+        if (epoch !== backendEpochRef.current) return false;
+        setQueuedChatDrafts(current => ({ ...current, [conversationId]: (current[conversationId] ?? []).filter(draft => draft.id !== id) }));
+        return true;
+      } catch (error) {
+        if (epoch === backendEpochRef.current) setLastError(error instanceof Error ? error.message : '核对重试失败');
+        return false;
+      } finally { pendingV2SubmissionsRef.current.delete(id); }
+    },
+    removeQueuedDraft: (conversationId, id) => setQueuedChatDrafts(current => ({ ...current, [conversationId]: (current[conversationId] ?? []).filter(item => item.id !== id) })),
+    restoreQueuedDraft: (conversationId, id) => {
+      const item = queuedChatDraftsRef.current[conversationId]?.find(draft => draft.id === id);
+      if (!item || item.status === 'unknown') return;
+      const existingText = appRuntime.chatDrafts.getSnapshot(conversationId);
+      const existingAttachments = appRuntime.composerAttachments.getSnapshot(conversationId);
+      if (existingText?.trim() || existingAttachments?.length || selectedSkills[conversationId]?.length) {
+        setLastError('输入框已有草稿，请先发送或清空，再恢复候选消息。'); return;
+      }
+      setConversationChatDraft(conversationId, item.text);
+      setConversationAttachments(conversationId, item.attachments);
+      setConversationSelectedSkills(conversationId, item.skills);
+      setQueuedChatDrafts(current => ({ ...current, [conversationId]: (current[conversationId] ?? []).filter(draft => draft.id !== id) }));
+    },
+    resumeQueuedDrafts: (conversationId) => {
+      if (thinkingConversationsRef.current[conversationId] || queuedChatDispatchingRef.current.has(conversationId)) return;
+      const queue = queuedChatDraftsRef.current[conversationId] ?? [];
+      const item = queue[0];
+      if (!item || queue.some(draft => draft.status === 'unknown')) { setLastError('请先核对尚未确认的消息。'); return; }
+      queuedChatDispatchingRef.current.add(conversationId);
+      void sendQueuedChatDraftRef.current(item, conversationId).then(sent => {
+        if (sent) setQueuedChatDrafts(current => ({ ...current, [conversationId]: (current[conversationId] ?? []).filter(draft => draft.id !== item.id) }));
+      }).finally(() => queuedChatDispatchingRef.current.delete(conversationId));
+    },
+    openEmbeddedWorkbenchLink: (conversationId, target) => {
+      if (target.kind === 'file') updateWorkbenchState(conversationId, { activeTab: 'files', selectedFilePath: target.filePath });
+      else if (target.kind === 'browser-file') updateWorkbenchState(conversationId, { activeTab: 'browser', browserFilePath: target.filePath, browserUrl: '' });
+      else updateWorkbenchState(conversationId, { activeTab: 'browser', browserUrl: target.url, browserFilePath: '' });
+    },
     persistChatDraft: setConversationChatDraft,
     persistComposerAttachments: setConversationAttachments,
     persistSelectedSkills: setConversationSelectedSkills,
@@ -6542,6 +6719,18 @@ export default function App() {
     runThreadMenuAction,
   });
   appRuntime.actions.bind<CapabilitiesRuntimeActions>(CAPABILITIES_ACTIONS, {
+    readSkill: async (conversationId, provider, resourceId) => {
+      const context = getConversationContext(conversationId);
+      if (!context) throw new Error('未选择工作区');
+      const api = apiClientForConnection(settings, backendProfileForContext(context.workspace.id, conversationId));
+      return (await api.getSkillResource(provider, context.workspace.path, resourceId)).content;
+    },
+    refreshMcp: async (conversationId, resourceId) => {
+      const context = getConversationContext(conversationId);
+      if (!context || !isV2Conversation(context.conversation)) throw new Error('请选择支持 MCP 的 v2 对话');
+      await sendProtocolCommand({ id: createRequestId('mcp-refresh'), type: 'mcp.refresh', payload: { conversationId: context.conversation.v2ConversationId || conversationId, resourceId } });
+      await refreshCapabilityCatalog(context.conversation.provider as ProviderKind);
+    },
     refreshCapabilityCatalog,
     toggleCatalogSkill,
     callMcpTool,
@@ -6553,6 +6742,20 @@ export default function App() {
     },
   });
   appRuntime.actions.bind<ToolRuntimeActions>(TOOL_ACTIONS, {
+    sendGitAgentPrompt: async (conversationId, text) => {
+      const conversation = conversationsRef.current.find(item => item.id === conversationId);
+      if (thinkingConversationsRef.current[conversationId]) return false;
+      return isV2Conversation(conversation) ? sendV2Prompt(text, conversationId) : sendLocalTurn(text, 'implement', conversationId);
+    },
+    openWorktree: (conversationId, path) => {
+      const source = getConversationContext(conversationId);
+      if (!source) return;
+      const profileId = source.conversation.backendConnectionId || source.workspace.backendConnectionId || undefined;
+      const existing = workspacesRef.current.find(item => item.path === path && item.backendConnectionId === profileId);
+      if (existing) { selectWorkspace(existing.id); navigationRef.current?.navigate('Conversations', { workspaceId: existing.id }); return; }
+      const created = createWorkspace(displayNameFromPath(path), path, profileId);
+      if (created) navigationRef.current?.navigate('Conversations', { workspaceId: created.workspace.id });
+    },
     resolveBackendProfile: backendProfileForContext,
     updateWorkbenchState,
     setConversationChatDraft,

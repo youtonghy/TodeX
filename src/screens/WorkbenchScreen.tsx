@@ -1,8 +1,8 @@
-import { useCallback, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { View } from 'react-native';
 import type { Ionicons } from '@expo/vector-icons';
 import { Button, Text } from 'heroui-native';
-import { Segment } from 'heroui-native-pro';
+import { Segment } from 'heroui-native-pro/segment';
 
 import { EmptyStateView, Screen, StyledIonicons } from '../components/ui';
 import { WORKBENCH_TABS, type WorkbenchTab } from '../lib/workbench';
@@ -95,6 +95,10 @@ export function WorkbenchScreen({
   );
   const requestedTab = activeTab ?? localTab;
   const selectedTab = tabs.includes(requestedTab) ? requestedTab : firstTab;
+  const [visitedTabs, setVisitedTabs] = useState<WorkbenchTab[]>([selectedTab]);
+  useEffect(() => {
+    setVisitedTabs(current => current.includes(selectedTab) ? current : [...current, selectedTab]);
+  }, [selectedTab]);
 
   const handleTabChange = useCallback((value: string) => {
     if (!tabs.includes(value as WorkbenchTab)) return;
@@ -165,9 +169,11 @@ export function WorkbenchScreen({
           </Segment.Group>
         </Segment>
       </View>
-      <View className="flex-1" key={selectedTab}>
-        {rendererFor(selectedTab)}
-      </View>
+      {tabs.filter(tab => tab === selectedTab || visitedTabs.includes(tab)).map(tab => (
+        <View key={tab} style={{ flex: 1, display: tab === selectedTab ? 'flex' : 'none' }}>
+          {rendererFor(tab)}
+        </View>
+      ))}
     </Screen>
   );
 }

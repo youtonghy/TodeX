@@ -38,3 +38,9 @@ export function computeResponsiveMetrics(width: number, height: number): Respons
     isLandscapeOrWide,
   };
 }
+
+/** Available chat column width, independent of the device's orientation. */
+export function messageBubbleMaxWidth(containerWidth: number, outgoing: boolean): number {
+  const available = Math.max(0, containerWidth - 24);
+  return Math.floor(Math.min(outgoing ? 640 : 800, available * (outgoing ? 0.88 : 1)));
+}

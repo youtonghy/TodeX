@@ -10,9 +10,11 @@
     "ios": "expo run:ios",
     "web": "expo start --web",
     "test": "npm run test:unit",
-    "test:unit": "tsc --ignoreConfig src/lib/todex.ts src/lib/transportCrypto.ts src/lib/transport.ts src/lib/v2.ts src/lib/connectionError.ts src/lib/connectionProbe.ts src/lib/timelineStore.ts src/lib/outputModels.ts src/lib/responsive.ts src/runtime/externalStore.ts src/runtime/connectionController.ts src/runtime/appOverlayStore.ts --outDir dist/unit --module commonjs --target es2022 --moduleResolution node --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --strict && node --test tests/unit/*.test.cjs",
+    "test:unit": "tsc --ignoreConfig src/lib/todex.ts src/lib/conversationCommands.ts src/lib/terminalReplay.ts src/lib/gitWorkspace.ts src/lib/gitAgentActions.ts src/lib/conversationRecovery.ts src/lib/transportCrypto.ts src/lib/transport.ts src/lib/v2.ts src/lib/connectionError.ts src/lib/connectionProbe.ts src/lib/timelineStore.ts src/lib/outputModels.ts src/lib/responsive.ts src/lib/splitLayout.ts src/lib/markdown.ts src/runtime/externalStore.ts src/runtime/connectionController.ts src/runtime/appOverlayStore.ts --outDir dist/unit --module commonjs --target es2022 --moduleResolution node --ignoreDeprecations 6.0 --esModuleInterop --skipLibCheck --strict && node --test tests/unit/*.test.cjs",
     "typecheck": "tsc --noEmit",
-    "check:protocol": "tsc --ignoreConfig src/lib/todex.ts --outDir /tmp/todex-protocol-check --module commonjs --target es2020 --esModuleInterop --skipLibCheck && node scripts/check-protocol.cjs"
+    "check:protocol": "tsc --ignoreConfig src/lib/todex.ts --outDir /tmp/todex-protocol-check --module commonjs --target es2020 --esModuleInterop --skipLibCheck && node scripts/check-protocol.cjs",
+    "build:terminal-assets": "node scripts/build-terminal-assets.cjs",
+    "build:web": "expo export --platform web"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.1.1",
@@ -62,7 +64,9 @@
     "tailwind-variants": "^3.2.2",
     "tailwindcss": "^4.3.0",
     "uniwind": "^1.6.5",
-    "victory-native": "^41.26.0"
+    "victory-native": "^41.26.0",
+    "@xterm/xterm": "^6.0.0",
+    "@xterm/addon-fit": "^0.11.0"
   },
   "devDependencies": {
     "@types/react": "~19.2.10",

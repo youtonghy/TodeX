@@ -1,3 +1,4 @@
+import type { ConversationRuntime } from '../lib/conversationRuntime';
 import { createContext, useCallback, useContext, useSyncExternalStore, type ReactNode } from 'react';
 
 import type { PendingRequest, WorkspaceRecord } from '../lib/todex';
@@ -20,18 +21,20 @@ export type OutputRuntimeActions = {
   startTerminalSession: (
     workspace: WorkspaceRecord,
     conversation: ConversationRecord,
-    options: { cwd: string; shell: string; rows: number; cols: number },
+    options: { cwd: string; shell: string; rows: number; cols: number; terminalId?: string },
   ) => boolean;
   stopTerminalSession: (terminalId: string, tenantId: string, force?: boolean) => boolean;
   sendTerminalInput: (terminalId: string, tenantId: string, data: string) => boolean;
   resizeTerminalSession: (terminalId: string, tenantId: string, rows: number, cols: number) => boolean;
-  requestTerminalStatus: (workspace: WorkspaceRecord, conversation: ConversationRecord) => boolean;
+  requestTerminalStatus: (workspace: WorkspaceRecord, conversation: ConversationRecord, terminalId?: string) => boolean;
   clearTerminalOutput: (terminalId: string) => void;
   requestGitDiff: (conversationId?: string) => Promise<boolean>;
 };
 
 export type AppRuntime = {
   transaction: RuntimeTransaction;
+  agentStates: KeyedExternalStore<ConversationRuntime>;
+  controlStatuses: KeyedExternalStore<'pending' | 'unknown'>;
   timelineStore: TimelineStore;
   routeSnapshots: KeyedExternalStore<unknown>;
   actions: RuntimeActionRegistry;
@@ -70,6 +73,8 @@ export function createAppRuntime(timelineStore: TimelineStore): AppRuntime {
 
   const runtime: AppRuntime = {
     transaction,
+    agentStates: new KeyedExternalStore(transaction),
+    controlStatuses: new KeyedExternalStore(transaction),
     timelineStore,
     routeSnapshots: new KeyedExternalStore(transaction),
     actions: new RuntimeActionRegistry(),

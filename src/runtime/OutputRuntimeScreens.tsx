@@ -1,4 +1,5 @@
 import { memo } from 'react';
+import { useIsFocused } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 
 import { terminalIdForConversation } from '../lib/appCore';
@@ -8,20 +9,23 @@ import { TerminalScreen } from '../screens/TerminalScreen';
 import { useAppRuntime, useConnectionState, useKeyedStoreValue } from './appRuntime';
 
 type OutputPanelProps = {
+  visible?: boolean;
   workspaceId: string;
   conversationId: string;
 };
 
-export const TerminalRuntimePanel = memo(function TerminalRuntimePanel({ workspaceId, conversationId }: OutputPanelProps) {
+export const TerminalRuntimePanel = memo(function TerminalRuntimePanel({ workspaceId, conversationId, visible = true }: OutputPanelProps) {
   const runtime = useAppRuntime();
   const workspace = useKeyedStoreValue(runtime.workspaces, workspaceId);
   const conversation = useKeyedStoreValue(runtime.conversations, conversationId);
   const terminal = useKeyedStoreValue(runtime.terminals, terminalIdForConversation(conversationId));
   const connectionState = useConnectionState();
   const actions = runtime.outputActions;
+  const isFocused = useIsFocused();
 
   return (
     <TerminalScreen
+      visible={visible && isFocused}
       workspace={workspace}
       conversation={conversation?.workspaceId === workspaceId ? conversation : null}
       terminal={terminal}

@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { RefreshControl, ScrollView, View } from 'react-native';
 import { Button, Chip, Spinner, Surface, Switch, Text } from 'heroui-native';
-import { NumberValue } from 'heroui-native-pro';
+import { NumberValue } from 'heroui-native-pro/number-value';
 
+import { GitWorkspacePanel, type GitWorkspacePanelProps } from './GitWorkspacePanel';
+import { buildGitAgentPrompt } from '../lib/gitAgentActions';
 import type { GitAction, GitRepositorySummary, V2ApiClient } from '../lib/v2';
 import {
   EmptyStateView,
@@ -28,6 +30,11 @@ export type GitScreenProps = {
   output?: string;
   actionBusy?: boolean;
   onRefresh: (workspacePath?: string) => Promise<boolean>;
+  settings?: GitWorkspacePanelProps['settings'];
+  onSendAgentPrompt?: GitWorkspacePanelProps['onSendAgentPrompt'];
+  onOpenWorktree?: GitWorkspacePanelProps['onOpenWorktree'];
+  writingBlocked?: boolean;
+  agentUnavailableReason?: string;
   onRun: (workspacePath: string, action: GitAction, message?: string, includeUnstaged?: boolean) => Promise<boolean>;
 };
 
@@ -62,13 +69,22 @@ export function GitScreen({
   actionBusy = false,
   onRefresh,
   onRun,
+  settings, onSendAgentPrompt, onOpenWorktree, writingBlocked = false, agentUnavailableReason,
 }: GitScreenProps) {
   const { isLandscapeOrWide } = useResponsive();
   const [activeRepoPath, setActiveRepoPath] = useState('');
   const [message, setMessage] = useState('');
   const [includeUnstaged, setIncludeUnstaged] = useState(true);
+  const [panelBusy, setPanelBusy] = useState(false);
+  const [localError, setLocalError] = useState('');
   const [localActionBusy, setLocalActionBusy] = useState(false);
   const localActionBusyRef = useRef(false);
+  const actionGeneration = useRef(0);
+  useEffect(() => {
+    actionGeneration.current++; localActionBusyRef.current = false;
+    setLocalActionBusy(false); setLocalError(''); setMessage('');
+    return () => { actionGeneration.current++; };
+  }, [workspacePath, settings?.serverUrl, settings?.authToken]);
   const onRefreshRef = useRef(onRefresh);
   onRefreshRef.current = onRefresh;
   const activeRepo = useMemo(
@@ -78,7 +94,7 @@ export function GitScreen({
       ?? null,
     [activeRepoPath, repositories],
   );
-  const busy = status === 'loading' || actionBusy || localActionBusy;
+  const busy = status === 'loading' || actionBusy || localActionBusy || panelBusy;
 
   useEffect(() => {
     setActiveRepoPath((current) => repositories.some((repository) => repository.path === current)
@@ -96,14 +112,21 @@ export function GitScreen({
   };
 
   const run = (action: GitAction) => {
-    if (!activeRepo || busy || localActionBusyRef.current) return;
+    if (!activeRepo || busy || localActionBusyRef.current || writingBlocked) return;
+    if ((action === 'commit' || action === 'commit-push') && agentUnavailableReason) return;
+    const generation = actionGeneration.current;
     localActionBusyRef.current = true;
-    setLocalActionBusy(true);
-    void onRun(activeRepo.path, action, message, includeUnstaged)
+    setLocalActionBusy(true); setLocalError('');
+    const operation = onSendAgentPrompt && (action === 'commit' || action === 'commit-push')
+      ? onSendAgentPrompt(`${buildGitAgentPrompt(action === 'commit' ? 'commit' : 'commit-and-push', { workspacePath: activeRepo.path })}${message.trim() ? `\n用户提供的提交说明：${JSON.stringify(message.trim())}` : ''}\n${includeUnstaged ? '可包含与当前任务相关的未暂存更改。' : '仅提交已暂存更改，不要自动暂存其他更改。'}`)
+      : onRun(activeRepo.path, action, message, includeUnstaged);
+    void operation
       .then((ok) => {
-        if (ok && action !== 'push') setMessage('');
+        if (generation === actionGeneration.current && ok && action !== 'push') setMessage('');
       })
+      .catch(cause => { if (generation === actionGeneration.current) setLocalError(cause instanceof Error ? cause.message : 'Git 操作失败'); })
       .finally(() => {
+        if (generation !== actionGeneration.current) return;
         localActionBusyRef.current = false;
         setLocalActionBusy(false);
       });
@@ -158,32 +181,33 @@ export function GitScreen({
     <View className="gap-2">
       <SectionHeader title="提交" />
       <Surface className="gap-4 rounded-3xl p-4">
+        {agentUnavailableReason ? <InlineNotice status="warning" title={agentUnavailableReason} /> : null}
         <FormTextArea
           value={message}
           onChangeText={setMessage}
-          placeholder="提交信息（留空将自动生成）"
+          placeholder="提交说明（可选，由 Agent 检查更改并生成）"
           editable={!busy}
           minHeightClassName="min-h-24"
         />
         <ListSection variant="secondary">
           <ListRow
             title="包含未暂存的更改"
-            description="提交前自动 git add 工作区改动"
+            description="允许纳入与当前任务相关的未暂存更改"
             icon="layers-outline"
             suffix={<Switch isDisabled={busy} isSelected={includeUnstaged} onSelectedChange={setIncludeUnstaged} />}
           />
         </ListSection>
         <View className="gap-2">
-          <Button size="lg" variant="primary" isDisabled={busy} onPress={() => run(activeRepo.initialEligible ? 'initial' : 'commit')} className="rounded-2xl">
+          <Button size="lg" variant="primary" isDisabled={busy || writingBlocked || Boolean(agentUnavailableReason && !activeRepo.initialEligible)} onPress={() => run(activeRepo.initialEligible ? 'initial' : 'commit')} className="rounded-2xl">
             <StyledIonicons name="git-commit-outline" size={18} className="text-accent-foreground" />
             <Button.Label>{actionLabel(activeRepo.initialEligible ? 'initial' : 'commit')}</Button.Label>
           </Button>
           <View className="flex-row gap-2">
-            <Button size="md" variant="secondary" isDisabled={busy || activeRepo.initialEligible} onPress={() => run('commit-push')} className="flex-1 rounded-2xl">
+            <Button size="md" variant="secondary" isDisabled={busy || writingBlocked || Boolean(agentUnavailableReason) || activeRepo.initialEligible} onPress={() => run('commit-push')} className="flex-1 rounded-2xl">
               <StyledIonicons name="cloud-upload-outline" size={16} className="text-foreground" />
               <Button.Label>{actionLabel('commit-push')}</Button.Label>
             </Button>
-            <Button size="md" variant="ghost" isDisabled={busy || activeRepo.initialEligible} onPress={() => run('push')} className="flex-1 rounded-2xl">
+            <Button size="md" variant="ghost" isDisabled={busy || writingBlocked || activeRepo.initialEligible} onPress={() => run('push')} className="flex-1 rounded-2xl">
               <StyledIonicons name="arrow-up-circle-outline" size={16} className="text-foreground" />
               <Button.Label>{actionLabel('push')}</Button.Label>
             </Button>
@@ -247,7 +271,7 @@ export function GitScreen({
             {busy ? <Spinner size="sm" /> : <StyledIonicons name="refresh-outline" size={16} className="text-foreground" />}
           </Button>
         </View>
-        {error ? <InlineNotice status="danger" title="Git 读取失败" description={error} /> : null}
+        {error || localError ? <InlineNotice status="danger" title="Git 操作失败" description={localError || error} /> : null}
       </View>
 
       <ScreenScrollView
@@ -308,6 +332,7 @@ export function GitScreen({
             onAction={refresh}
           />
         )}
+        {settings && workspacePath ? <GitWorkspacePanel settings={settings} workspacePath={activeRepo?.path || workspacePath} writingBlocked={writingBlocked || actionBusy || localActionBusy} agentUnavailableReason={agentUnavailableReason} onSendAgentPrompt={onSendAgentPrompt} onOpenWorktree={onOpenWorktree} onBusyChange={setPanelBusy} onChanged={() => void onRefresh(workspacePath)} /> : null}
       </ScreenScrollView>
     </Screen>
   );

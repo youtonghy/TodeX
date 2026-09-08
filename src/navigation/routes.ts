@@ -17,6 +17,7 @@ export type RootStackParamList = {
   GitDiff: ConversationRouteParams;
   Terminal: ConversationRouteParams;
   Settings: undefined;
+  CliManager: undefined;
   Capabilities: ConversationRouteParams;
   Browser: ConversationRouteParams & { url?: string; filePath?: string };
   Files: ConversationRouteParams & { filePath?: string };

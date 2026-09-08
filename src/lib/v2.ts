@@ -1,3 +1,4 @@
+import { controlFrame } from './conversationCommands';
 import { buildHttpUrl, utf8ByteLength } from './todex';
 import { ConnectionError } from './connectionError';
 import { MetricsCollector, type ConnectionMetrics } from './connectionMetrics';
@@ -745,7 +746,10 @@ export class V2ApiClient {
   }
 
   async control(id: string, action: ConversationControlAction, payload: Record<string, unknown> = {}): Promise<{ conversationId: string; accepted: boolean }> {
-    const path = conversationControlMethod(action);
+    if (action !== 'cancel' && action !== 'interrupt') {
+      throw new Error('This control requires the WebSocket command channel.');
+    }
+    const path = action;
     return this.request(`/v2/conversations/${encodeURIComponent(id)}/${path}`, {
       method: 'POST', body: JSON.stringify(payload),
     });
@@ -981,8 +985,8 @@ export class V2ConversationSocket {
   }
   cancel(conversationId: string): void { this.send('conversation.cancel', { conversationId }); }
   control(conversationId: string, action: ConversationControlAction, payload: Record<string, unknown> = {}): void {
-    const type = `conversation.${conversationControlMethod(action)}`;
-    this.send(type, { conversationId, ...payload });
+    const frame = controlFrame(action, conversationId, payload);
+    this.send(frame.type, frame.payload);
   }
   respondPermission(conversationId: string, permissionId: string, decision: Record<string, unknown>): void {
     this.send('conversation.permission.respond', { conversationId, permissionId, decision });

@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react';
 import { Pressable, RefreshControl, SectionList, View } from 'react-native';
 import { Chip, Surface, Text } from 'heroui-native';
-import { Badge, Segment } from 'heroui-native-pro';
+import { Badge } from 'heroui-native-pro/badge';
+import { Segment } from 'heroui-native-pro/segment';
 
 import { ProviderIcon, providerLabel } from '../components/ProviderIcon';
 import type { ProviderKind } from '../lib/v2';

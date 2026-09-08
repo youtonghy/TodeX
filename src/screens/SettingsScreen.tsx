@@ -5,7 +5,7 @@ import * as Clipboard from 'expo-clipboard';
 import { CameraView, useCameraPermissions, type BarcodeScanningResult } from 'expo-camera';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Button, Chip, Surface, Text } from 'heroui-native';
-import { Segment } from 'heroui-native-pro';
+import { Segment } from 'heroui-native-pro/segment';
 
 import { normalizeServerUrl, type BackendConnectionProfile, type ConnectionSettings } from '../lib/todex';
 import { connectionFailureLabel, type ConnectionFailureCode } from '../lib/connectionError';
@@ -338,6 +338,10 @@ export function SettingsScreen({
   return (
     <Screen>
       <ScreenScrollView>
+        <Button variant="secondary" onPress={() => navigation.navigate('CliManager')} className="min-h-11">
+          <StyledIonicons name="terminal-outline" size={18} className="text-foreground" />
+          <Button.Label>CLI 版本与升级</Button.Label>
+        </Button>
         <Surface className="gap-4 rounded-3xl p-4">
           <View className="flex-row items-center gap-3">
             <View

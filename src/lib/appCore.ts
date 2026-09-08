@@ -146,6 +146,7 @@ export type MobileWorkbenchState = {
   activeTab: 'terminal' | 'browser' | 'files' | 'git-diff';
   browserUrl: string;
   browserFilePath: string;
+  selectedFilePath: string;
   inspectedElement: { selector: string; tagName: string; text: string } | null;
 };
 
@@ -327,6 +328,8 @@ export type ComposerAttachmentDraft = {
 };
 
 export type QueuedChatSubmission = {
+  status?: 'ready' | 'failed' | 'unknown';
+  protocolPayload?: Record<string, unknown>;
   id: string;
   text: string;
   attachments: ComposerAttachmentDraft[];
@@ -1365,6 +1368,7 @@ export const DEFAULT_WORKBENCH_STATE: MobileWorkbenchState = {
   activeTab: 'terminal',
   browserUrl: '',
   browserFilePath: '',
+  selectedFilePath: '',
   inspectedElement: null,
 };
 
@@ -1386,7 +1390,8 @@ export function normalizeWorkbenchState(value: unknown): MobileWorkbenchState {
     tabs: normalizedTabs,
     activeTab,
     browserUrl: typeof raw.browserUrl === 'string' ? raw.browserUrl : '',
-    browserFilePath: typeof raw.browserFilePath === 'string' ? raw.browserFilePath : '',
+    browserFilePath: typeof raw.browserFilePath === 'string' && /\.(html?|xhtml|svg)$/i.test(raw.browserFilePath) ? raw.browserFilePath : '',
+    selectedFilePath: typeof raw.selectedFilePath === 'string' ? raw.selectedFilePath : typeof raw.browserFilePath === 'string' ? raw.browserFilePath : '',
     inspectedElement: inspected && typeof inspected.selector === 'string'
       ? {
           selector: inspected.selector.slice(0, 200),

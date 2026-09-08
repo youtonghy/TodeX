@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FlatList, Pressable, RefreshControl, ScrollView, View, type ListRenderItemInfo } from 'react-native';
 import { Button, Chip, Spinner, Surface, Text } from 'heroui-native';
+import { MarkdownViewer } from '../components/MarkdownViewer';
 import type { V2ApiClient } from '../lib/v2';
-import { EmptyStateView, InlineNotice, LoadingState, Screen, StyledIonicons, useResponsive } from '../components/ui';
+import { EmptyStateView, InlineNotice, LoadingState, StyledIonicons } from '../components/ui';
 
 export type FilesClient = Pick<V2ApiClient, 'listWorkspaceEntries' | 'readWorkspaceFile'>;
 
@@ -109,7 +110,8 @@ function fileLanguage(path: string): string {
 }
 
 export function FilesScreen({ client, rootPath, initialFilePath, onFileSelected }: FilesScreenProps) {
-  const { isLandscapeOrWide } = useResponsive();
+  const [containerWidth, setContainerWidth] = useState(0);
+  const isLandscapeOrWide = containerWidth >= 760;
   const normalizedRoot = useMemo(() => normalizePath(rootPath), [rootPath]);
   const [childrenByDirectory, setChildrenByDirectory] = useState<Record<string, FileTreeEntry[]>>({});
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set([normalizedRoot]));
@@ -119,6 +121,8 @@ export function FilesScreen({ client, rootPath, initialFilePath, onFileSelected 
   const [fileLoading, setFileLoading] = useState(false);
   const [error, setError] = useState('');
   const requestSeqRef = useRef(0);
+  const fileRequestRef = useRef(0);
+  useEffect(() => () => { requestSeqRef.current += 1; fileRequestRef.current += 1; }, []);
   const appliedTargetRef = useRef('');
   const childrenByDirectoryRef = useRef<Record<string, FileTreeEntry[]>>({});
   const onFileSelectedRef = useRef(onFileSelected);
@@ -161,19 +165,23 @@ export function FilesScreen({ client, rootPath, initialFilePath, onFileSelected 
 
   useEffect(() => {
     requestSeqRef.current += 1;
+    fileRequestRef.current += 1;
     appliedTargetRef.current = '';
     childrenByDirectoryRef.current = {};
     setChildrenByDirectory({});
     setExpanded(new Set([normalizedRoot]));
     setSelectedPath('');
     setFile(null);
+    setFileLoading(false);
     setError('');
     void loadDirectory(normalizedRoot, true);
   }, [loadDirectory, normalizedRoot]);
 
   const readFile = useCallback(async (path: string) => {
+    const request = ++fileRequestRef.current;
     if (!isWithinRoot(path, normalizedRoot)) {
       setError('文件路径不在当前工作区内');
+      setFileLoading(false);
       return;
     }
     setSelectedPath(path);
@@ -181,12 +189,13 @@ export function FilesScreen({ client, rootPath, initialFilePath, onFileSelected 
     setError('');
     try {
       const loaded = await client.readWorkspaceFile(path);
+      if (request !== fileRequestRef.current) return;
       setFile(loaded);
       onFileSelectedRef.current?.(path);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '文件读取失败');
+      if (request === fileRequestRef.current) setError(reason instanceof Error ? reason.message : '文件读取失败');
     } finally {
-      setFileLoading(false);
+      if (request === fileRequestRef.current) setFileLoading(false);
     }
   }, [client, normalizedRoot]);
 
@@ -284,12 +293,14 @@ export function FilesScreen({ client, rootPath, initialFilePath, onFileSelected 
       </View>
       {fileLoading ? (
         <LoadingState label="正在读取文件" className="flex-1" />
+      ) : file && /\.(md|markdown)$/i.test(file.path) && typeof file.text === 'string' ? (
+        <MarkdownViewer content={file.text} />
       ) : file ? (
         <ScrollView contentContainerClassName="p-4 pb-8">
           <Text type="body-xs" color="muted" numberOfLines={2} className="mb-3 font-mono">
             {file.path} · {formatBytes(file.sizeBytes)} · {file.mimeType}
           </Text>
-          {file.text ? (
+          {typeof file.text === 'string' ? (
             <ScrollView horizontal showsHorizontalScrollIndicator={false}>
               <Text selectable type="code" className="bg-transparent px-0 text-[12px] leading-[18px] text-foreground">
                 {file.text}
@@ -306,7 +317,7 @@ export function FilesScreen({ client, rootPath, initialFilePath, onFileSelected 
   );
 
   return (
-    <Screen>
+    <View className="flex-1 bg-background" onLayout={event => setContainerWidth(event.nativeEvent.layout.width)}>
       <View className="gap-2 px-4 pb-2 pt-3">
         <View className="flex-row items-center justify-between gap-3">
           <View className="min-w-0 flex-1">
@@ -332,17 +343,10 @@ export function FilesScreen({ client, rootPath, initialFilePath, onFileSelected 
         {error ? <InlineNotice status="danger" title="读取失败" description={error} /> : null}
       </View>
 
-      {isLandscapeOrWide ? (
-        <View className="flex-1 flex-row gap-4 px-4 pb-4">
-          {treeSurface}
-          {previewSurface}
-        </View>
-      ) : (
-        <>
-          {treeSurface}
-          {previewSurface}
-        </>
-      )}
-    </Screen>
+      <View className={`min-h-0 flex-1 ${isLandscapeOrWide ? 'flex-row gap-4 px-4 pb-4' : 'flex-col'}`}>
+        {treeSurface}
+        {previewSurface}
+      </View>
+    </View>
   );
 }

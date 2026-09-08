@@ -3,7 +3,7 @@ import { FlatList, Platform, View } from 'react-native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { useIsFocused } from '@react-navigation/native';
 import { Avatar, Button, Chip, SearchField, Surface, Text } from 'heroui-native';
-import { Badge } from 'heroui-native-pro';
+import { Badge } from 'heroui-native-pro/badge';
 
 import type { WorkspaceRecord } from '../lib/todex';
 import { providerDisplayName, type ProviderDescriptor, type ProviderKind } from '../lib/v2';

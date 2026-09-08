@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import {
   FlatList,
+  KeyboardAvoidingView,
   Platform,
   ScrollView,
   View,
@@ -11,6 +12,7 @@ import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Button, Chip, Input, Surface, Text } from 'heroui-native';
 
+import { InteractiveTerminal } from '../components/terminal/InteractiveTerminal';
 import type { WorkspaceRecord } from '../lib/todex';
 import {
   DEFAULT_TERMINAL_COLS,
@@ -71,19 +73,23 @@ function keyTerminalOutput(item: TerminalOutputEntry): string {
 }
 
 export type TerminalScreenProps = {
+  terminalId?: string;
+  visible?: boolean;
   workspace: WorkspaceRecord | null;
   conversation: ConversationRecord | null;
   terminal: TerminalClientState | null;
   connectionState: ConnectionState;
-  startTerminalSession: (workspace: WorkspaceRecord, conversation: ConversationRecord, options: { cwd: string; shell: string; rows: number; cols: number }) => boolean;
+  startTerminalSession: (workspace: WorkspaceRecord, conversation: ConversationRecord, options: { cwd: string; shell: string; rows: number; cols: number; terminalId?: string }) => boolean;
   stopTerminalSession: (terminalId: string, tenantId: string, force?: boolean) => boolean;
   sendTerminalInput: (terminalId: string, tenantId: string, data: string) => boolean;
   resizeTerminalSession: (terminalId: string, tenantId: string, rows: number, cols: number) => boolean;
-  requestTerminalStatus: (workspace: WorkspaceRecord, conversation: ConversationRecord) => boolean;
+  requestTerminalStatus: (workspace: WorkspaceRecord, conversation: ConversationRecord, terminalId?: string) => boolean;
   clearTerminalOutput: (terminalId: string) => void;
 };
 
 export function TerminalScreen({
+  terminalId: requestedTerminalId,
+  visible = true,
   workspace,
   conversation,
   terminal,
@@ -96,13 +102,14 @@ export function TerminalScreen({
   clearTerminalOutput,
 }: TerminalScreenProps) {
   const toast = useAppToast();
-  const terminalId = conversation ? terminalIdForConversation(conversation.id) : terminal?.terminalId ?? '';
+  const terminalId = requestedTerminalId || terminal?.terminalId || (conversation ? terminalIdForConversation(conversation.id) : '');
   const effectiveTenantId = terminal?.tenantId || workspace?.tenantId || 'local';
   const [cwd, setCwd] = useState(terminal?.cwd || workspace?.path || '');
   const [shell, setShell] = useState(terminal?.shell || '');
   const [rowsDraft, setRowsDraft] = useState(String(terminal?.rows ?? DEFAULT_TERMINAL_ROWS));
   const [colsDraft, setColsDraft] = useState(String(terminal?.cols ?? DEFAULT_TERMINAL_COLS));
   const [inputDraft, setInputDraft] = useState('');
+  const [viewportSize, setViewportSize] = useState<{ rows: number; cols: number } | null>(null);
   const [settingsExpanded, setSettingsExpanded] = useState(false);
   const [showJumpToLatestOutput, setShowJumpToLatestOutput] = useState(false);
   const outputListRef = useRef<FlatList<TerminalOutputEntry> | null>(null);
@@ -116,7 +123,7 @@ export function TerminalScreen({
   const insets = useSafeAreaInsets();
   const isRunning = terminal?.status === 'running';
   const isBusy = terminal?.status === 'starting' || terminal?.status === 'stopping';
-  const canControl = Boolean(workspace && conversation && terminalId && connectionState === 'open');
+  const canControl = Boolean(workspace && conversation && terminalId && connectionState === 'open' && visible);
   const rows = Math.max(8, Math.min(200, Number.parseInt(rowsDraft, 10) || DEFAULT_TERMINAL_ROWS));
   const cols = Math.max(20, Math.min(400, Number.parseInt(colsDraft, 10) || DEFAULT_TERMINAL_COLS));
   const statusColor = isRunning ? 'success' : terminal?.status === 'error' ? 'danger' : isBusy ? 'warning' : 'default';
@@ -124,12 +131,17 @@ export function TerminalScreen({
   const latestOutputId = output.at(-1)?.id ?? '';
 
   useEffect(() => {
+    if (!isRunning || !canControl || !viewportSize) return;
+    if (terminal?.rows !== viewportSize.rows || terminal?.cols !== viewportSize.cols) resizeTerminalSession(terminalId, effectiveTenantId, viewportSize.rows, viewportSize.cols);
+  }, [isRunning, canControl, viewportSize, terminal?.rows, terminal?.cols, terminalId, effectiveTenantId, resizeTerminalSession]);
+
+  useEffect(() => {
     terminalStateRef.current = terminal;
   }, [terminal]);
 
   useEffect(() => {
     manualStopRef.current = false;
-  }, [conversation?.id]);
+  }, [conversation?.id, terminalId]);
 
   useEffect(() => {
     autoStartKeyRef.current = '';
@@ -138,7 +150,7 @@ export function TerminalScreen({
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
-  }, [connectionState, conversation?.id]);
+  }, [connectionState, conversation?.id, terminalId, visible]);
 
   useEffect(() => {
     if (workspace?.path && !cwd) {
@@ -157,22 +169,23 @@ export function TerminalScreen({
   }, [terminal?.terminalId, terminal?.cwd, terminal?.shell, terminal?.rows, terminal?.cols, workspace?.path]);
 
   useEffect(() => {
-    if (workspace && conversation && connectionState === 'open') {
-      requestTerminalStatus(workspace, conversation);
+    if (visible && workspace && conversation && connectionState === 'open') {
+      requestTerminalStatus(workspace, conversation, terminalId);
     }
-  }, [connectionState, conversation?.id, requestTerminalStatus, workspace?.id]);
+  }, [connectionState, conversation?.id, requestTerminalStatus, workspace?.id, terminalId, visible]);
 
   useEffect(() => {
-    if (!workspace || !conversation || !terminalId || connectionState !== 'open' || manualStopRef.current) return;
+    if (!visible || !workspace || !conversation || !terminalId || connectionState !== 'open' || manualStopRef.current) return;
     const attemptKey = `${conversation.id}:${terminalId}`;
     if (autoStartKeyRef.current === attemptKey) return;
     autoStartKeyRef.current = attemptKey;
-    requestTerminalStatus(workspace, conversation);
+    requestTerminalStatus(workspace, conversation, terminalId);
     const timer = setTimeout(() => {
       if (manualStopRef.current) return;
       const latest = terminalStateRef.current;
       if (!latest || latest.status === 'idle') {
         startTerminalSession(workspace, conversation, {
+        terminalId,
           cwd: latest?.cwd || workspace.path,
           shell: latest?.shell || '',
           rows: latest?.rows || DEFAULT_TERMINAL_ROWS,
@@ -182,6 +195,7 @@ export function TerminalScreen({
     }, 350);
     return () => clearTimeout(timer);
   }, [
+    visible,
     connectionState,
     conversation?.id,
     requestTerminalStatus,
@@ -192,7 +206,7 @@ export function TerminalScreen({
   ]);
 
   useEffect(() => {
-    if (!workspace || !conversation || !terminalId || connectionState !== 'open' || manualStopRef.current) return;
+    if (!visible || !workspace || !conversation || !terminalId || connectionState !== 'open' || manualStopRef.current) return;
     if (terminal?.status === 'running') {
       reconnectAttemptRef.current = 0;
       return;
@@ -205,6 +219,7 @@ export function TerminalScreen({
       reconnectTimerRef.current = null;
       const latest = terminalStateRef.current;
       startTerminalSession(workspace, conversation, {
+        terminalId,
         cwd: latest?.cwd || workspace.path,
         shell: latest?.shell || '',
         rows: latest?.rows || DEFAULT_TERMINAL_ROWS,
@@ -218,6 +233,7 @@ export function TerminalScreen({
       }
     };
   }, [
+    visible,
     connectionState,
     conversation?.id,
     startTerminalSession,
@@ -277,12 +293,13 @@ export function TerminalScreen({
     manualStopRef.current = false;
     reconnectAttemptRef.current = 0;
     startTerminalSession(workspace, conversation, {
+      terminalId,
       cwd: cwd.trim() || workspace.path,
       shell,
       rows,
       cols,
     });
-  }, [cols, connectionState, conversation, cwd, rows, shell, startTerminalSession, toast, workspace]);
+  }, [cols, connectionState, conversation, cwd, rows, shell, startTerminalSession, toast, workspace, terminalId]);
 
   const stop = useCallback((force = false) => {
     if (!terminalId) {
@@ -300,8 +317,8 @@ export function TerminalScreen({
     if (!workspace || !conversation) {
       return;
     }
-    requestTerminalStatus(workspace, conversation);
-  }, [conversation, requestTerminalStatus, workspace]);
+    requestTerminalStatus(workspace, conversation, terminalId);
+  }, [conversation, requestTerminalStatus, workspace, terminalId]);
 
   const applySize = useCallback(() => {
     if (!terminalId) {
@@ -344,6 +361,7 @@ export function TerminalScreen({
 
   return (
     <Screen>
+      <KeyboardAvoidingView className="flex-1" behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <View className="gap-3 px-4 pt-3">
         <View className="flex-row items-center gap-3">
           <View className="min-w-0 flex-1">
@@ -390,10 +408,10 @@ export function TerminalScreen({
 
         {settingsExpanded ? (
           <Surface variant="secondary" className="gap-3 rounded-2xl p-3">
-            <SectionHeader title="会话参数" description="协议 todex-terminal.v1" />
+            <SectionHeader title="会话参数" description="启动目录和 Shell 在下次启动时生效" />
             <FormField label="路径" value={cwd} onChangeText={setCwd} placeholder={workspace.path} editable={!isRunning && !isBusy} monospace />
             <FormField label="Shell" value={shell} onChangeText={setShell} placeholder="默认使用后端 SHELL" editable={!isRunning && !isBusy} monospace />
-            <View className="flex-row items-end gap-2">
+            {Platform.OS === 'web' ? <View className="flex-row items-end gap-2">
               <View className="flex-1">
                 <FormField label="Rows" value={rowsDraft} onChangeText={setRowsDraft} placeholder="24" editable={!isBusy} keyboardType="number-pad" />
               </View>
@@ -403,7 +421,7 @@ export function TerminalScreen({
               <Button size="md" variant="secondary" isDisabled={!isRunning} onPress={applySize} className="h-12 rounded-xl">
                 <Button.Label>应用尺寸</Button.Label>
               </Button>
-            </View>
+            </View> : <Text type="body-xs" color="muted">终端尺寸会自动适配当前面板。</Text>}
           </Surface>
         ) : null}
 
@@ -436,7 +454,12 @@ export function TerminalScreen({
             </Button>
           </View>
         </View>
-        <FlatList
+        {Platform.OS !== 'web' ? <InteractiveTerminal key={terminalId} output={output} visible={visible} enabled={isRunning && canControl}
+          onInput={data => sendTerminalInput(terminalId, effectiveTenantId, data)}
+          onResize={(nextRows, nextCols) => {
+            setRowsDraft(String(nextRows)); setColsDraft(String(nextCols));
+            setViewportSize(current => current?.rows === nextRows && current.cols === nextCols ? current : { rows: nextRows, cols: nextCols });
+          }} /> : <FlatList
           ref={outputListRef}
           data={output}
           renderItem={renderTerminalOutput}
@@ -453,11 +476,11 @@ export function TerminalScreen({
           updateCellsBatchingPeriod={40}
           windowSize={9}
           maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
-          removeClippedSubviews={Platform.OS === 'android'}
+          removeClippedSubviews={false}
           onScroll={handleOutputScroll}
           scrollEventThrottle={80}
-        />
-        {showJumpToLatestOutput ? (
+        />}
+        {Platform.OS === 'web' && showJumpToLatestOutput ? (
           <View className="absolute bottom-3 right-3">
             <Button size="sm" variant="secondary" accessibilityLabel="跳到最新输出" onPress={jumpToLatestOutput} className="h-9 rounded-full px-3 shadow-sm">
               <StyledIonicons name="arrow-down" size={14} className="text-foreground" />
@@ -467,6 +490,9 @@ export function TerminalScreen({
         ) : null}
       </Surface>
 
+      <ScrollView horizontal style={{ flexGrow: 0 }} contentContainerClassName="gap-2 px-4 pt-2">
+        {([['Ctrl-C', '\u0003'], ['Tab', '\t'], ['Esc', '\u001b'], ['↑', '\u001b[A'], ['↓', '\u001b[B']] as const).map(([label, data]) => <Button key={label} variant="secondary" size="sm" className="min-h-11" isDisabled={!isRunning || !canControl} onPress={() => sendTerminalInput(terminalId, effectiveTenantId, data)}><Button.Label>{label}</Button.Label></Button>)}
+      </ScrollView>
       <View className="flex-row items-center gap-2 px-4 pt-3" style={{ paddingBottom: 12 + insets.bottom }}>
         <Text type="code" className="bg-transparent px-0 text-accent">
           $
@@ -487,6 +513,7 @@ export function TerminalScreen({
           <StyledIonicons name="return-down-forward" size={18} className="text-accent-foreground" />
         </Button>
       </View>
+      </KeyboardAvoidingView>
     </Screen>
   );
 }

@@ -1,4 +1,4 @@
-import { memo, type ComponentProps } from 'react';
+import { memo, useCallback, type ComponentProps } from 'react';
 
 import { CapabilitiesScreen, type CapabilitiesScreenProps } from '../components/CapabilitiesScreen';
 import type { CatalogState } from '../lib/capabilityCatalog';
@@ -62,6 +62,8 @@ export type CapabilitiesRouteSnapshot = Pick<
 };
 
 export type CapabilitiesRuntimeActions = {
+  readSkill: (conversationId: string, provider: ProviderKind, resourceId: string) => Promise<string>;
+  refreshMcp: (conversationId: string, resourceId: string) => Promise<void>;
   refreshCapabilityCatalog: (provider: ProviderKind) => void;
   toggleCatalogSkill: (conversationId: string, skill: SkillCatalogDescriptor, provider: ProviderKind) => void;
   callMcpTool: (conversationId: string, resourceId: string, toolName: string) => void;
@@ -141,6 +143,8 @@ export const CapabilitiesRouteScreen = memo(function CapabilitiesRouteScreen({ r
   const workspace = useKeyedStoreValue(runtime.workspaces, route.params.workspaceId);
   const conversation = useKeyedStoreValue(runtime.conversations, route.params.conversationId);
   const actions = runtime.actions.get<CapabilitiesRuntimeActions>(CAPABILITIES_ACTIONS);
+  const readSkill = useCallback((provider: ProviderKind, resourceId: string) => actions.readSkill(route.params.conversationId, provider, resourceId), [actions, route.params.conversationId]);
+  const refreshMcp = useCallback((resourceId: string) => actions.refreshMcp(route.params.conversationId, resourceId), [actions, route.params.conversationId]);
   if (!snapshot) return null;
   const conversationId = route.params.conversationId;
   return (
@@ -148,6 +152,8 @@ export const CapabilitiesRouteScreen = memo(function CapabilitiesRouteScreen({ r
       workspacePath={workspace?.path ?? snapshot.serverWorkspaceRoot ?? snapshot.defaultWorkspacePath}
       providers={snapshot.providers}
       catalogs={snapshot.catalogs as Partial<Record<ProviderKind, CatalogState>>}
+      onReadSkill={readSkill}
+      onRefreshMcp={refreshMcp}
       onRefresh={actions.refreshCapabilityCatalog}
       conversationId={conversationId}
       selectedSkills={snapshot.selectedSkills[conversationId] ?? []}

@@ -1,5 +1,5 @@
 import { useCallback, type ReactNode } from 'react';
-import { View } from 'react-native';
+import { Platform, View } from 'react-native';
 import {
   BottomSheetFooter,
   BottomSheetScrollView,
@@ -45,6 +45,8 @@ export function AppSheet({
     </BottomSheetFooter>
   ), [bottomInset, footer]);
 
+  // Gorhom retains closed sheets on web; omit their portals to avoid ghost footers.
+  if (Platform.OS === 'web' && !isOpen) return null;
   return (
     <BottomSheet isOpen={isOpen} onOpenChange={onOpenChange}>
       <BottomSheet.Portal>

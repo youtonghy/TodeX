@@ -288,3 +288,26 @@ test('overlay store replaces model picker with manual prompt atomically', () => 
   assert.equal(snapshot.modelPicker, null);
   assert.equal(snapshot.modelCommand.value.initialValue, 'gpt-5.5 high');
 });
+
+test('default browser APIs retain their global receiver during health polling', async () => {
+  const names = ['fetch', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'];
+  const originals = Object.fromEntries(names.map(name => [name, globalThis[name]]));
+  const calls = [];
+  try {
+    for (const name of names) globalThis[name] = function () {
+      assert.equal(this, globalThis, `${name} must use the browser global receiver`);
+      calls.push(name);
+      return name === 'fetch' ? Promise.resolve({ ok: true }) : 1;
+    };
+    const controller = new ConnectionController();
+    controller.bindHandlers(handlers());
+    controller.start(settings, false);
+    await Promise.resolve();
+    controller.dispose();
+    assert.ok(calls.includes('fetch'));
+    assert.ok(calls.includes('setInterval'));
+    assert.ok(calls.includes('clearInterval'));
+  } finally {
+    for (const name of names) globalThis[name] = originals[name];
+  }
+});

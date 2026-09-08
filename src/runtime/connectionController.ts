@@ -117,12 +117,12 @@ export class ConnectionController {
     this.createSocket = dependencies.createSocket ?? ((url) => new WebSocket(url) as unknown as ConnectionSocket);
     this.createCryptoSession = dependencies.createCryptoSession ?? createTransportCryptoSession;
     this.probeConnection = dependencies.probeConnection ?? probeBackendConnection;
-    this.fetchImpl = dependencies.fetchImpl ?? fetch;
+    this.fetchImpl = dependencies.fetchImpl ?? fetch.bind(globalThis);
     this.now = dependencies.now ?? Date.now;
-    this.setTimeoutImpl = dependencies.setTimeoutImpl ?? setTimeout;
-    this.clearTimeoutImpl = dependencies.clearTimeoutImpl ?? clearTimeout;
-    this.setIntervalImpl = dependencies.setIntervalImpl ?? setInterval;
-    this.clearIntervalImpl = dependencies.clearIntervalImpl ?? clearInterval;
+    this.setTimeoutImpl = dependencies.setTimeoutImpl ?? setTimeout.bind(globalThis);
+    this.clearTimeoutImpl = dependencies.clearTimeoutImpl ?? clearTimeout.bind(globalThis);
+    this.setIntervalImpl = dependencies.setIntervalImpl ?? setInterval.bind(globalThis);
+    this.clearIntervalImpl = dependencies.clearIntervalImpl ?? clearInterval.bind(globalThis);
   }
 
   bindHandlers(handlers: ConnectionControllerHandlers): void {
@@ -222,8 +222,8 @@ export class ConnectionController {
     return message;
   }
 
-  subscribeConversation(conversationId: string): boolean {
-    const afterSequence = this.replayTracker.subscriptionCursor(conversationId);
+  subscribeConversation(conversationId: string, cursor = 0): boolean {
+    const afterSequence = this.replayTracker.subscriptionCursor(conversationId) === null ? null : cursor;
     if (afterSequence === null) return Boolean(conversationId);
     const sent = this.send({
       id: createRequestId('sub'),

@@ -6,7 +6,7 @@ import { enableScreens } from 'react-native-screens';
 
 import { CapabilitiesRouteScreen, KanbanRouteScreen, SlashCommandActionRouteScreen, SlashCommandsRouteScreen } from '../runtime/CommandRuntimeScreens';
 import { ConversationsRouteScreen } from '../runtime/ConversationRuntimeScreen';
-import { AboutRouteScreen, ExperimentalRouteScreen, SettingsRouteScreen, UsageRouteScreen } from '../runtime/LeafRuntimeScreens';
+import { AboutRouteScreen, CliManagerRouteScreen, ExperimentalRouteScreen, SettingsRouteScreen, UsageRouteScreen } from '../runtime/LeafRuntimeScreens';
 import { GitDiffRouteScreen, TerminalRouteScreen } from '../runtime/OutputRuntimeScreens';
 import { BrowserRouteScreen, FilesRouteScreen, GitRouteScreen, WorkbenchRouteScreen } from '../runtime/ToolRuntimeScreens';
 import { WorkspacesRouteScreen } from '../runtime/WorkspaceRuntimeScreen';
@@ -34,6 +34,7 @@ export const AppNavigator = memo(function AppNavigator() {
         <Stack.Screen name="Experimental" component={ExperimentalRouteScreen} options={{ title: 'Experimental' }} />
         <Stack.Screen name="Capabilities" component={CapabilitiesRouteScreen} options={{ title: 'Skills 和 MCPs' }} />
         <Stack.Screen name="Settings" component={SettingsRouteScreen} options={{ title: '设置' }} />
+        <Stack.Screen name="CliManager" component={CliManagerRouteScreen} options={{ title: 'CLI 管理' }} />
         <Stack.Screen name="Usage" component={UsageRouteScreen} options={{ title: '使用统计' }} />
         <Stack.Screen name="About" component={AboutRouteScreen} options={{ title: '关于 TodeX' }} />
         <Stack.Screen name="Kanban" component={KanbanRouteScreen} options={{ title: '看板' }} />

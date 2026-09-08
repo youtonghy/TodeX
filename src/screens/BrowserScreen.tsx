@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { KeyboardAvoidingView, Platform, ScrollView, View } from 'react-native';
 import { Button, Chip, Input, Surface, Text } from 'heroui-native';
-import { ProgressBar } from 'heroui-native-pro';
+import { ProgressBar } from 'heroui-native-pro/progress-bar';
 
 import type { V2ApiClient } from '../lib/v2';
 import { validateLoopbackUrl as validateSharedLoopbackUrl } from '../lib/mobileParity';
@@ -37,6 +37,9 @@ export function BrowserScreen({ client, initialUrl = 'http://127.0.0.1:7345', in
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [loadedUrl, setLoadedUrl] = useState('');
+  const requestRef = useRef(0);
+  const loadedClientRef = useRef<BrowserClient | null>(null);
+  useEffect(() => () => { requestRef.current += 1; }, []);
   const onResultRef = useRef(onResult);
   onResultRef.current = onResult;
 
@@ -45,11 +48,13 @@ export function BrowserScreen({ client, initialUrl = 'http://127.0.0.1:7345', in
   }, []);
 
   const load = useCallback(async (value: string) => {
+    const request = ++requestRef.current;
     const validation = validateLoopbackUrl(value);
     if (!validation.ok) {
       setResult(null);
       setLoadedUrl('');
       setError(validation.error);
+      setLoading(false);
       return false;
     }
     setDraft(validation.url);
@@ -57,26 +62,31 @@ export function BrowserScreen({ client, initialUrl = 'http://127.0.0.1:7345', in
     setError('');
     try {
       const fetched = await client.fetchBrowser(validation.url);
+      if (request !== requestRef.current) return false;
+      loadedClientRef.current = client;
       setResult(fetched);
       setLoadedUrl(validation.url);
       notifyResult(fetched);
       return true;
     } catch (reason) {
+      if (request !== requestRef.current) return false;
       setResult(null);
       setLoadedUrl('');
       setError(reason instanceof Error ? reason.message : '网页读取失败');
       return false;
     } finally {
-      setLoading(false);
+      if (request === requestRef.current) setLoading(false);
     }
   }, [client, notifyResult]);
 
   useEffect(() => {
     if (initialFilePath) {
+      const request = ++requestRef.current;
       setLoading(true);
       setError('');
       void client.readWorkspaceFile(initialFilePath)
         .then((file) => {
+          if (request !== requestRef.current) return;
           const fetched: BrowserFetchResult = {
             url: file.path,
             status: 200,
@@ -88,23 +98,18 @@ export function BrowserScreen({ client, initialUrl = 'http://127.0.0.1:7345', in
           notifyResult(fetched);
         })
         .catch((reason) => {
+          if (request !== requestRef.current) return;
           setResult(null);
           setLoadedUrl('');
           setError(reason instanceof Error ? reason.message : '文件读取失败');
         })
-        .finally(() => setLoading(false));
+        .finally(() => { if (request === requestRef.current) setLoading(false); });
       return;
     }
     if (!initialUrl) return;
-    setDraft(initialUrl);
-    const validation = validateLoopbackUrl(initialUrl);
-    if (!validation.ok) {
-      setError(validation.error);
-      setResult(null);
-      setLoadedUrl('');
-      return;
-    }
-    void load(validation.url);
+    // Avoid refetching a successful local navigation echoed by the shared store.
+    if (initialUrl === loadedUrl && loadedClientRef.current === client) return;
+    void load(initialUrl);
   }, [client, initialFilePath, initialUrl, load, notifyResult]);
 
   const body = result?.body || '';

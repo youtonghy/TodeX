@@ -1,18 +1,20 @@
-import { memo, useMemo, useState } from 'react';
+import { memo, useState } from 'react';
 import { Pressable, View } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { Button, Chip, Surface, Text } from 'heroui-native';
 
+import { MarkdownViewer } from '../../components/MarkdownViewer';
+import { messageBubbleMaxWidth } from '../../lib/responsive';
+
 import { permissionActions, type PendingRequest, type PermissionOption } from '../../lib/todex';
 import {
   compactTokenCount,
-  extractMessageLinks,
   nowLabel,
   progressGroupLabel,
   type MobileContextUsage,
   type TimelineEntry,
 } from '../../lib/appCore';
-import { AppDialog, StyledIonicons, useAppToast, useResponsive } from '../../components/ui';
+import { AppDialog, StyledIonicons, useAppToast } from '../../components/ui';
 
 function ApprovalActions({
   request,
@@ -115,6 +117,7 @@ export const MessageBubble = memo(function MessageBubble({
   onFork,
   usage,
   streaming = false,
+  containerWidth = 0,
 }: {
   entry: TimelineEntry;
   collapsed?: boolean;
@@ -127,9 +130,9 @@ export const MessageBubble = memo(function MessageBubble({
   onFork?: () => void;
   usage?: MobileContextUsage | null;
   streaming?: boolean;
+  containerWidth?: number;
 }) {
   const toast = useAppToast();
-  const { isLandscapeOrWide } = useResponsive();
   const [usageVisible, setUsageVisible] = useState(false);
   const outgoing = entry.kind === 'outgoing';
   const system = entry.kind === 'system';
@@ -141,10 +144,6 @@ export const MessageBubble = memo(function MessageBubble({
     await Clipboard.setStringAsync(text);
     toast.success('已复制', '消息内容已复制到剪贴板');
   };
-  const links = useMemo(
-    () => !streaming && !collapsed && !system && entry.subtitle ? extractMessageLinks(entry.subtitle) : [],
-    [collapsed, entry.subtitle, streaming, system],
-  );
   const timeLabel = nowLabel(entry.at);
 
   // Compact progress / system rows (steps, thinking, tool calls).
@@ -199,7 +198,7 @@ export const MessageBubble = memo(function MessageBubble({
 
   return (
     <View className={`mb-3 px-1 ${outgoing ? 'items-end' : 'items-start'}`}>
-      <Pressable onLongPress={copyText} delayLongPress={360} className={isLandscapeOrWide ? 'max-w-[72%]' : 'max-w-[88%]'}>
+      <Pressable onLongPress={copyText} delayLongPress={360} style={{ maxWidth: containerWidth > 0 ? messageBubbleMaxWidth(containerWidth, outgoing) : '100%', ...(outgoing ? {} : { width: '100%' as const }) }}>
         {outgoing ? (
           <View className="gap-1 rounded-3xl rounded-br-lg bg-accent px-4 py-2.5">
             <Text selectable type="body" className="leading-6 text-accent-foreground">
@@ -225,21 +224,7 @@ export const MessageBubble = memo(function MessageBubble({
               </View>
             ) : null}
             {entry.subtitle ? (
-              <Text selectable type="body" className="leading-6 text-foreground">
-                {entry.subtitle}
-              </Text>
-            ) : null}
-            {links.length > 0 ? (
-              <View className="mt-1 flex-row flex-wrap gap-2">
-                {links.map((href) => (
-                  <Chip key={href} size="sm" variant="soft" color="accent" onPress={() => onOpenLink?.(href)} accessibilityLabel={`打开链接 ${href}`}>
-                    <StyledIonicons name="open-outline" size={12} className="text-accent" />
-                    <Chip.Label numberOfLines={1} className="max-w-[220px]">
-                      {href}
-                    </Chip.Label>
-                  </Chip>
-                ))}
-              </View>
+              <MarkdownViewer content={entry.subtitle} inline onOpenLink={onOpenLink} />
             ) : null}
           </Surface>
         )}

@@ -1,7 +1,10 @@
 import { useMemo, useState } from 'react';
 import { RefreshControl, ScrollView, View } from 'react-native';
 import { Chip, Surface, Text } from 'heroui-native';
-import { NumberValue, ProgressBar, TrendChip, Widget } from 'heroui-native-pro';
+import { NumberValue } from 'heroui-native-pro/number-value';
+import { ProgressBar } from 'heroui-native-pro/progress-bar';
+import { TrendChip } from 'heroui-native-pro/trend-chip';
+import { Widget } from 'heroui-native-pro/widget';
 
 import { EmptyStateView, ListRow, ListSection, Screen, ScreenIntro, ScreenScrollView, SectionHeader, StyledIonicons, useResponsive } from '../components/ui';
 

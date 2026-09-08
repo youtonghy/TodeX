@@ -1,5 +1,5 @@
 import type { ComponentProps } from 'react';
-import { View } from 'react-native';
+import { Platform, View } from 'react-native';
 import { BottomSheetView } from '@gorhom/bottom-sheet';
 import { BottomSheet, Button, ListGroup, Separator, Text } from 'heroui-native';
 
@@ -37,6 +37,8 @@ export function ActionSheet({
   cancelLabel?: string;
 }) {
   const close = () => onOpenChange(false);
+  // Gorhom retains closed sheets on web; omit their portals to avoid ghost footers.
+  if (Platform.OS === 'web' && !isOpen) return null;
   return (
     <BottomSheet isOpen={isOpen} onOpenChange={onOpenChange}>
       <BottomSheet.Portal>

@@ -1,8 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useState } from 'react';
-import { ScrollView, View } from 'react-native';
+import { Platform, ScrollView, View } from 'react-native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { Avatar, Button, Chip, Menu, Spinner, Text, useThemeColor } from 'heroui-native';
-import { FAB } from 'heroui-native-pro';
+import { FAB } from 'heroui-native-pro/fab';
 
 import type { BackendConnectionProfile, ConnectionSettings, WorkspaceRecord } from '../lib/todex';
 import type { ProviderDescriptor } from '../lib/v2';
@@ -132,8 +132,10 @@ export function WorkspaceListScreen({
               </Button>
             </Menu.Trigger>
             <Menu.Portal>
-              <Menu.Overlay />
-              <Menu.Content presentation="popover" width={220} align="end">
+              <Menu.Overlay style={{ zIndex: 0 }} />
+              <View pointerEvents="box-none" style={{ zIndex: 1 }}>
+              <Menu.Content presentation="popover" width={220} align="end"
+                {...(Platform.OS === 'web' ? { pointerEvents: 'auto' as const, style: { opacity: 1 } } : {})}>
                 <Menu.Label>工作区工具</Menu.Label>
                 <Menu.Item onPress={() => openGit()}>
                   <StyledIonicons name="git-branch-outline" size={18} className="text-foreground" />
@@ -152,6 +154,7 @@ export function WorkspaceListScreen({
                   <Menu.ItemTitle>设置</Menu.ItemTitle>
                 </Menu.Item>
               </Menu.Content>
+              </View>
             </Menu.Portal>
           </Menu>
         </HeaderActions>

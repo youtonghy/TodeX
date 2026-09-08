@@ -28,7 +28,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { KeyboardAvoidingView, KeyboardStickyView, useKeyboardState } from 'react-native-keyboard-controller';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Button, InputGroup, Surface, Text, TextArea } from 'heroui-native';
-import { ProgressBar } from 'heroui-native-pro';
+import { ProgressBar } from 'heroui-native-pro/progress-bar';
 
 import {
   buildHttpUrl,
@@ -105,11 +105,16 @@ import {
   ListSection,
   Screen,
   SectionHeader,
+  SplitLayout,
   StyledIonicons,
   useAppToast,
+  useResponsive,
   type ActionSheetAction,
 } from '../../components/ui';
 import { ConversationHeaderTitle } from './ConversationHeaderTitle';
+import { ComposerDraftFlushContext } from '../../components/ConversationControls';
+import { canSplitWidth } from '../../lib/splitLayout';
+
 import { ExecutionGroupBubble, MessageBubble } from './MessageBubble';
 
 type PickerSheetState =
@@ -165,6 +170,15 @@ export type ChatScreenProps = NativeStackScreenProps<RootStackParamList, 'Chat'>
   refreshProviderCatalog: (provider: ProviderKind, workspacePath?: string) => Promise<boolean>;
   removeWorkspace: (workspaceId: string) => void;
   capabilityCatalog?: CatalogState;
+  composerControls?: React.ReactNode;
+  /** Update embedded workbench state without pushing a navigation route. */
+  openEmbeddedWorkbenchLink?: (conversationId: string, target: NonNullable<WorkspaceLinkTarget>) => void;
+  renderTabletWorkbench?: (props: {
+    visible?: boolean;
+    activeTab?: WorkbenchTab;
+    onTabChange?: (tab: WorkbenchTab) => void;
+    onClose?: () => void;
+  }) => React.ReactNode;
 };
 
 export function ChatScreen({
@@ -212,8 +226,17 @@ export function ChatScreen({
   refreshProviderCatalog,
   removeWorkspace,
   capabilityCatalog,
+  composerControls,
+  openEmbeddedWorkbenchLink,
+  renderTabletWorkbench,
 }: ChatScreenProps) {
   const toast = useAppToast();
+  const { width } = useResponsive();
+  const [screenWidth, setScreenWidth] = useState(width);
+  const [chatColumnWidth, setChatColumnWidth] = useState(width);
+  const canUseSplit = canSplitWidth(screenWidth);
+  const [isWorkbenchOpen, setIsWorkbenchOpen] = useState(true);
+  const [activeWorkbenchTab, setActiveWorkbenchTab] = useState<WorkbenchTab>('files');
   const conversationId = route.params.conversationId;
   const [chatDraft, setLocalChatDraft] = useState(persistedChatDraft);
   const [composerSelection, setLocalComposerSelection] = useState(persistedComposerSelection);
@@ -242,18 +265,14 @@ export function ChatScreen({
   const composerPaddingBottom = 12 + insets.bottom;
 
   const setChatDraft = useCallback((value: SetStateAction<string>) => {
-    setLocalChatDraft((current) => {
-      const next = typeof value === 'function' ? value(current) : value;
-      chatDraftRef.current = next;
-      return next;
-    });
+    const next = typeof value === 'function' ? value(chatDraftRef.current) : value;
+    chatDraftRef.current = next;
+    setLocalChatDraft(next);
   }, []);
   const setComposerSelection = useCallback((value: SetStateAction<TextInputSelectionChangeEventData['selection']>) => {
-    setLocalComposerSelection((current) => {
-      const next = typeof value === 'function' ? value(current) : value;
-      composerSelectionRef.current = next;
-      return next;
-    });
+    const next = typeof value === 'function' ? value(composerSelectionRef.current) : value;
+    composerSelectionRef.current = next;
+    setLocalComposerSelection(next);
   }, []);
   const setComposerAttachments = useCallback(
     (value: SetStateAction<ComposerAttachmentDraft[]>) => persistComposerAttachments(conversationId, value),
@@ -286,10 +305,13 @@ export function ChatScreen({
 
   useEffect(() => {
     chatDraftRef.current = persistedChatDraft;
-    composerSelectionRef.current = persistedComposerSelection;
     setLocalChatDraft(persistedChatDraft);
+  }, [conversationId, persistedChatDraft]);
+
+  useEffect(() => {
+    composerSelectionRef.current = persistedComposerSelection;
     setLocalComposerSelection(persistedComposerSelection);
-  }, [conversationId, persistedChatDraft, persistedComposerSelection]);
+  }, [conversationId, persistedComposerSelection]);
 
   useEffect(() => () => {
     persistChatDraft(conversationId, chatDraftRef.current);
@@ -913,6 +935,12 @@ export function ChatScreen({
       toast.warning('无法打开链接', '仅支持当前工作区内的文件和本机 HTTP 地址。');
       return;
     }
+    if (canUseSplit && renderTabletWorkbench && openEmbeddedWorkbenchLink) {
+      setIsWorkbenchOpen(true);
+      setActiveWorkbenchTab(target.kind === 'file' ? 'files' : 'browser');
+      openEmbeddedWorkbenchLink(conversation.id, target);
+      return;
+    }
     if (target.kind === 'browser-url') {
       openBrowser(conversation.id, { url: target.url });
     } else if (target.kind === 'browser-file') {
@@ -920,7 +948,7 @@ export function ChatScreen({
     } else {
       openFiles(conversation.id, target.filePath);
     }
-  }, [conversation, openBrowser, openFiles, workspace]);
+  }, [conversation, canUseSplit, openBrowser, openFiles, renderTabletWorkbench, openEmbeddedWorkbenchLink, toast, workspace]);
 
   const forkCurrentConversation = useCallback(() => {
     if (conversation) runThreadMenuAction(conversation.id, 'fork');
@@ -963,10 +991,12 @@ export function ChatScreen({
         onOpenLink={openMessageLink}
         onFork={entry.kind === 'incoming' && conversation ? forkCurrentConversation : undefined}
         usage={isLatestIncoming ? contextUsage : null}
+        containerWidth={Math.min(chatColumnWidth, 1024)}
         streaming={isLatestIncoming && isThinking}
       />
     );
   }, [
+    chatColumnWidth,
     expandedProgressIds,
     handleApprovalResponse,
     contextUsage,
@@ -1011,11 +1041,22 @@ export function ChatScreen({
             icon="git-branch-outline"
             label="Git"
             onPress={() => {
-              if (conversation) {
+              if (canUseSplit && renderTabletWorkbench) {
+                setIsWorkbenchOpen(true);
+                setActiveWorkbenchTab('git-diff');
+              } else if (conversation) {
                 openGit(conversation.id);
               }
             }}
           />
+          {canUseSplit && renderTabletWorkbench ? (
+            <HeaderIconButton
+              icon={isWorkbenchOpen ? 'browsers' : 'browsers-outline'}
+              label={isWorkbenchOpen ? '收起工作台' : '展开工作台'}
+              tone="default"
+              onPress={() => setIsWorkbenchOpen((prev) => !prev)}
+            />
+          ) : null}
           <HeaderIconButton icon="ellipsis-horizontal" label="更多" onPress={() => setMenuVisible(true)} />
         </HeaderActions>
       ),
@@ -1028,8 +1069,11 @@ export function ChatScreen({
     conversation?.mode,
     conversation?.provider,
     chatHeaderTitle,
+    canUseSplit,
+    isWorkbenchOpen,
     navigation,
     openGit,
+    renderTabletWorkbench,
   ]);
 
   if (!workspace || !conversation) {
@@ -1073,11 +1117,12 @@ export function ChatScreen({
   );
 
   const controlChipClassName = 'h-9 rounded-full px-3';
+  const isSplitActive = canUseSplit && Boolean(renderTabletWorkbench);
 
-  return (
-    <Screen>
+  const chatColumn = (
+    <View onLayout={(event) => setChatColumnWidth(event.nativeEvent.layout.width)} className="flex-1 h-full flex-col">
       {lastError ? (
-        <View className="w-full max-w-5xl self-center px-3 pt-2">
+        <View className={isSplitActive && isWorkbenchOpen ? "w-full px-3 pt-2" : "w-full max-w-5xl self-center px-3 pt-2"}>
           <InlineNotice status="danger" title="连接异常" description={lastError} />
         </View>
       ) : null}
@@ -1089,7 +1134,7 @@ export function ChatScreen({
           renderItem={renderConversationRenderItem}
           keyExtractor={keyConversationRenderItem}
           className="flex-1"
-          contentContainerClassName="w-full max-w-5xl self-center px-2 pb-3 pt-3"
+          contentContainerClassName={isSplitActive && isWorkbenchOpen ? "w-full px-2 pb-3 pt-3" : "w-full max-w-5xl self-center px-2 pb-3 pt-3"}
           keyboardShouldPersistTaps="handled"
           ListEmptyComponent={
             <EmptyStateView
@@ -1121,7 +1166,7 @@ export function ChatScreen({
 
       <KeyboardStickyView offset={composerKeyboardOffset}>
         <Surface variant="secondary" className="items-center rounded-t-3xl px-3 pt-2.5" style={{ paddingBottom: composerPaddingBottom }}>
-          <View className="w-full max-w-5xl gap-2">
+          <View className={isSplitActive && isWorkbenchOpen ? "w-full gap-2" : "w-full max-w-5xl gap-2"}>
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
@@ -1234,6 +1279,7 @@ export function ChatScreen({
             </ListSection>
           ) : null}
 
+          <ComposerDraftFlushContext.Provider value={persistComposerState}>{composerControls}</ComposerDraftFlushContext.Provider>
           {composerAttachments.length > 0 || selectedSkills.length > 0 ? (
             <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerClassName="gap-2 pr-2">
               {composerAttachments.map((attachment) => (
@@ -1334,7 +1380,28 @@ export function ChatScreen({
           </View>
         </View>
       </Surface>
-    </KeyboardStickyView>
+      </KeyboardStickyView>
+    </View>
+  );
+
+  return (
+    <Screen>
+      <View className="flex-1" onLayout={(event) => setScreenWidth(event.nativeEvent.layout.width)}>
+      <SplitLayout
+        isSplit={isSplitActive && isWorkbenchOpen}
+        left={chatColumn}
+        right={
+          renderTabletWorkbench ? (
+            renderTabletWorkbench({
+              visible: isSplitActive && isWorkbenchOpen,
+              activeTab: activeWorkbenchTab,
+              onTabChange: setActiveWorkbenchTab,
+              onClose: () => setIsWorkbenchOpen(false),
+            })
+          ) : null
+        }
+      />
+      </View>
 
       <Modal
         visible={composerExpanded}
@@ -1403,12 +1470,83 @@ export function ChatScreen({
       >
         <View className="gap-5">
           {menuSection('工具', [
-            { id: 'diff', label: 'Git Diff', icon: 'git-compare-outline', onPress: () => openGitDiff(conversation.id) },
-            { id: 'git', label: 'Git 操作', icon: 'git-branch-outline', onPress: () => openGit(conversation.id) },
-            { id: 'terminal', label: '终端', icon: 'terminal-outline', onPress: () => openTerminal(conversation.id) },
-            { id: 'browser', label: '浏览器', icon: 'globe-outline', onPress: () => openBrowser(conversation.id) },
-            { id: 'files', label: '文件', icon: 'folder-open-outline', onPress: () => openFiles(conversation.id) },
-            { id: 'workbench', label: '工作台', icon: 'grid-outline', onPress: () => openWorkbench(conversation.id) },
+            {
+              id: 'diff',
+              label: 'Git Diff',
+              icon: 'git-compare-outline',
+              onPress: () => {
+                if (canUseSplit && renderTabletWorkbench) {
+                  setIsWorkbenchOpen(true);
+                  setActiveWorkbenchTab('git-diff');
+                } else {
+                  openGitDiff(conversation.id);
+                }
+              },
+            },
+            {
+              id: 'git',
+              label: 'Git 操作',
+              icon: 'git-branch-outline',
+              onPress: () => {
+                if (canUseSplit && renderTabletWorkbench) {
+                  setIsWorkbenchOpen(true);
+                  setActiveWorkbenchTab('git-diff');
+                } else {
+                  openGit(conversation.id);
+                }
+              },
+            },
+            {
+              id: 'terminal',
+              label: '终端',
+              icon: 'terminal-outline',
+              onPress: () => {
+                if (canUseSplit && renderTabletWorkbench) {
+                  setIsWorkbenchOpen(true);
+                  setActiveWorkbenchTab('terminal');
+                } else {
+                  openTerminal(conversation.id);
+                }
+              },
+            },
+            {
+              id: 'browser',
+              label: '浏览器',
+              icon: 'globe-outline',
+              onPress: () => {
+                if (canUseSplit && renderTabletWorkbench) {
+                  setIsWorkbenchOpen(true);
+                  setActiveWorkbenchTab('browser');
+                } else {
+                  openBrowser(conversation.id);
+                }
+              },
+            },
+            {
+              id: 'files',
+              label: '文件',
+              icon: 'folder-open-outline',
+              onPress: () => {
+                if (canUseSplit && renderTabletWorkbench) {
+                  setIsWorkbenchOpen(true);
+                  setActiveWorkbenchTab('files');
+                } else {
+                  openFiles(conversation.id);
+                }
+              },
+            },
+            {
+              id: 'workbench',
+              label: '工作台',
+              icon: 'grid-outline',
+              onPress: () => {
+                if (canUseSplit && renderTabletWorkbench) {
+                  setIsWorkbenchOpen(true);
+                } else {
+                  openWorkbench(conversation.id);
+                }
+              },
+            },
             { id: 'usage', label: '使用统计', icon: 'stats-chart-outline', onPress: openUsage },
             { id: 'slash', label: 'Slash Commands', icon: 'code-slash-outline', onPress: () => navigation.navigate('SlashCommands', { workspaceId: workspace.id, conversationId: conversation.id }) },
             { id: 'capabilities', label: 'Skills 和 MCPs', icon: 'extension-puzzle-outline', onPress: () => navigation.navigate('Capabilities', route.params) },
