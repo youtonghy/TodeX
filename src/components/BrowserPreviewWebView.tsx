@@ -30,27 +30,9 @@ export function BrowserPreviewWebView({
   }, [backendUrl, result.url]);
   return (
     <View className="flex-1">
-      <View className="mb-2 flex-row items-center justify-end gap-2">
-        <Button
-          size="sm"
-          variant={inspectMode ? 'secondary' : 'primary'}
-          onPress={() => {
-            setInspectMode(false);
-            setLivePreviewFailed(false);
-          }}
-          className="min-h-11 rounded-lg"
-        >
-          <StyledIonicons name="navigate-outline" size={15} className={inspectMode ? 'text-foreground' : 'text-accent-foreground'} />
-          <Button.Label>预览</Button.Label>
-        </Button>
-        <Button size="sm" variant={inspectMode ? 'primary' : 'secondary'} onPress={() => setInspectMode(true)} className="min-h-11 rounded-lg">
-          <StyledIonicons name="scan-outline" size={15} className={inspectMode ? 'text-accent-foreground' : 'text-foreground'} />
-          <Button.Label>检查</Button.Label>
-        </Button>
-      </View>
       <WebView
         key={inspectMode ? 'inspect' : livePreview ? 'live-preview' : 'static-preview'}
-        style={{ flex: 1, minHeight: 240 }}
+        style={{ flex: 1, minHeight: 0 }}
         originWhitelist={['*']}
         source={livePreview
           ? { uri: livePreviewUrl! }
@@ -82,6 +64,15 @@ export function BrowserPreviewWebView({
           }
         }}
       />
+      <View pointerEvents="box-none" className="absolute bottom-3 right-3">
+        <Button size="sm" variant={inspectMode ? 'primary' : 'secondary'} accessibilityLabel={inspectMode ? '退出元素检查' : '检查页面元素'} onPress={() => {
+          setInspectMode(value => !value);
+          setLivePreviewFailed(false);
+        }} className="h-11 rounded-full shadow-sm">
+          <StyledIonicons name={inspectMode ? 'close-outline' : 'scan-outline'} size={16} className={inspectMode ? 'text-accent-foreground' : 'text-foreground'} />
+          <Button.Label>{inspectMode ? '完成检查' : '检查'}</Button.Label>
+        </Button>
+      </View>
     </View>
   );
 }

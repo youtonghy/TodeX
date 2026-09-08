@@ -1,18 +1,11 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react';
-import {
-  FlatList,
-  KeyboardAvoidingView,
-  Platform,
-  ScrollView,
-  View,
-  type NativeScrollEvent,
-  type NativeSyntheticEvent,
-} from 'react-native';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Platform, ScrollView, View } from 'react-native';
+import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Button, Chip, Input, Surface, Text } from 'heroui-native';
+import { Button, Chip, Text } from 'heroui-native';
 
-import { InteractiveTerminal } from '../components/terminal/InteractiveTerminal';
+import { InteractiveTerminal, type InteractiveTerminalHandle } from '../components/terminal/InteractiveTerminal';
 import type { WorkspaceRecord } from '../lib/todex';
 import {
   DEFAULT_TERMINAL_COLS,
@@ -24,54 +17,9 @@ import {
   type TerminalClientState,
   type TerminalOutputEntry,
 } from '../lib/appCore';
-import { EmptyStateView, FormField, InlineNotice, Screen, SectionHeader, StyledIonicons, useAppToast } from '../components/ui';
+import { ActionSheet, AppSheet, EmptyStateView, FormField, InlineNotice, Screen, StyledIonicons, useAppToast } from '../components/ui';
 
 const EMPTY_TERMINAL_OUTPUT: TerminalOutputEntry[] = [];
-const TERMINAL_BOTTOM_FOLLOW_THRESHOLD = 72;
-
-function terminalEntryDisplayText(entry: TerminalOutputEntry): string {
-  if (entry.kind === 'input') {
-    return `$ ${entry.text.replace(/\n$/, '')}\n`;
-  }
-  if (entry.kind === 'system') {
-    return `# ${entry.text.replace(/\n$/, '')}\n`;
-  }
-  if (entry.kind === 'error') {
-    return `! ${entry.text.replace(/\n$/, '')}\n`;
-  }
-  return entry.text;
-}
-
-function terminalEntryClassName(entry: TerminalOutputEntry): string {
-  switch (entry.kind) {
-    case 'stderr':
-    case 'error':
-      return 'text-danger';
-    case 'input':
-      return 'text-accent';
-    case 'system':
-      return 'text-muted';
-    default:
-      return 'text-foreground';
-  }
-}
-
-const TerminalOutputRow = memo(function TerminalOutputRow({ entry }: { entry: TerminalOutputEntry }) {
-  return (
-    <Text selectable type="code" className={`bg-transparent px-0 text-[12px] leading-[18px] ${terminalEntryClassName(entry)}`}>
-      {terminalEntryDisplayText(entry)}
-    </Text>
-  );
-});
-
-function renderTerminalOutput({ item }: { item: TerminalOutputEntry }) {
-  return <TerminalOutputRow entry={item} />;
-}
-
-function keyTerminalOutput(item: TerminalOutputEntry): string {
-  return item.id;
-}
-
 export type TerminalScreenProps = {
   terminalId?: string;
   visible?: boolean;
@@ -108,13 +56,10 @@ export function TerminalScreen({
   const [shell, setShell] = useState(terminal?.shell || '');
   const [rowsDraft, setRowsDraft] = useState(String(terminal?.rows ?? DEFAULT_TERMINAL_ROWS));
   const [colsDraft, setColsDraft] = useState(String(terminal?.cols ?? DEFAULT_TERMINAL_COLS));
-  const [inputDraft, setInputDraft] = useState('');
   const [viewportSize, setViewportSize] = useState<{ rows: number; cols: number } | null>(null);
   const [settingsExpanded, setSettingsExpanded] = useState(false);
-  const [showJumpToLatestOutput, setShowJumpToLatestOutput] = useState(false);
-  const outputListRef = useRef<FlatList<TerminalOutputEntry> | null>(null);
-  const shouldFollowOutputRef = useRef(true);
-  const pendingOutputScrollFrameRef = useRef<number | null>(null);
+  const [menuVisible, setMenuVisible] = useState(false);
+  const terminalViewRef = useRef<InteractiveTerminalHandle>(null);
   const terminalStateRef = useRef(terminal);
   const autoStartKeyRef = useRef('');
   const reconnectAttemptRef = useRef(0);
@@ -128,7 +73,6 @@ export function TerminalScreen({
   const cols = Math.max(20, Math.min(400, Number.parseInt(colsDraft, 10) || DEFAULT_TERMINAL_COLS));
   const statusColor = isRunning ? 'success' : terminal?.status === 'error' ? 'danger' : isBusy ? 'warning' : 'default';
   const output = terminal?.output ?? EMPTY_TERMINAL_OUTPUT;
-  const latestOutputId = output.at(-1)?.id ?? '';
 
   useEffect(() => {
     if (!isRunning || !canControl || !viewportSize) return;
@@ -243,44 +187,6 @@ export function TerminalScreen({
     workspace?.path,
   ]);
 
-  const scrollToLatestOutput = useCallback((animated: boolean) => {
-    if (pendingOutputScrollFrameRef.current !== null) return;
-    pendingOutputScrollFrameRef.current = requestAnimationFrame(() => {
-      pendingOutputScrollFrameRef.current = null;
-      outputListRef.current?.scrollToEnd({ animated });
-    });
-  }, []);
-
-  useEffect(() => () => {
-    if (pendingOutputScrollFrameRef.current !== null) {
-      cancelAnimationFrame(pendingOutputScrollFrameRef.current);
-      pendingOutputScrollFrameRef.current = null;
-    }
-  }, []);
-
-  useEffect(() => {
-    shouldFollowOutputRef.current = true;
-    setShowJumpToLatestOutput(false);
-  }, [terminalId]);
-
-  useEffect(() => {
-    if (latestOutputId && shouldFollowOutputRef.current) scrollToLatestOutput(false);
-  }, [latestOutputId, scrollToLatestOutput]);
-
-  const handleOutputScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
-    const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y;
-    const isAtBottom = distanceFromBottom <= TERMINAL_BOTTOM_FOLLOW_THRESHOLD;
-    shouldFollowOutputRef.current = isAtBottom;
-    setShowJumpToLatestOutput(!isAtBottom && output.length > 0);
-  }, [output.length]);
-
-  const jumpToLatestOutput = useCallback(() => {
-    shouldFollowOutputRef.current = true;
-    setShowJumpToLatestOutput(false);
-    scrollToLatestOutput(true);
-  }, [scrollToLatestOutput]);
-
   const start = useCallback(() => {
     if (!workspace || !conversation) {
       toast.warning('未选择工作区', '请从一个对话中打开终端。');
@@ -320,30 +226,8 @@ export function TerminalScreen({
     requestTerminalStatus(workspace, conversation, terminalId);
   }, [conversation, requestTerminalStatus, workspace, terminalId]);
 
-  const applySize = useCallback(() => {
-    if (!terminalId) {
-      return;
-    }
-    resizeTerminalSession(terminalId, effectiveTenantId, rows, cols);
-  }, [cols, effectiveTenantId, resizeTerminalSession, rows, terminalId]);
-
-  const submitInput = useCallback(() => {
-    const command = inputDraft;
-    if (!command.trim() || !terminalId) {
-      return;
-    }
-    if (!isRunning) {
-      toast.warning('终端未运行', '请先启动终端。');
-      return;
-    }
-    const data = command.endsWith('\n') ? command : `${command}\n`;
-    if (sendTerminalInput(terminalId, effectiveTenantId, data)) {
-      setInputDraft('');
-    }
-  }, [effectiveTenantId, inputDraft, isRunning, sendTerminalInput, terminalId, toast]);
-
   const copyOutput = useCallback(async () => {
-    const output = terminal?.output.map((entry) => terminalEntryDisplayText(entry)).join('');
+    const output = terminal?.output.map((entry) => entry.text).join('');
     if (!output) {
       return;
     }
@@ -360,160 +244,73 @@ export function TerminalScreen({
   }
 
   return (
-    <Screen>
-      <KeyboardAvoidingView className="flex-1" behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-      <View className="gap-3 px-4 pt-3">
-        <View className="flex-row items-center gap-3">
+    <View className="flex-1 bg-background">
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <View className="h-14 flex-row items-center gap-2 border-b border-separator px-3">
           <View className="min-w-0 flex-1">
-            <Text type="h5" numberOfLines={1} className="text-foreground">
-              {workspace.name}
-            </Text>
-            <Text type="body-xs" color="muted" numberOfLines={1} className="font-mono">
-              {cwd || workspace.path}
-            </Text>
+            <Text type="body-sm" weight="semibold" numberOfLines={1}>{workspace.name}</Text>
+            <Text type="body-xs" color="muted" numberOfLines={1} className="font-mono">{cwd || workspace.path}</Text>
           </View>
           <Chip size="sm" variant="soft" color={statusColor}>
-            <View className={`h-1.5 w-1.5 rounded-full ${isRunning ? 'bg-success' : terminal?.status === 'error' ? 'bg-danger' : isBusy ? 'bg-warning' : 'bg-muted'}`} />
             <Chip.Label>{terminalStatusLabel(terminal?.status ?? 'idle')}</Chip.Label>
           </Chip>
-          {terminal?.pid ? (
-            <Chip size="sm" variant="soft">
-              <Chip.Label>pid {terminal.pid}</Chip.Label>
-            </Chip>
+          <Button isIconOnly size="sm" variant="ghost" accessibilityLabel="终端更多操作" onPress={() => setMenuVisible(true)} className="h-11 w-11 rounded-full">
+            <StyledIonicons name="ellipsis-horizontal" size={20} className="text-foreground" />
+          </Button>
+        </View>
+        {terminal?.error ? <View className="px-3 py-2"><InlineNotice status="danger" title="终端连接异常" description={terminal.error} /></View> : null}
+        <View className="min-h-0 flex-1" style={{ backgroundColor: '#171717' }}>
+          <InteractiveTerminal
+            ref={terminalViewRef}
+            key={terminalId}
+            output={output}
+            visible={visible}
+            enabled={isRunning && canControl}
+            onInput={data => sendTerminalInput(terminalId, effectiveTenantId, data)}
+            onResize={(nextRows, nextCols) => {
+              setViewportSize(current => current?.rows === nextRows && current.cols === nextCols ? current : { rows: nextRows, cols: nextCols });
+            }}
+          />
+          {!isRunning ? (
+            <View className="absolute inset-0 items-center justify-center gap-4 px-8">
+              <Text type="body-sm" className="text-center text-white/70">
+                {connectionState !== 'open' ? '连接后端后即可使用终端' : isBusy ? '正在连接终端…' : '终端尚未运行'}
+              </Text>
+              {canControl && !isBusy ? <Button size="sm" onPress={start}><Button.Label>启动终端</Button.Label></Button> : null}
+            </View>
           ) : null}
         </View>
-
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerClassName="items-center gap-2 pr-2">
-          <Button size="sm" variant="primary" isDisabled={!canControl || isRunning || isBusy} onPress={start} className="h-9 rounded-full">
-            <StyledIonicons name="play" size={14} className="text-accent-foreground" />
-            <Button.Label>启动</Button.Label>
-          </Button>
-          <Button size="sm" variant="secondary" isDisabled={!canControl} onPress={refresh} className="h-9 rounded-full">
-            <StyledIonicons name="refresh-outline" size={14} className="text-foreground" />
-            <Button.Label>状态</Button.Label>
-          </Button>
-          <Button size="sm" variant="danger-soft" isDisabled={!isRunning && terminal?.status !== 'starting'} onPress={() => stop(false)} className="h-9 rounded-full">
-            <StyledIonicons name="stop" size={14} className="text-danger" />
-            <Button.Label>停止</Button.Label>
-          </Button>
-          <Button size="sm" variant="danger-soft" isDisabled={!isRunning && terminal?.status !== 'starting'} onPress={() => stop(true)} className="h-9 rounded-full">
-            <StyledIonicons name="close-circle-outline" size={14} className="text-danger" />
-            <Button.Label>强停</Button.Label>
-          </Button>
-          <Button size="sm" variant={settingsExpanded ? 'secondary' : 'ghost'} onPress={() => setSettingsExpanded((value) => !value)} className="h-9 rounded-full">
-            <StyledIonicons name="options-outline" size={14} className="text-foreground" />
-            <Button.Label>会话参数</Button.Label>
-          </Button>
-        </ScrollView>
-
-        {settingsExpanded ? (
-          <Surface variant="secondary" className="gap-3 rounded-2xl p-3">
-            <SectionHeader title="会话参数" description="启动目录和 Shell 在下次启动时生效" />
-            <FormField label="路径" value={cwd} onChangeText={setCwd} placeholder={workspace.path} editable={!isRunning && !isBusy} monospace />
-            <FormField label="Shell" value={shell} onChangeText={setShell} placeholder="默认使用后端 SHELL" editable={!isRunning && !isBusy} monospace />
-            {Platform.OS === 'web' ? <View className="flex-row items-end gap-2">
-              <View className="flex-1">
-                <FormField label="Rows" value={rowsDraft} onChangeText={setRowsDraft} placeholder="24" editable={!isBusy} keyboardType="number-pad" />
-              </View>
-              <View className="flex-1">
-                <FormField label="Cols" value={colsDraft} onChangeText={setColsDraft} placeholder="80" editable={!isBusy} keyboardType="number-pad" />
-              </View>
-              <Button size="md" variant="secondary" isDisabled={!isRunning} onPress={applySize} className="h-12 rounded-xl">
-                <Button.Label>应用尺寸</Button.Label>
-              </Button>
-            </View> : <Text type="body-xs" color="muted">终端尺寸会自动适配当前面板。</Text>}
-          </Surface>
-        ) : null}
-
-        {terminal?.error ? <InlineNotice status="danger" title="终端错误" description={terminal.error} /> : null}
-      </View>
-
-      <Surface className="mx-4 mt-3 min-h-0 flex-1 overflow-hidden rounded-3xl">
-        <View className="flex-row items-center justify-between border-b border-separator px-4 py-2">
-          <View className="flex-row items-center gap-2">
-            <View className="flex-row gap-1.5">
-              <View className="h-2.5 w-2.5 rounded-full bg-danger/70" />
-              <View className="h-2.5 w-2.5 rounded-full bg-warning/70" />
-              <View className="h-2.5 w-2.5 rounded-full bg-success/70" />
-            </View>
-            <Text type="body-xs" weight="semibold" className="uppercase tracking-wide text-muted">
-              Session
-            </Text>
-            {terminal?.outputTruncated ? (
-              <Chip size="sm" variant="soft" color="warning">
-                <Chip.Label>已截断</Chip.Label>
-              </Chip>
-            ) : null}
-          </View>
-          <View className="flex-row gap-0.5">
-            <Button isIconOnly size="sm" variant="ghost" accessibilityLabel="复制输出" isDisabled={!terminal?.output.length} onPress={() => void copyOutput()} className="h-8 w-8 rounded-full">
-              <StyledIonicons name="copy-outline" size={14} className="text-muted" />
+        <View className="border-t border-separator bg-background" style={{ paddingBottom: insets.bottom }}>
+          <ScrollView horizontal keyboardShouldPersistTaps="always" showsHorizontalScrollIndicator={false} contentContainerClassName="items-center gap-1 px-2 py-1">
+            <Button isIconOnly size="sm" variant="ghost" accessibilityLabel="聚焦终端键盘" isDisabled={!isRunning || !canControl} onPress={() => terminalViewRef.current?.focus()} className="h-11 w-11 rounded-lg">
+              <StyledIonicons name="keypad-outline" size={18} className="text-foreground" />
             </Button>
-            <Button isIconOnly size="sm" variant="ghost" accessibilityLabel="清空输出" isDisabled={!terminalId} onPress={() => clearTerminalOutput(terminalId)} className="h-8 w-8 rounded-full">
-              <StyledIonicons name="trash-outline" size={14} className="text-muted" />
-            </Button>
-          </View>
+            {([['Ctrl-C', '\u0003'], ['Tab', '\t'], ['Esc', '\u001b'], ['↑', '\u001b[A'], ['↓', '\u001b[B'], ['←', '\u001b[D'], ['→', '\u001b[C']] as const).map(([label, data]) => (
+              <Button key={label} variant="ghost" size="sm" className="h-11 min-w-11 rounded-lg px-3" isDisabled={!isRunning || !canControl} onPress={() => {
+                sendTerminalInput(terminalId, effectiveTenantId, data);
+                terminalViewRef.current?.focus();
+              }}><Button.Label className="font-mono">{label}</Button.Label></Button>
+            ))}
+          </ScrollView>
         </View>
-        {Platform.OS !== 'web' ? <InteractiveTerminal key={terminalId} output={output} visible={visible} enabled={isRunning && canControl}
-          onInput={data => sendTerminalInput(terminalId, effectiveTenantId, data)}
-          onResize={(nextRows, nextCols) => {
-            setRowsDraft(String(nextRows)); setColsDraft(String(nextCols));
-            setViewportSize(current => current?.rows === nextRows && current.cols === nextCols ? current : { rows: nextRows, cols: nextCols });
-          }} /> : <FlatList
-          ref={outputListRef}
-          data={output}
-          renderItem={renderTerminalOutput}
-          keyExtractor={keyTerminalOutput}
-          className="flex-1"
-          contentContainerClassName="px-4 py-3"
-          ListEmptyComponent={(
-            <Text type="code" className="bg-transparent px-0 text-[12px] leading-[18px] text-muted">
-              {connectionState === 'open' ? 'terminal idle\n' : 'backend disconnected\n'}
-            </Text>
-          )}
-          initialNumToRender={18}
-          maxToRenderPerBatch={12}
-          updateCellsBatchingPeriod={40}
-          windowSize={9}
-          maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
-          removeClippedSubviews={false}
-          onScroll={handleOutputScroll}
-          scrollEventThrottle={80}
-        />}
-        {Platform.OS === 'web' && showJumpToLatestOutput ? (
-          <View className="absolute bottom-3 right-3">
-            <Button size="sm" variant="secondary" accessibilityLabel="跳到最新输出" onPress={jumpToLatestOutput} className="h-9 rounded-full px-3 shadow-sm">
-              <StyledIonicons name="arrow-down" size={14} className="text-foreground" />
-              <Button.Label>最新输出</Button.Label>
-            </Button>
-          </View>
-        ) : null}
-      </Surface>
-
-      <ScrollView horizontal style={{ flexGrow: 0 }} contentContainerClassName="gap-2 px-4 pt-2">
-        {([['Ctrl-C', '\u0003'], ['Tab', '\t'], ['Esc', '\u001b'], ['↑', '\u001b[A'], ['↓', '\u001b[B']] as const).map(([label, data]) => <Button key={label} variant="secondary" size="sm" className="min-h-11" isDisabled={!isRunning || !canControl} onPress={() => sendTerminalInput(terminalId, effectiveTenantId, data)}><Button.Label>{label}</Button.Label></Button>)}
-      </ScrollView>
-      <View className="flex-row items-center gap-2 px-4 pt-3" style={{ paddingBottom: 12 + insets.bottom }}>
-        <Text type="code" className="bg-transparent px-0 text-accent">
-          $
-        </Text>
-        <Input
-          containerClassName="flex-1"
-          value={inputDraft}
-          onChangeText={setInputDraft}
-          placeholder={isRunning ? '输入命令' : '启动终端后输入命令'}
-          isDisabled={!isRunning}
-          autoCapitalize="none"
-          autoCorrect={false}
-          returnKeyType="send"
-          onSubmitEditing={submitInput}
-          className="min-h-11 flex-1 rounded-2xl font-mono text-sm"
-        />
-        <Button isIconOnly size="md" variant="primary" accessibilityLabel="发送命令" isDisabled={!isRunning || !inputDraft.trim()} onPress={submitInput} className="h-11 w-11 rounded-full">
-          <StyledIonicons name="return-down-forward" size={18} className="text-accent-foreground" />
-        </Button>
-      </View>
       </KeyboardAvoidingView>
-    </Screen>
+      <ActionSheet isOpen={menuVisible} onOpenChange={setMenuVisible} title="终端操作" actions={[
+        { id: 'refresh', label: '刷新状态', icon: 'refresh-outline', disabled: !canControl, onPress: refresh },
+        { id: 'copy', label: '复制输出', icon: 'copy-outline', disabled: !output.length, onPress: () => void copyOutput() },
+        { id: 'clear', label: '清空输出', icon: 'trash-outline', disabled: !terminalId, onPress: () => clearTerminalOutput(terminalId) },
+        { id: 'settings', label: '会话设置', icon: 'options-outline', onPress: () => setSettingsExpanded(true) },
+        { id: 'stop', label: '停止终端', icon: 'stop-outline', destructive: true, disabled: !isRunning && !isBusy, onPress: () => stop(false) },
+        { id: 'force-stop', label: '强制停止', icon: 'close-circle-outline', destructive: true, disabled: !isRunning && !isBusy, onPress: () => stop(true) },
+      ]} />
+      <AppSheet isOpen={settingsExpanded} onOpenChange={setSettingsExpanded} title="会话设置" description="启动目录和 Shell 在下次启动时生效">
+        <View className="gap-4">
+          <FormField label="工作目录" value={cwd} onChangeText={setCwd} placeholder={workspace.path} editable={!isRunning && !isBusy} monospace />
+          <FormField label="Shell" value={shell} onChangeText={setShell} placeholder="使用后端默认 Shell" editable={!isRunning && !isBusy} monospace />
+          <Text type="body-sm" color="muted">终端行列数随可用空间自动调整。</Text>
+          {terminal?.pid ? <Text type="body-sm" color="muted">进程 {terminal.pid}</Text> : null}
+          {terminal?.outputTruncated ? <Text type="body-sm" color="muted">较早的输出已截断。</Text> : null}
+        </View>
+      </AppSheet>
+    </View>
   );
 }
