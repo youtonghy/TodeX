@@ -9,6 +9,8 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BottomSheet } from 'heroui-native';
 
+import { useSheetLifecycle } from './useSheetLifecycle';
+
 /**
  * Controlled bottom sheet used for forms and pickers. Content is scrollable
  * and the sheet grows with its content up to the largest snap point.
@@ -32,6 +34,7 @@ export function AppSheet({
   scrollable?: boolean;
   footer?: ReactNode;
 }) {
+  const sheet = useSheetLifecycle(isOpen);
   const { bottom: bottomInset } = useSafeAreaInsets();
   const header = title || description ? (
     <View className="mb-4 gap-1 pr-10">
@@ -46,12 +49,14 @@ export function AppSheet({
   ), [bottomInset, footer]);
 
   // Gorhom retains closed sheets on web; omit their portals to avoid ghost footers.
-  if (Platform.OS === 'web' && !isOpen) return null;
+  if (!sheet.shouldRender || (Platform.OS === 'web' && !isOpen)) return null;
   return (
-    <BottomSheet isOpen={isOpen} onOpenChange={onOpenChange}>
+    <BottomSheet isOpen={sheet.isOpen} onOpenChange={onOpenChange}>
       <BottomSheet.Portal>
         <BottomSheet.Overlay />
         <BottomSheet.Content
+          onChange={sheet.onChange}
+          contentContainerProps={{ onLayout: sheet.onLayout }}
           {...(snapPoints
             ? { snapPoints, enableDynamicSizing: false, enableOverDrag: false, contentContainerClassName: 'h-full' }
             : {})}

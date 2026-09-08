@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   PanResponder,
   View,
@@ -118,6 +118,10 @@ export function SplitLayout({
 
   const layout = resolveSplitLayout(containerWidth, leftWidth, isSplit, minLeftWidth, minRightWidth);
   const splitVisible = layout.split;
+  const [hasShownRight, setHasShownRight] = useState(false);
+  useEffect(() => {
+    if (splitVisible) setHasShownRight(true);
+  }, [splitVisible]);
 
   return (
     <View onLayout={handleContainerLayout} className={className} style={style}>
@@ -164,7 +168,7 @@ export function SplitLayout({
 
       {/* Right Column (Workbench) */}
       <View style={splitVisible ? undefined : { display: 'none' }} accessibilityElementsHidden={!splitVisible} importantForAccessibility={splitVisible ? 'auto' : 'no-hide-descendants'} className="h-full flex-1 overflow-hidden bg-background">
-        {right}
+        {splitVisible || hasShownRight ? right : null}
       </View>
     </View>
   );

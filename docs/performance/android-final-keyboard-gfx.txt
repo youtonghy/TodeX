@@ -1,0 +1,7 @@
+Total frames rendered: 260
+Janky frames: 29 (11.15%)
+50th percentile: 17ms
+90th percentile: 18ms
+95th percentile: 18ms
+99th percentile: 19ms
+96 views, 223.61 kB of render nodes

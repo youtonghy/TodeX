@@ -4,6 +4,7 @@ import { BottomSheetView } from '@gorhom/bottom-sheet';
 import { BottomSheet, Button, ListGroup, Separator, Text } from 'heroui-native';
 
 import { StyledIonicons } from './StyledIonicons';
+import { useSheetLifecycle } from './useSheetLifecycle';
 
 type IoniconName = ComponentProps<typeof StyledIonicons>['name'];
 
@@ -36,14 +37,15 @@ export function ActionSheet({
   actions: ActionSheetAction[];
   cancelLabel?: string;
 }) {
+  const sheet = useSheetLifecycle(isOpen);
   const close = () => onOpenChange(false);
   // Gorhom retains closed sheets on web; omit their portals to avoid ghost footers.
-  if (Platform.OS === 'web' && !isOpen) return null;
+  if (!sheet.shouldRender || (Platform.OS === 'web' && !isOpen)) return null;
   return (
-    <BottomSheet isOpen={isOpen} onOpenChange={onOpenChange}>
+    <BottomSheet isOpen={sheet.isOpen} onOpenChange={onOpenChange}>
       <BottomSheet.Portal>
         <BottomSheet.Overlay />
-        <BottomSheet.Content>
+        <BottomSheet.Content onChange={sheet.onChange} contentContainerProps={{ onLayout: sheet.onLayout }}>
           <BottomSheetView className="gap-4 px-1 pb-6">
             {title || description ? (
               <View className="gap-1 px-1">

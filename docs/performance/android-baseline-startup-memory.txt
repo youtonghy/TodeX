@@ -1,0 +1,3 @@
+TOTAL PSS:   201478            TOTAL RSS:   330736       TOTAL SWAP PSS:      160
+Views:      333         ViewRootImpl:        1
+Death Recipients:        0             WebViews:        0
