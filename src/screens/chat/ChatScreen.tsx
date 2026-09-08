@@ -1556,23 +1556,6 @@ export function ChatScreen({
             { id: 'capabilities', label: 'Skills 和 MCPs', icon: 'extension-puzzle-outline', onPress: () => navigation.navigate('Capabilities', route.params) },
             { id: 'settings', label: '设置', icon: 'settings-outline', onPress: () => navigation.navigate('Settings') },
           ])}
-          {menuSection('Thread', [
-            { id: 'detail', label: 'Thread Details', icon: 'information-circle-outline', onPress: () => runThreadMenuAction(conversation.id, 'detail') },
-            { id: 'history', label: 'Thread History', icon: 'time-outline', onPress: () => runThreadMenuAction(conversation.id, 'history') },
-            { id: 'turns', label: 'Thread Turns', icon: 'swap-vertical-outline', onPress: () => runThreadMenuAction(conversation.id, 'turns') },
-            { id: 'items', label: 'Turn Items', icon: 'list-outline', onPress: () => runThreadMenuAction(conversation.id, 'items') },
-            { id: 'loaded', label: 'Loaded Threads', icon: 'layers-outline', onPress: () => runThreadMenuAction(conversation.id, 'loaded') },
-            { id: 'resume', label: 'Resume Thread', icon: 'play-outline', onPress: () => runThreadMenuAction(conversation.id, 'resume') },
-            { id: 'fork', label: 'Fork Thread', icon: 'git-branch-outline', onPress: () => runThreadMenuAction(conversation.id, 'fork') },
-            { id: 'compact', label: 'Compact Thread', icon: 'contract-outline', onPress: () => runThreadMenuAction(conversation.id, 'compact') },
-            { id: 'rollback', label: 'Rollback 1 Turn', icon: 'arrow-undo-outline', onPress: () => runThreadMenuAction(conversation.id, 'rollback') },
-            { id: 'metadata', label: 'Thread Metadata', icon: 'pricetag-outline', onPress: () => runThreadMenuAction(conversation.id, 'metadata') },
-            { id: 'memory', label: 'Thread Memory', icon: 'bookmark-outline', onPress: () => runThreadMenuAction(conversation.id, 'memory') },
-            { id: 'shell', label: 'Shell Command', icon: 'terminal-outline', onPress: () => runThreadMenuAction(conversation.id, 'shell') },
-            { id: 'inject', label: 'Inject Items', icon: 'enter-outline', onPress: () => runThreadMenuAction(conversation.id, 'inject') },
-            { id: 'clean', label: 'Clean Terminals', icon: 'sparkles-outline', onPress: () => runThreadMenuAction(conversation.id, 'clean') },
-            { id: 'unarchive', label: 'Unarchive Thread', icon: 'archive-outline', onPress: () => runThreadMenuAction(conversation.id, 'unarchive') },
-          ])}
           {menuSection('本地运行时', [
             { id: 'start', label: '启动', icon: 'play-circle-outline', onPress: () => runWorkspaceCommand(workspace, conversation, 'start') },
             { id: 'status', label: '状态', icon: 'pulse-outline', onPress: () => runWorkspaceCommand(workspace, conversation, 'status') },
