@@ -1412,49 +1412,44 @@ export function ChatScreen({
         onShow={() => expandedComposerInputRef.current?.focus()}
         onRequestClose={() => setComposerExpanded(false)}
       >
-        <Surface variant="secondary" className="flex-1 bg-background" style={{ paddingTop: insets.top }}>
-          <View className="w-full max-w-5xl self-center flex-1">
-            <View className="h-14 flex-row items-center justify-between border-b border-separator px-4">
+        <Surface variant="secondary" className="flex-1 bg-background p-0" style={{ paddingTop: insets.top, paddingBottom: insets.bottom }}>
+          <View className="w-full max-w-5xl flex-1 self-center">
+            <View className="h-16 flex-row items-center justify-between border-b border-separator px-5">
               <Text type="h5" className="text-foreground">编辑消息</Text>
               <Button
-                isIconOnly
-                size="md"
-                variant="ghost"
-                accessibilityLabel="退出全屏编辑"
+                size="sm"
+                variant="primary"
+                accessibilityLabel="完成编辑并返回聊天"
                 onPress={() => setComposerExpanded(false)}
-                className="h-10 w-10 rounded-full"
+                className="min-w-20 rounded-full"
               >
-                <StyledIonicons name="contract-outline" size={20} className="text-foreground" />
+                <Button.Label>完成</Button.Label>
               </Button>
             </View>
-            <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} className="flex-1">
-              <TextArea
-                ref={expandedComposerInputRef}
-                value={chatDraft}
-                onChangeText={setChatDraft}
-                onSelectionChange={(event) => setComposerSelection(event.nativeEvent.selection)}
-                onBlur={persistComposerState}
-                onKeyPress={(event) => {
-                  if (event.nativeEvent.key === 'Escape' && isThinking) {
-                    stopThinking(route.params.conversationId);
-                  }
-                }}
-                selection={composerSelection}
-                placeholder="输入消息，#能力，@文件，/命令"
-                autoCapitalize="none"
-                autoCorrect={false}
-                multiline
-                textAlignVertical="top"
-                className="m-4 h-full min-h-0 flex-1 rounded-2xl p-4 text-[16px] leading-6"
-              />
-              <View
-                className="flex-row items-center justify-end border-t border-separator px-4 pt-3"
-                style={{ paddingBottom: Math.max(insets.bottom, 12) }}
-              >
-                <Button variant="primary" onPress={() => setComposerExpanded(false)} className="min-w-28 rounded-xl">
-                  <StyledIonicons name="contract-outline" size={16} className="text-accent-foreground" />
-                  <Button.Label>完成</Button.Label>
-                </Button>
+            <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
+              <View className="min-h-0 flex-1 px-5 py-4">
+                <TextArea
+                  ref={expandedComposerInputRef}
+                  value={chatDraft}
+                  onChangeText={setChatDraft}
+                  onSelectionChange={(event) => setComposerSelection(event.nativeEvent.selection)}
+                  onBlur={persistComposerState}
+                  onKeyPress={(event) => {
+                    if (event.nativeEvent.key === 'Escape' && isThinking) {
+                      stopThinking(route.params.conversationId);
+                    }
+                  }}
+                  selection={composerSelection}
+                  accessibilityLabel="消息内容"
+                  placeholder="输入消息，#能力，@文件，/命令"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  multiline
+                  scrollEnabled
+                  textAlignVertical="top"
+                  background={null}
+                  className="h-auto min-h-0 flex-1 rounded-none border-0 bg-transparent p-0 text-[17px] leading-7 android:border-0 android:focus:border-transparent ios:outline-0 ios:focus:outline-transparent"
+                />
               </View>
             </KeyboardAvoidingView>
           </View>
