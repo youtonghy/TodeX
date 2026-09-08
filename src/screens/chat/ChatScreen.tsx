@@ -151,7 +151,6 @@ export type ChatScreenProps = NativeStackScreenProps<RootStackParamList, 'Chat'>
   sendApprovalResponse: (selection: boolean | PermissionOption, request: PendingRequest) => boolean;
   attachWorkspaceConversation: (workspace: WorkspaceRecord, conversation: ConversationRecord) => boolean;
   loadNativeThreadHistory: (conversationId: string, force?: boolean) => boolean;
-  runWorkspaceCommand: (workspace: WorkspaceRecord, conversation: ConversationRecord, command: 'start' | 'status' | 'attach' | 'stop' | 'interrupt') => void;
   runThreadMenuAction: (conversationId: string, action: ThreadMenuAction) => void;
   sendSlashCommand: (input: string, conversationId?: string) => void;
   openGitDiff: (conversationId: string) => void;
@@ -207,7 +206,6 @@ export function ChatScreen({
   sendApprovalResponse,
   attachWorkspaceConversation,
   loadNativeThreadHistory,
-  runWorkspaceCommand,
   runThreadMenuAction,
   sendSlashCommand,
   openGitDiff,
@@ -1555,13 +1553,6 @@ export function ChatScreen({
             { id: 'slash', label: 'Slash Commands', icon: 'code-slash-outline', onPress: () => navigation.navigate('SlashCommands', { workspaceId: workspace.id, conversationId: conversation.id }) },
             { id: 'capabilities', label: 'Skills 和 MCPs', icon: 'extension-puzzle-outline', onPress: () => navigation.navigate('Capabilities', route.params) },
             { id: 'settings', label: '设置', icon: 'settings-outline', onPress: () => navigation.navigate('Settings') },
-          ])}
-          {menuSection('本地运行时', [
-            { id: 'start', label: '启动', icon: 'play-circle-outline', onPress: () => runWorkspaceCommand(workspace, conversation, 'start') },
-            { id: 'status', label: '状态', icon: 'pulse-outline', onPress: () => runWorkspaceCommand(workspace, conversation, 'status') },
-            { id: 'attach', label: '附加', icon: 'link-outline', onPress: () => runWorkspaceCommand(workspace, conversation, 'attach') },
-            { id: 'interrupt', label: '中断', icon: 'pause-circle-outline', onPress: () => runWorkspaceCommand(workspace, conversation, 'interrupt') },
-            { id: 'stop', label: '停止', icon: 'stop-circle-outline', onPress: () => runWorkspaceCommand(workspace, conversation, 'stop') },
           ])}
           {menuSection('危险操作', [
             { id: 'archive', label: '归档 Thread', icon: 'archive-outline', destructive: true, onPress: () => runThreadMenuAction(conversation.id, 'archive') },

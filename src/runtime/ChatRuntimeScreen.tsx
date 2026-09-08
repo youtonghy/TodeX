@@ -41,7 +41,6 @@ export type ChatRuntimeActions = Pick<
   | 'sendApprovalResponse'
   | 'attachWorkspaceConversation'
   | 'loadNativeThreadHistory'
-  | 'runWorkspaceCommand'
   | 'runThreadMenuAction'
   | 'sendSlashCommand'
   | 'openGitDiff'

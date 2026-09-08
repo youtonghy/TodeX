@@ -6253,42 +6253,6 @@ export default function App() {
     return true;
   }, [appRuntime, appendTimeline, getConversationContext, rememberMentionReferences, selectedSkills, sendLocalTurn, sendSlashCommand, sendV2Prompt, setConversationAttachments, setConversationChatDraft, setConversationComposerSelection, setConversationSelectedSkills]);
 
-  const runWorkspaceCommand = useCallback((workspace: WorkspaceRecord, conversation: ConversationRecord, command: 'start' | 'status' | 'attach' | 'stop' | 'interrupt') => {
-    if (command === 'start') {
-      void startLocalAdapter(workspace, conversation).catch(() => undefined);
-      return;
-    }
-    if (command === 'status') {
-      sendWorkspaceCommand(workspace, 'codex.local.status', {}, conversation);
-      return;
-    }
-    if (command === 'attach') {
-      attachWorkspaceConversation(workspace, conversation);
-      return;
-    }
-    if (command === 'interrupt') {
-      const threadId = normalizeThreadId(conversation.threadId);
-      if (!threadId) {
-        setLastError('当前对话还没有可中断的 thread。');
-        return;
-      }
-      sendWorkspaceCommand(workspace, 'codex.local.interrupt', {
-        threadId,
-        turnId: turnIdsRef.current[conversation.id] || '',
-      }, conversation);
-      return;
-    }
-    if (sendWorkspaceCommand(workspace, 'codex.local.stop', { force: false }, conversation)) {
-      const pending = pendingLocalStartsRef.current.get(conversation.id);
-      if (pending) {
-        clearTimeout(pending.timeoutId);
-        pendingLocalStartsRef.current.delete(conversation.id);
-        pending.reject(new Error('本地会话已停止'));
-      }
-      updateConversation(conversation.id, { localAdapterState: 'stopped' });
-    }
-  }, [attachWorkspaceConversation, sendWorkspaceCommand, updateConversation, startLocalAdapter]);
-
   const runThreadMenuAction = useCallback((conversationId: string, action: ThreadMenuAction) => {
     if (action === 'fork') {
       forkConversation(conversationId);
@@ -6664,7 +6628,6 @@ export default function App() {
     sendApprovalResponse,
     attachWorkspaceConversation,
     loadNativeThreadHistory,
-    runWorkspaceCommand,
     runThreadMenuAction,
     sendSlashCommand,
     openGitDiff,
