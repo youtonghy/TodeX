@@ -8,7 +8,7 @@ import { CapabilitiesRouteScreen, KanbanRouteScreen, SlashCommandActionRouteScre
 import { ConversationsRouteScreen } from '../runtime/ConversationRuntimeScreen';
 import { AboutRouteScreen, CliManagerRouteScreen, ExperimentalRouteScreen, SettingsRouteScreen, UsageRouteScreen } from '../runtime/LeafRuntimeScreens';
 import { GitDiffRouteScreen, TerminalRouteScreen } from '../runtime/OutputRuntimeScreens';
-import { BrowserRouteScreen, FilesRouteScreen, GitRouteScreen, WorkbenchRouteScreen } from '../runtime/ToolRuntimeScreens';
+import { BrowserRouteScreen, FileEditorRouteScreen, FilesRouteScreen, GitRouteScreen, WorkbenchRouteScreen } from '../runtime/ToolRuntimeScreens';
 import { WorkspacesRouteScreen } from '../runtime/WorkspaceRuntimeScreen';
 import { ChatRouteScreen } from '../runtime/ChatRuntimeScreen';
 import { useAppNavigationTheme } from '../theme/navigation';
@@ -39,6 +39,7 @@ export const AppNavigator = memo(function AppNavigator() {
         <Stack.Screen name="About" component={AboutRouteScreen} options={{ title: '关于 TodeX' }} />
         <Stack.Screen name="Kanban" component={KanbanRouteScreen} options={{ title: '看板' }} />
         <Stack.Screen name="Browser" component={BrowserRouteScreen} options={{ title: '浏览器' }} />
+        <Stack.Screen name="FileEditor" component={FileEditorRouteScreen} options={{ title: '编辑文件' }} />
         <Stack.Screen name="Files" component={FilesRouteScreen} options={{ title: '文件' }} />
         <Stack.Screen name="Workbench" component={WorkbenchRouteScreen} options={{ title: '工作台' }} />
         <Stack.Screen name="Git" component={GitRouteScreen} options={{ title: 'Git 操作' }} />

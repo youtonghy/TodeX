@@ -1,4 +1,8 @@
-import { memo, useMemo } from 'react';
+import { memo, useMemo, useState } from 'react';
+import { usePreventRemove, type NavigationAction } from '@react-navigation/native';
+
+import { ConfirmDialog } from '../components/ui';
+import { FileEditorScreen } from '../screens/FileEditorScreen';
 
 import { BrowserPreviewWebView } from '../components/BrowserPreviewWebView';
 import {
@@ -92,6 +96,17 @@ export const BrowserRouteScreen = memo(function BrowserRouteScreen(props: AppScr
   );
 });
 
+export const FileEditorRouteScreen = memo(function FileEditorRouteScreen(props: AppScreenProps<'FileEditor'>) {
+  const { client } = useToolContext(props.route.params.workspaceId, props.route.params.conversationId);
+  const [dirty, setDirty] = useState(false);
+  const [pending, setPending] = useState<NavigationAction | null>(null);
+  usePreventRemove(dirty, ({ data }) => setPending(data.action));
+  return <>
+    {client ? <FileEditorScreen client={client} path={props.route.params.filePath} onDirtyChange={setDirty} /> : null}
+    <ConfirmDialog isOpen={Boolean(pending)} onOpenChange={open => { if (!open) setPending(null); }} title="放弃未保存的修改？" description="返回后将丢失这次修改。" confirmLabel="放弃修改" cancelLabel="继续编辑" destructive onConfirm={() => { if (pending) props.navigation.dispatch(pending); }} />
+  </>;
+});
+
 export const FilesRouteScreen = memo(function FilesRouteScreen(props: AppScreenProps<'Files'>) {
   const { snapshot, workspace, actions, client } = useToolContext(props.route.params.workspaceId, props.route.params.conversationId);
   if (!snapshot || !client) return null;
@@ -100,7 +115,7 @@ export const FilesRouteScreen = memo(function FilesRouteScreen(props: AppScreenP
       client={client}
       rootPath={workspace?.path || snapshot.settings.defaultWorkspacePath}
       initialFilePath={props.route.params.filePath}
-      onFileSelected={(path) => actions.updateWorkbenchState(props.route.params.conversationId, { selectedFilePath: path })}
+      onFileSelected={(path) => { actions.updateWorkbenchState(props.route.params.conversationId, { selectedFilePath: path }); props.navigation.navigate('FileEditor', { ...props.route.params, filePath: path }); }}
     />
   );
 });
@@ -159,7 +174,7 @@ export const WorkbenchRouteScreen = memo(function WorkbenchRouteScreen(props: Ap
         client={client}
         rootPath={workspace?.path || snapshot.settings.defaultWorkspacePath}
         initialFilePath={workbench.selectedFilePath || undefined}
-        onFileSelected={(path) => actions.updateWorkbenchState(conversationId, { selectedFilePath: path })}
+        onFileSelected={(path) => { actions.updateWorkbenchState(conversationId, { selectedFilePath: path }); props.navigation.navigate('FileEditor', { workspaceId: props.route.params.workspaceId, conversationId, filePath: path }); }}
       />}
     />
   );

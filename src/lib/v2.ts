@@ -683,6 +683,10 @@ export class V2ApiClient {
     return this.request(`/v2/workspace/file?path=${encodeURIComponent(path)}`);
   }
 
+  async saveWorkspaceFile(path: string, text: string, expectedText: string): Promise<{ saved: boolean }> {
+    return this.request('/v2/workspace/file', { method: 'PUT', body: JSON.stringify({ path, text, expectedText }) });
+  }
+
   async fetchBrowser(url: string): Promise<{ url: string; status: number; contentType: string; body: string }> {
     return this.request('/v2/browser/fetch', { method: 'POST', body: JSON.stringify({ url }) });
   }

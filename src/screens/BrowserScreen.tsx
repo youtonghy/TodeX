@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Keyboard, KeyboardAvoidingView, Platform, ScrollView, View } from 'react-native';
-import { Button, Input, Text } from 'heroui-native';
+import { Button, Input, Text, useToast } from 'heroui-native';
 import { ProgressBar } from 'heroui-native-pro/progress-bar';
 
 import type { V2ApiClient } from '../lib/v2';
 import { validateLoopbackUrl as validateSharedLoopbackUrl } from '../lib/mobileParity';
-import { AppSheet, EmptyStateView, InlineNotice, StyledIonicons } from '../components/ui';
+import { AppSheet, EmptyStateView, StyledIonicons } from '../components/ui';
 
 export type BrowserClient = Pick<V2ApiClient, 'fetchBrowser' | 'readWorkspaceFile'>;
 export type BrowserFetchResult = Awaited<ReturnType<V2ApiClient['fetchBrowser']>>;
@@ -35,7 +35,10 @@ export function BrowserScreen({ client, initialUrl = 'http://127.0.0.1:7345', in
   const [draft, setDraft] = useState(initialUrl);
   const [detailsVisible, setDetailsVisible] = useState(false);
   const [result, setResult] = useState<BrowserFetchResult | null>(null);
-  const [error, setError] = useState('');
+  const { toast } = useToast();
+  const showError = useCallback((description: string) => {
+    toast.show({ variant: 'danger', label: '无法打开网页', description, placement: 'top', duration: 3000 });
+  }, [toast]);
   const [loading, setLoading] = useState(false);
   const [loadedUrl, setLoadedUrl] = useState('');
   const requestRef = useRef(0);
@@ -54,13 +57,12 @@ export function BrowserScreen({ client, initialUrl = 'http://127.0.0.1:7345', in
     if (!validation.ok) {
       setResult(null);
       setLoadedUrl('');
-      setError(validation.error);
+      showError(validation.error);
       setLoading(false);
       return false;
     }
     setDraft(validation.url);
     setLoading(true);
-    setError('');
     try {
       const fetched = await client.fetchBrowser(validation.url);
       if (request !== requestRef.current) return false;
@@ -73,18 +75,17 @@ export function BrowserScreen({ client, initialUrl = 'http://127.0.0.1:7345', in
       if (request !== requestRef.current) return false;
       setResult(null);
       setLoadedUrl('');
-      setError(reason instanceof Error ? reason.message : '网页读取失败');
+      showError(reason instanceof Error ? reason.message : '网页读取失败');
       return false;
     } finally {
       if (request === requestRef.current) setLoading(false);
     }
-  }, [client, notifyResult]);
+  }, [client, notifyResult, showError]);
 
   useEffect(() => {
     if (initialFilePath) {
       const request = ++requestRef.current;
       setLoading(true);
-      setError('');
       void client.readWorkspaceFile(initialFilePath)
         .then((file) => {
           if (request !== requestRef.current) return;
@@ -102,7 +103,7 @@ export function BrowserScreen({ client, initialUrl = 'http://127.0.0.1:7345', in
           if (request !== requestRef.current) return;
           setResult(null);
           setLoadedUrl('');
-          setError(reason instanceof Error ? reason.message : '文件读取失败');
+          showError(reason instanceof Error ? reason.message : '文件读取失败');
         })
         .finally(() => { if (request === requestRef.current) setLoading(false); });
       return;
@@ -111,7 +112,7 @@ export function BrowserScreen({ client, initialUrl = 'http://127.0.0.1:7345', in
     // Avoid refetching a successful local navigation echoed by the shared store.
     if (initialUrl === loadedUrl && loadedClientRef.current === client) return;
     void load(initialUrl);
-  }, [client, initialFilePath, initialUrl, load, notifyResult]);
+  }, [client, initialFilePath, initialUrl, load, notifyResult, showError]);
 
   const body = result?.body || '';
   const clippedBody = body.length > MAX_PREVIEW_CHARS ? `${body.slice(0, MAX_PREVIEW_CHARS)}\n\n[预览已截断]` : body;
@@ -142,7 +143,6 @@ export function BrowserScreen({ client, initialUrl = 'http://127.0.0.1:7345', in
           </Button>
         </View>
         {loading ? <ProgressBar isIndeterminate size="sm" color="accent"><ProgressBar.Track className="h-0.5"><ProgressBar.Fill /></ProgressBar.Track></ProgressBar> : null}
-        {error ? <View className="px-3 py-2"><InlineNotice status="danger" title="无法打开网页" description={error} /></View> : null}
         {result ? (
           <View className="min-h-0 flex-1">
             {renderWebView ? renderWebView(result) : (

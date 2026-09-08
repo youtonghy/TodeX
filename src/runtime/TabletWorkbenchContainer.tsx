@@ -1,3 +1,5 @@
+import { navigationRef } from '../navigation/navigationRef';
+import { useIsFocused } from '@react-navigation/native';
 import { memo, useCallback, useMemo } from 'react';
 
 import { BrowserPreviewWebView } from '../components/BrowserPreviewWebView';
@@ -25,6 +27,7 @@ export const TabletWorkbenchContainer = memo(function TabletWorkbenchContainer({
   onTabChange,
   onClose,
 }: TabletWorkbenchContainerProps) {
+  const focused = useIsFocused();
   const runtime = useAppRuntime();
   const snapshot = useRouteSnapshot<ToolRouteSnapshot>(TOOL_ROUTE_SNAPSHOT);
   const workspace = useKeyedStoreValue(runtime.workspaces, workspaceId);
@@ -68,6 +71,7 @@ export const TabletWorkbenchContainer = memo(function TabletWorkbenchContainer({
       filesClient={client}
       initialFilePath={workbench.selectedFilePath || undefined}
       onFileSelected={handleFileSelected}
+      onEditFile={path => { handleFileSelected(path); navigationRef.current?.navigate('FileEditor', { workspaceId, conversationId, filePath: path }); }}
       browserClient={client}
       browserUrl={workbench.browserUrl || backendUrl}
       browserFilePath={workbench.browserFilePath || undefined}
@@ -79,7 +83,7 @@ export const TabletWorkbenchContainer = memo(function TabletWorkbenchContainer({
           onInspect={(element) => captureBrowserElement(actions, conversationId, element)}
         />
       )}
-      visible={visible}
+      visible={visible && focused}
       renderTerminal={(terminalId, isVisible) => <WorkbenchTerminal workspaceId={workspaceId} conversationId={conversationId} terminalId={terminalId} visible={isVisible} />}
       connectionState={connectionState}
       startTerminalSession={runtime.outputActions.startTerminalSession}

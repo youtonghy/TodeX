@@ -20,6 +20,7 @@ export type RootStackParamList = {
   CliManager: undefined;
   Capabilities: ConversationRouteParams;
   Browser: ConversationRouteParams & { url?: string; filePath?: string };
+  FileEditor: ConversationRouteParams & { filePath: string };
   Files: ConversationRouteParams & { filePath?: string };
   Usage: undefined;
   About: undefined;

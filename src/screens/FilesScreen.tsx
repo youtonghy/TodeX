@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FlatList, Pressable, RefreshControl, ScrollView, View, type ListRenderItemInfo } from 'react-native';
-import { Button, Chip, Spinner, Surface, Text } from 'heroui-native';
-import { MarkdownViewer } from '../components/MarkdownViewer';
+import { FlatList, RefreshControl, View, type ListRenderItemInfo } from 'react-native';
+import { Button, Spinner, Surface, Text } from 'heroui-native';
 import type { V2ApiClient } from '../lib/v2';
 import { EmptyStateView, InlineNotice, LoadingState, StyledIonicons } from '../components/ui';
 
@@ -12,6 +11,7 @@ export type FilesScreenProps = {
   rootPath: string;
   initialFilePath?: string;
   onFileSelected?: (path: string) => void;
+  onPreview?: (path: string) => void;
 };
 
 type FileTreeEntry = {
@@ -24,14 +24,6 @@ type FileTreeRow = {
   entry: FileTreeEntry;
   depth: number;
   expanded: boolean;
-};
-
-type LoadedFile = {
-  name: string;
-  path: string;
-  mimeType: string;
-  sizeBytes: number;
-  text?: string;
 };
 
 function normalizePath(value: string): string {
@@ -83,54 +75,23 @@ function flattenRows(root: string, childrenByDirectory: Record<string, FileTreeE
   return rows;
 }
 
-function formatBytes(value: number): string {
-  if (!Number.isFinite(value) || value < 1024) return `${Math.max(0, Math.round(value || 0))} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function fileLanguage(path: string): string {
-  const extension = path.split('.').pop()?.toLowerCase() || '';
-  const aliases: Record<string, string> = {
-    js: 'JavaScript',
-    jsx: 'JSX',
-    ts: 'TypeScript',
-    tsx: 'TSX',
-    md: 'Markdown',
-    mdx: 'MDX',
-    json: 'JSON',
-    yaml: 'YAML',
-    yml: 'YAML',
-    rs: 'Rust',
-    py: 'Python',
-    go: 'Go',
-    sh: 'Shell',
-  };
-  return aliases[extension] || extension.toUpperCase() || 'TEXT';
-}
-
-export function FilesScreen({ client, rootPath, initialFilePath, onFileSelected }: FilesScreenProps) {
-  const [containerWidth, setContainerWidth] = useState(0);
-  const isLandscapeOrWide = containerWidth >= 760;
+export function FilesScreen({ client, rootPath, initialFilePath, onFileSelected, onPreview }: FilesScreenProps) {
   const normalizedRoot = useMemo(() => normalizePath(rootPath), [rootPath]);
   const [childrenByDirectory, setChildrenByDirectory] = useState<Record<string, FileTreeEntry[]>>({});
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set([normalizedRoot]));
-  const [selectedPath, setSelectedPath] = useState('');
-  const [file, setFile] = useState<LoadedFile | null>(null);
+  const selectedPath = initialFilePath || '';
   const [loadingPath, setLoadingPath] = useState('');
-  const [fileLoading, setFileLoading] = useState(false);
   const [error, setError] = useState('');
   const requestSeqRef = useRef(0);
-  const fileRequestRef = useRef(0);
-  useEffect(() => () => { requestSeqRef.current += 1; fileRequestRef.current += 1; }, []);
-  const appliedTargetRef = useRef('');
+  useEffect(() => () => { requestSeqRef.current += 1; }, []);
   const childrenByDirectoryRef = useRef<Record<string, FileTreeEntry[]>>({});
-  const onFileSelectedRef = useRef(onFileSelected);
-  onFileSelectedRef.current = onFileSelected;
 
   const loadDirectory = useCallback(async (directory: string, force = false) => {
     if (!normalizedRoot || normalizedRoot === '.') return;
-    if (!force && Object.prototype.hasOwnProperty.call(childrenByDirectoryRef.current, directory)) return;
+    if (!force && Object.prototype.hasOwnProperty.call(childrenByDirectoryRef.current, directory)) {
+      setExpanded(current => new Set([...current, directory]));
+      return;
+    }
     const requestSeq = requestSeqRef.current + 1;
     requestSeqRef.current = requestSeq;
     setLoadingPath(directory);
@@ -165,45 +126,13 @@ export function FilesScreen({ client, rootPath, initialFilePath, onFileSelected 
 
   useEffect(() => {
     requestSeqRef.current += 1;
-    fileRequestRef.current += 1;
-    appliedTargetRef.current = '';
+
     childrenByDirectoryRef.current = {};
     setChildrenByDirectory({});
     setExpanded(new Set([normalizedRoot]));
-    setSelectedPath('');
-    setFile(null);
-    setFileLoading(false);
     setError('');
     void loadDirectory(normalizedRoot, true);
   }, [loadDirectory, normalizedRoot]);
-
-  const readFile = useCallback(async (path: string) => {
-    const request = ++fileRequestRef.current;
-    if (!isWithinRoot(path, normalizedRoot)) {
-      setError('文件路径不在当前工作区内');
-      setFileLoading(false);
-      return;
-    }
-    setSelectedPath(path);
-    setFileLoading(true);
-    setError('');
-    try {
-      const loaded = await client.readWorkspaceFile(path);
-      if (request !== fileRequestRef.current) return;
-      setFile(loaded);
-      onFileSelectedRef.current?.(path);
-    } catch (reason) {
-      if (request === fileRequestRef.current) setError(reason instanceof Error ? reason.message : '文件读取失败');
-    } finally {
-      if (request === fileRequestRef.current) setFileLoading(false);
-    }
-  }, [client, normalizedRoot]);
-
-  useEffect(() => {
-    if (!initialFilePath || appliedTargetRef.current === initialFilePath) return;
-    appliedTargetRef.current = initialFilePath;
-    void readFile(initialFilePath);
-  }, [initialFilePath, readFile]);
 
   const toggleDirectory = (directory: string) => {
     if (expanded.has(directory)) {
@@ -227,35 +156,38 @@ export function FilesScreen({ client, rootPath, initialFilePath, onFileSelected 
     const isSelected = item.entry.path === selectedPath;
     const isLoading = loadingPath === item.entry.path;
     return (
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={`${isDirectory ? '目录' : '文件'} ${item.entry.name}`}
-        accessibilityState={{ selected: isSelected, expanded: isDirectory ? item.expanded : undefined }}
-        onPress={() => (isDirectory ? toggleDirectory(item.entry.path) : void readFile(item.entry.path))}
-        className={`min-h-11 flex-row items-center gap-2 rounded-xl pr-3 active:opacity-70 ${isSelected ? 'bg-accent/15' : ''}`}
-        style={{ paddingLeft: 10 + item.depth * 18 }}
-      >
-        <StyledIonicons
-          name={isDirectory ? (item.expanded ? 'folder-open' : 'folder') : 'document-text-outline'}
-          size={17}
-          className={isDirectory ? 'text-warning' : isSelected ? 'text-accent' : 'text-muted'}
-        />
-        <Text type="body-sm" weight={isSelected ? 'semibold' : 'medium'} className={`flex-1 ${isSelected ? 'text-accent' : 'text-foreground'}`} numberOfLines={1}>
-          {item.entry.name}
-        </Text>
-        {isLoading ? (
-          <Spinner size="sm" />
-        ) : isDirectory ? (
-          <StyledIonicons name={item.expanded ? 'chevron-down' : 'chevron-forward'} size={14} className="text-muted" />
-        ) : null}
-      </Pressable>
+      <View className="flex-row items-center">
+        <Button variant="ghost"
+          accessibilityRole="button"
+          accessibilityLabel={`${isDirectory ? '目录' : '文件'} ${item.entry.name}`}
+          accessibilityState={{ selected: isSelected, expanded: isDirectory ? item.expanded : undefined }}
+          onPress={() => (isDirectory ? toggleDirectory(item.entry.path) : onFileSelected?.(item.entry.path))}
+          className={`min-h-11 flex-row items-center gap-2 rounded-xl pr-3 active:opacity-70 ${isSelected ? 'bg-accent/15' : ''} flex-1 justify-start`}
+          style={{ paddingLeft: 10 + item.depth * 18 }}
+        >
+          <StyledIonicons
+            name={isDirectory ? (item.expanded ? 'folder-open' : 'folder') : 'document-text-outline'}
+            size={17}
+            className={isDirectory ? 'text-warning' : isSelected ? 'text-accent' : 'text-muted'}
+          />
+          <Text type="body-sm" weight={isSelected ? 'semibold' : 'medium'} className={`flex-1 ${isSelected ? 'text-accent' : 'text-foreground'}`} numberOfLines={1}>
+            {item.entry.name}
+          </Text>
+          {isLoading ? (
+            <Spinner size="sm" />
+          ) : isDirectory ? (
+            <StyledIonicons name={item.expanded ? 'chevron-down' : 'chevron-forward'} size={14} className="text-muted" />
+          ) : null}
+        </Button>
+        {!isDirectory && onPreview ? <Button isIconOnly size="sm" variant="ghost" accessibilityLabel={`预览 ${item.entry.name}`} onPress={() => onPreview(item.entry.path)}><StyledIonicons name="eye-outline" size={18} className="text-muted" /></Button> : null}
+      </View>
     );
   };
 
   const treeSurface = (
     <Surface
       variant="secondary"
-      className={`${isLandscapeOrWide ? 'w-80 lg:w-96 h-full' : 'mx-4 max-h-[300px]'} overflow-hidden rounded-3xl`}
+      className="mx-4 mb-4 flex-1 overflow-hidden rounded-3xl"
     >
       <FlatList
         data={rows}
@@ -274,55 +206,13 @@ export function FilesScreen({ client, rootPath, initialFilePath, onFileSelected 
     </Surface>
   );
 
-  const previewSurface = (
-    <Surface
-      className={`${isLandscapeOrWide ? 'flex-1 h-full mb-0 mt-0 mx-0' : 'mx-4 mb-4 mt-3 min-h-[160px] flex-1'} overflow-hidden rounded-3xl`}
-    >
-      <View className="flex-row items-center justify-between gap-3 border-b border-separator px-4 py-2.5">
-        <View className="min-w-0 flex-1 flex-row items-center gap-2">
-          <StyledIonicons name="document-text-outline" size={16} className="text-muted" />
-          <Text type="body-sm" weight="semibold" className="min-w-0 flex-1 text-foreground" numberOfLines={1}>
-            {file?.name || '选择文件预览'}
-          </Text>
-        </View>
-        {file ? (
-          <Chip size="sm" variant="soft" color="accent">
-            <Chip.Label>{fileLanguage(file.path)}</Chip.Label>
-          </Chip>
-        ) : null}
-      </View>
-      {fileLoading ? (
-        <LoadingState label="正在读取文件" className="flex-1" />
-      ) : file && /\.(md|markdown)$/i.test(file.path) && typeof file.text === 'string' ? (
-        <MarkdownViewer content={file.text} />
-      ) : file ? (
-        <ScrollView contentContainerClassName="p-4 pb-8">
-          <Text type="body-xs" color="muted" numberOfLines={2} className="mb-3 font-mono">
-            {file.path} · {formatBytes(file.sizeBytes)} · {file.mimeType}
-          </Text>
-          {typeof file.text === 'string' ? (
-            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-              <Text selectable type="code" className="bg-transparent px-0 text-[12px] leading-[18px] text-foreground">
-                {file.text}
-              </Text>
-            </ScrollView>
-          ) : (
-            <InlineNotice status="default" title="该文件不可作为文本预览。" />
-          )}
-        </ScrollView>
-      ) : (
-        <EmptyStateView icon="document-text-outline" title="选择一个文件查看内容" className="flex-1 justify-center" />
-      )}
-    </Surface>
-  );
-
   return (
-    <View className="flex-1 bg-background" onLayout={event => setContainerWidth(event.nativeEvent.layout.width)}>
+    <View className="flex-1 bg-background">
       <View className="gap-2 px-4 pb-2 pt-3">
         <View className="flex-row items-center justify-between gap-3">
           <View className="min-w-0 flex-1">
             <Text type="h4" className="text-foreground">
-              文件
+              查看
             </Text>
             <Text type="body-xs" color="muted" numberOfLines={2} className="font-mono">
               {normalizedRoot || '未选择工作区'}
@@ -343,9 +233,8 @@ export function FilesScreen({ client, rootPath, initialFilePath, onFileSelected 
         {error ? <InlineNotice status="danger" title="读取失败" description={error} /> : null}
       </View>
 
-      <View className={`min-h-0 flex-1 ${isLandscapeOrWide ? 'flex-row gap-4 px-4 pb-4' : 'flex-col'}`}>
+      <View className="min-h-0 flex-1">
         {treeSurface}
-        {previewSurface}
       </View>
     </View>
   );

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { View } from 'react-native';
 import { WebView } from 'react-native-webview';
-import { Button } from 'heroui-native';
+import { Button, useToast } from 'heroui-native';
 
 import { StyledIonicons } from './ui/StyledIonicons';
 import type { BrowserFetchResult } from '../screens/BrowserScreen';
@@ -21,6 +21,11 @@ export function BrowserPreviewWebView({
   backendUrl: string;
   onInspect: (element: NonNullable<MobileWorkbenchState['inspectedElement']>) => void;
 }) {
+  const { toast } = useToast();
+  const reportError = () => {
+    if (livePreview) setLivePreviewFailed(true);
+    toast.show({ variant: 'danger', label: '网页加载失败', description: livePreview ? '已切换到静态预览，请稍后刷新重试。' : '请稍后刷新重试。', placement: 'top', duration: 3000 });
+  };
   const [inspectMode, setInspectMode] = useState(false);
   const [livePreviewFailed, setLivePreviewFailed] = useState(false);
   const livePreviewUrl = browserLivePreviewUrl(result.url, backendUrl);
@@ -43,12 +48,8 @@ export function BrowserPreviewWebView({
         onShouldStartLoadWithRequest={(request) => (
           browserPreviewNavigationAllowed(request.url, livePreviewUrl)
         )}
-        onError={() => {
-          if (livePreview) setLivePreviewFailed(true);
-        }}
-        onHttpError={() => {
-          if (livePreview) setLivePreviewFailed(true);
-        }}
+        onError={reportError}
+        onHttpError={reportError}
         onMessage={(event) => {
           try {
             const value = JSON.parse(event.nativeEvent.data) as { type?: string; selector?: string; tagName?: string; text?: string };
