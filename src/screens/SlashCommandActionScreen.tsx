@@ -148,6 +148,54 @@ function ChoiceList({
   );
 }
 
+export function PermissionControls({ workspace, settings, permissionProfilesState, activeConversationId, requestPermissionProfiles, applyPermissionProfile, onApplied }: {
+  workspace: WorkspaceRecord | null;
+  settings: ConnectionSettings;
+  permissionProfilesState: PermissionProfilesState | null;
+  activeConversationId: string;
+  requestPermissionProfiles: (conversationId?: string) => Promise<boolean>;
+  applyPermissionProfile: (conversationId: string, profileId: string, description?: string, approvalsReviewer?: string | null) => Promise<boolean>;
+  onApplied?: () => void;
+}) {
+  const apply = async (...args: Parameters<typeof applyPermissionProfile>) => {
+    if (await applyPermissionProfile(...args)) onApplied?.();
+  };
+  return (
+    <View className="gap-3">
+      <ValueBlock
+        label="Profile"
+        value={permissionProfileLabel(workspace?.permissionProfile, approvalsReviewerValue(workspace, settings))}
+        hints={[`${workspace?.approvalPolicy || settings.approvalPolicy} · ${approvalsReviewerValue(workspace, settings) || 'user'} · ${workspace?.sandboxMode || settings.sandboxMode}`]}
+      />
+      <ActionGrid>
+        <Action title="刷新 Profiles" icon="refresh-outline" onPress={() => void requestPermissionProfiles(activeConversationId)} disabled={permissionProfilesState?.status === 'loading'} />
+      </ActionGrid>
+      <ChoiceList
+        items={[
+          ...PERMISSION_PRESETS.map((preset) => ({
+            id: preset.id,
+            title: preset.title,
+            description: preset.description,
+            selected: permissionPresetSelected(preset, workspace, settings),
+            onPress: () => void apply(activeConversationId, preset.profileId, preset.description, preset.approvalsReviewer),
+          })),
+          ...(permissionProfilesState?.profiles ?? [])
+            .filter((profile) => !permissionPresetForProfile(profile.id))
+            .map((profile) => ({
+              id: `profile:${profile.id}`,
+              title: profile.id,
+              description: profile.description,
+              selected: workspace?.permissionProfile === profile.id,
+              onPress: () => void apply(activeConversationId, profile.id, profile.description),
+            })),
+        ]}
+      />
+      {permissionProfilesState?.status === 'loading' ? <LoadingState label="正在读取权限 Profiles" className="py-2" /> : null}
+      {permissionProfilesState?.status === 'error' ? <InlineNotice status="danger" title="读取失败" description={permissionProfilesState.error} /> : null}
+    </View>
+  );
+}
+
 export function SlashCommandActionScreen({
   navigation,
   route,
@@ -351,40 +399,6 @@ export function SlashCommandActionScreen({
     </>
   );
 
-  const renderPermissionsControls = () => (
-    <DetailCard title="当前权限">
-      <ValueBlock
-        label="Profile"
-        value={permissionProfileLabel(workspace?.permissionProfile, approvalsReviewerValue(workspace, settings))}
-        hints={[`${workspace?.approvalPolicy || settings.approvalPolicy} · ${approvalsReviewerValue(workspace, settings) || 'user'} · ${workspace?.sandboxMode || settings.sandboxMode}`]}
-      />
-      <ActionGrid>
-        <Action title="刷新 Profiles" icon="refresh-outline" onPress={() => void requestPermissionProfiles(activeConversationId)} disabled={permissionProfilesState?.status === 'loading'} />
-      </ActionGrid>
-      <ChoiceList
-        items={[
-          ...PERMISSION_PRESETS.map((preset) => ({
-            id: preset.id,
-            title: preset.title,
-            description: preset.description,
-            selected: permissionPresetSelected(preset, workspace, settings),
-            onPress: () => void applyPermissionProfile(activeConversationId, preset.profileId, preset.description, preset.approvalsReviewer),
-          })),
-          ...(permissionProfilesState?.profiles ?? [])
-            .filter((profile) => !permissionPresetForProfile(profile.id))
-            .map((profile) => ({
-              id: `profile:${profile.id}`,
-              title: profile.id,
-              description: profile.description,
-              selected: workspace?.permissionProfile === profile.id,
-              onPress: () => void applyPermissionProfile(activeConversationId, profile.id, profile.description),
-            })),
-        ]}
-      />
-      {permissionProfilesState?.status === 'loading' ? <LoadingState label="正在读取权限 Profiles" className="py-2" /> : null}
-      {permissionProfilesState?.status === 'error' ? <InlineNotice status="danger" title="读取失败" description={permissionProfilesState.error} /> : null}
-    </DetailCard>
-  );
 
   const renderThreadControls = () => {
     if (command === '/rename') {
@@ -816,7 +830,14 @@ export function SlashCommandActionScreen({
     command === '/model'
       ? renderModelControls()
       : command === '/permissions'
-        ? renderPermissionsControls()
+        ? <PermissionControls
+            workspace={workspace}
+            settings={settings}
+            permissionProfilesState={permissionProfilesState}
+            activeConversationId={activeConversationId}
+            requestPermissionProfiles={requestPermissionProfiles}
+            applyPermissionProfile={applyPermissionProfile}
+          />
         : renderThreadControls() ??
           renderCatalogControls() ??
           renderRuntimeControls() ??

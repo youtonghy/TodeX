@@ -28,6 +28,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { KeyboardAvoidingView, KeyboardStickyView, useKeyboardState } from 'react-native-keyboard-controller';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Button, InputGroup, Surface, Text, TextArea } from 'heroui-native';
+import { PermissionPickerSheet } from '../../runtime/CommandRuntimeScreens';
 import { ProgressBar } from 'heroui-native-pro/progress-bar';
 
 import {
@@ -248,6 +249,7 @@ export function ChatScreen({
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [attachmentMenuVisible, setAttachmentMenuVisible] = useState(false);
   const [composerExpanded, setComposerExpanded] = useState(false);
+  const [permissionPickerVisible, setPermissionPickerVisible] = useState(false);
   const [historyLoadReady, setHistoryLoadReady] = useState(false);
   const [visibleRenderItemCount, setVisibleRenderItemCount] = useState(INITIAL_RENDER_ITEM_COUNT);
   const messageScrollRef = useRef<FlatList<ConversationRenderItem> | null>(null);
@@ -1198,7 +1200,7 @@ export function ChatScreen({
             <Button
               size="sm"
               variant="secondary"
-              onPress={() => navigation.navigate('SlashCommandAction', { workspaceId: workspace.id, conversationId: conversation.id, command: '/permissions' })}
+              onPress={() => setPermissionPickerVisible(true)}
               className={controlChipClassName}
               accessibilityLabel="选择权限"
             >
@@ -1402,6 +1404,13 @@ export function ChatScreen({
         }
       />
       </View>
+
+      <PermissionPickerSheet
+        workspaceId={workspace.id}
+        conversationId={conversation.id}
+        isOpen={permissionPickerVisible}
+        onOpenChange={setPermissionPickerVisible}
+      />
 
       <Modal
         visible={composerExpanded}

@@ -1,4 +1,4 @@
-import { memo, useCallback, type ComponentProps } from 'react';
+import { memo, useCallback, useEffect, type ComponentProps } from 'react';
 
 import { CapabilitiesScreen, type CapabilitiesScreenProps } from '../components/CapabilitiesScreen';
 import type { CatalogState } from '../lib/capabilityCatalog';
@@ -13,7 +13,8 @@ import type { CodexModelCatalogItem, CodexMemorySettings, ConnectionSettings } f
 import type { ProviderDescriptor, ProviderKind, SkillCatalogDescriptor } from '../lib/v2';
 import type { AppScreenProps } from '../navigation/routes';
 import { KanbanScreen, type KanbanConversation } from '../screens/KanbanScreen';
-import { SlashCommandActionScreen } from '../screens/SlashCommandActionScreen';
+import { PermissionControls, SlashCommandActionScreen } from '../screens/SlashCommandActionScreen';
+import { AppSheet } from '../components/ui';
 import { SlashCommandsScreen } from '../screens/SlashCommandsScreen';
 import { useAllKeyedStoreValues, useAppRuntime, useConnectionState, useKeyedStoreValue, useRouteSnapshot } from './appRuntime';
 
@@ -181,3 +182,32 @@ export const KanbanRouteScreen = memo(function KanbanRouteScreen({ navigation }:
     />
   );
 });
+
+export function PermissionPickerSheet({ workspaceId, conversationId, isOpen, onOpenChange }: {
+  workspaceId: string;
+  conversationId: string;
+  isOpen: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const runtime = useAppRuntime();
+  const snapshot = useRouteSnapshot<CommandRouteSnapshot>(COMMAND_ROUTE_SNAPSHOT);
+  const workspace = useKeyedStoreValue(runtime.workspaces, workspaceId);
+  const actions = runtime.actions.get<CommandRuntimeActions>(COMMAND_ACTIONS);
+  useEffect(() => {
+    if (isOpen) void actions.requestPermissionProfiles(conversationId);
+  }, [isOpen, conversationId, actions.requestPermissionProfiles]);
+  if (!snapshot) return null;
+  return (
+    <AppSheet isOpen={isOpen} onOpenChange={onOpenChange} title="选择权限" description="选择 Agent 可以执行的操作" snapPoints={['80%', '95%']}>
+      <PermissionControls
+        workspace={workspace}
+        settings={snapshot.settings}
+        permissionProfilesState={snapshot.permissionProfilesByConversation[conversationId] ?? null}
+        activeConversationId={conversationId}
+        requestPermissionProfiles={actions.requestPermissionProfiles}
+        applyPermissionProfile={actions.applyPermissionProfile}
+        onApplied={() => onOpenChange(false)}
+      />
+    </AppSheet>
+  );
+}
