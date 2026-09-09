@@ -679,7 +679,7 @@ export class V2ApiClient {
     return this.request(`/v2/workspace/entries?${params}`);
   }
 
-  async readWorkspaceFile(path: string): Promise<{ name: string; path: string; mimeType: string; sizeBytes: number; text?: string }> {
+  async readWorkspaceFile(path: string): Promise<{ name: string; path: string; mimeType: string; sizeBytes: number; text?: string; dataUrl?: string }> {
     return this.request(`/v2/workspace/file?path=${encodeURIComponent(path)}`);
   }
 
