@@ -59,6 +59,11 @@ export type ProviderCapabilities = {
   steering?: boolean;
   liveConfiguration?: boolean;
   followUpQueue?: boolean;
+  /** Session-owned Pi surfaces require explicit support from the connected backend. */
+  runtimeStop?: boolean;
+  sessionCommands?: boolean;
+  extensionUi?: string[];
+  extensionMessages?: boolean;
   controlActions?: ConversationControlAction[];
   permissionConfig?: {
     /** Modes supported by the adapter; runtime policy may still reject a mode. */
@@ -199,6 +204,10 @@ export function providerCapabilityMatrix(capabilities: ProviderCapabilities) {
     interjection: capabilities.interjection ?? false,
     steering: capabilities.steering ?? false,
     followUpQueue: capabilities.followUpQueue ?? false,
+    runtimeStop: capabilities.runtimeStop === true,
+    sessionCommands: capabilities.sessionCommands === true,
+    extensionUi: capabilities.extensionUi ?? [],
+    extensionMessages: capabilities.extensionMessages === true,
     controlActions: capabilities.controlActions ?? [
       ...(capabilities.cancel ? ['cancel' as const] : []),
       ...(capabilities.cancel ? ['interrupt' as const] : []),
@@ -294,6 +303,8 @@ export type ProviderCommandDescriptor = {
   source: string;
   invocation: string;
   argumentHint?: string;
+  packageName?: string;
+  packageVersion?: string;
 };
 
 export type ProviderCommandsResponse = {
@@ -301,6 +312,9 @@ export type ProviderCommandsResponse = {
   commands: ProviderCommandDescriptor[];
   source: string;
   fetchedAt: string;
+  conversationId?: string;
+  runtimeId?: string;
+  catalogSource?: 'session' | 'discovery';
 };
 
 export type CatalogScope = 'user' | 'project';
@@ -358,6 +372,31 @@ export type ConversationManifest = {
   archivedAt?: string;
 };
 
+export type ExtensionScope = 'session' | 'turn';
+export type ProviderRuntimeState = {
+  provider: 'pi';
+  runtimeId: string;
+  status: 'ready' | 'stopped';
+  reason?: string;
+};
+export type ExtensionCustomMessage = {
+  role: 'custom';
+  customType: string;
+  content: unknown;
+  display?: boolean;
+  details?: unknown;
+  timestamp?: number;
+};
+export type ExtensionMessagePayload = {
+  provider: 'pi';
+  runtimeId: string;
+  scope: ExtensionScope;
+  messageId: string;
+  message: ExtensionCustomMessage;
+};
+export type ConversationRuntimeStopPayload = { conversationId: string };
+export const CONVERSATION_RUNTIME_STOP = 'conversation.runtime.stop' as const;
+
 export type ConversationEvent = {
   schemaVersion: number;
   eventId: string;
@@ -375,7 +414,8 @@ export type AgentEventType =
   | 'session.started' | 'session.resumed' | 'turn.started' | 'turn.completed' | 'turn.cancelled' | 'turn.failed'
   | 'assistant.delta' | 'reasoning.delta' | 'tool.started' | 'tool.arguments.delta' | 'tool.awaitingApproval'
   | 'tool.completed' | 'tool.failed' | 'terminal.started' | 'terminal.output' | 'terminal.exited'
-  | 'compaction.started' | 'compaction.completed' | 'subagent.started' | 'subagent.completed' | 'protocol.error';
+  | 'compaction.started' | 'compaction.completed' | 'subagent.started' | 'subagent.completed' | 'protocol.error'
+  | 'extension.ui' | 'extension.message' | 'provider.runtime';
 
 export type AgentEventEnvelope = {
   schemaVersion: number;
@@ -433,7 +473,7 @@ export function canonicalConversationEventType(event: Pick<ConversationEvent, 't
     'tool.created': 'tool.started', 'tool.result': 'tool.completed', 'tool.error': 'tool.failed',
   };
   if (aliases[event.type]) return aliases[event.type];
-  if (/^(?:message|turn|permission|usage|subagent|compaction|memory)\./.test(event.type)) return event.type;
+  if (/^(?:message|turn|permission|usage|subagent|compaction|memory|extension)\./.test(event.type) || event.type === 'provider.runtime') return event.type;
   return event.normalizedType || event.type;
 }
 
@@ -649,8 +689,9 @@ export class V2ApiClient {
     return this.request(`/v2/providers/image-input?${query}`);
   }
 
-  async listProviderCommands(provider: ProviderKind, workspace: string): Promise<ProviderCommandsResponse> {
+  async listProviderCommands(provider: ProviderKind, workspace: string, conversationId?: string): Promise<ProviderCommandsResponse> {
     const query = new URLSearchParams({ provider, workspace });
+    if (conversationId) query.set('conversationId', conversationId);
     return this.request(`/v2/providers/commands?${query}`);
   }
 

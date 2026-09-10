@@ -1,6 +1,6 @@
 /** Shared deterministic projection for both realtime delivery and history replay. */
 import { canonicalConversationEventType, contextCompactionStatus, normalizeConversationEvent } from './v2';
-import type { ConversationEvent, ContextCompactionState, MemoryEntry, SubagentRun } from './v2';
+import type { ConversationEvent, ContextCompactionState, ExtensionScope, MemoryEntry, ProviderRuntimeState, SubagentRun } from './v2';
 import { classifyV2ConversationEvent, contextUsageFromV2Event, shouldAppendV2ConversationEvent, usageRecordFromV2Event } from './mobileParity';
 import type { ConversationContextUsage, TimelineEntry, UsageRecord } from './mobileParity';
 
@@ -8,9 +8,29 @@ type RecordValue = Record<string, unknown>;
 const object = (value: unknown): RecordValue => value && typeof value === 'object' && !Array.isArray(value) ? value as RecordValue : {};
 const string = (value: unknown): string => typeof value === 'string' ? value : '';
 const number = (value: unknown): number => typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0;
-export type RuntimePermission = { id: string; turnId: string; event: ConversationEvent; payload: RecordValue };
+export type RuntimePermission = { id: string; turnId: string; scope?: ExtensionScope; runtimeId?: string; event: ConversationEvent; payload: RecordValue };
 export type RuntimeCompaction = ContextCompactionState & { recommended: boolean };
 export type NativeQueueItem = { id: string; text: string; status: string };
+type ExtensionEventIdentity = { runtimeId: string; eventId: string; sequence: number };
+export type ExtensionStatus = ExtensionEventIdentity & { key: string; text: string };
+export type ExtensionWidget = ExtensionEventIdentity & { key: string; lines: string[]; placement: 'aboveEditor' | 'belowEditor' };
+export type ExtensionEditorRequest = ExtensionEventIdentity & { text: string };
+export type ExtensionNotice = ExtensionEventIdentity & {
+  message: string; level: 'info' | 'warning' | 'error'; time: string; scope: ExtensionScope;
+};
+export type ExtensionUiState = {
+  runtimeId: string;
+  statuses: Record<string, ExtensionStatus>;
+  widgets: Record<string, ExtensionWidget>;
+  title?: string;
+  editorRequest?: ExtensionEditorRequest;
+  notices: ExtensionNotice[];
+};
+const LEGACY_PI_RUNTIME = 'legacy:pi';
+function createExtensionUi(runtimeId = '', notices: ExtensionNotice[] = []): ExtensionUiState {
+  return { runtimeId, statuses: {}, widgets: {}, notices };
+}
+
 export type ConversationRuntime = {
   conversationId: string;
   workspaceId: string;
@@ -27,6 +47,10 @@ export type ConversationRuntime = {
   compaction: RuntimeCompaction;
   memoryEntries: MemoryEntry[];
   pendingPermissions: RuntimePermission[];
+  extensionUi: ExtensionUiState;
+  providerRuntime?: ProviderRuntimeState;
+  /** Retired native instances cannot become current again through delayed frames. */
+  retiredRuntimeIds: string[];
   requestedConfig: RecordValue | null;
   effectiveConfig: RecordValue | null;
   configurationStatus: 'unknown' | 'validated' | 'provider-confirmed' | 'pending' | 'rejected';
@@ -44,6 +68,7 @@ export function createConversationRuntime(conversationId: string, workspaceId: s
     timeline: [], activeTurnId: '', status: 'idle', usageRecords: [], contextUsage: null, cumulativeUsage: null,
     subagents: [], compaction: { status: 'idle', recommended: false, updatedAt: '' }, memoryEntries: [],
     messageCategories: {}, queueItems: [], queuePaused: false,
+    extensionUi: createExtensionUi(), retiredRuntimeIds: [],
     pendingPermissions: [], requestedConfig: null, effectiveConfig: null, configurationStatus: 'unknown', lastProgressAt: null,
   };
 }
@@ -114,12 +139,125 @@ function usageProjection(state: ConversationRuntime, event: ConversationEvent, t
   state.usageRecords = upsertUsageRecord(state.usageRecords, record);
 }
 
+function permissionScope(payload: RecordValue): ExtensionScope {
+  return (payload.scope ?? object(payload.details).scope) === 'session' ? 'session' : 'turn';
+}
+function permissionRuntimeId(payload: RecordValue): string {
+  return string(payload.runtimeId ?? object(payload.details).runtimeId);
+}
+function clearRuntimePermissions(state: ConversationRuntime, runtimeId: string): void {
+  state.pendingPermissions = state.pendingPermissions.filter(item => item.runtimeId !== runtimeId);
+  if (state.status === 'waitingPermission' && !state.pendingPermissions.some(item => item.scope !== 'session')) {
+    state.status = state.activeTurnId ? 'running' : 'idle';
+  }
+}
+function activateExtensionRuntime(state: ConversationRuntime, runtimeId: string): void {
+  const previous = state.extensionUi.runtimeId;
+  if (previous === runtimeId) return;
+  if (previous) {
+    state.retiredRuntimeIds = [...state.retiredRuntimeIds, previous];
+    clearRuntimePermissions(state, previous);
+  }
+  state.extensionUi = createExtensionUi(runtimeId, state.extensionUi.notices);
+}
+function acceptsRuntimeFrame(state: ConversationRuntime, runtimeId: string): boolean {
+  if (!runtimeId || state.retiredRuntimeIds.includes(runtimeId)) return false;
+  if (!state.extensionUi.runtimeId) activateExtensionRuntime(state, runtimeId);
+  return state.extensionUi.runtimeId === runtimeId
+    && !(state.providerRuntime?.runtimeId === runtimeId && state.providerRuntime.status === 'stopped');
+}
+/** Older backends journalled non-dialog UI requests as opaque provider events. */
+function piUiPayload(event: ConversationEvent): RecordValue | undefined {
+  const payload = object(event.payload);
+  const type = canonicalConversationEventType(event);
+  if (type === 'extension.ui') return payload;
+  if (type !== 'provider.event' || (payload.provider ?? event.provider) !== 'pi') return undefined;
+  const metadata = object(payload.metadata);
+  if (payload.providerMethod !== 'extension_ui_request' && metadata.type !== 'extension_ui_request') return undefined;
+  return { ...metadata, runtimeId: payload.runtimeId ?? metadata.runtimeId ?? LEGACY_PI_RUNTIME,
+    scope: payload.scope ?? metadata.scope ?? 'session' };
+}
+/** Returns true for events whose effects are confined to the extension surface. */
+function projectExtensionEvent(state: ConversationRuntime, event: ConversationEvent): boolean {
+  const type = canonicalConversationEventType(event);
+  const payload = object(event.payload);
+  if (type === 'provider.runtime') {
+    const runtimeId = string(payload.runtimeId);
+    const status = payload.status;
+    if ((payload.provider ?? event.provider) !== 'pi' || !runtimeId || (status !== 'ready' && status !== 'stopped')) return true;
+    if (state.retiredRuntimeIds.includes(runtimeId)) return true;
+    if (status === 'ready') {
+      if (state.providerRuntime?.runtimeId === runtimeId && state.providerRuntime.status === 'stopped') return true;
+      activateExtensionRuntime(state, runtimeId);
+    } else {
+      if (state.extensionUi.runtimeId && state.extensionUi.runtimeId !== runtimeId) return true;
+      activateExtensionRuntime(state, runtimeId);
+      state.extensionUi = createExtensionUi(runtimeId, state.extensionUi.notices);
+      clearRuntimePermissions(state, runtimeId);
+    }
+    state.providerRuntime = { provider: 'pi', runtimeId, status,
+      ...(typeof payload.reason === 'string' ? { reason: payload.reason } : {}) };
+    return true;
+  }
+  const request = piUiPayload(event);
+  if (!request) return false;
+  const runtimeId = string(request.runtimeId) || LEGACY_PI_RUNTIME;
+  if (!acceptsRuntimeFrame(state, runtimeId)) return true;
+  const identity = { runtimeId, eventId: event.eventId, sequence: event.sequence };
+  const ui = state.extensionUi;
+  switch (request.method) {
+    case 'notify': {
+      if (typeof request.message !== 'string' || !request.message) break;
+      const level = request.notifyType === 'error' || request.notifyType === 'warning' ? request.notifyType : 'info';
+      const notice: ExtensionNotice = { ...identity, message: request.message, level, time: event.time,
+        scope: request.scope === 'turn' ? 'turn' : 'session' };
+      state.extensionUi = { ...ui, notices: [...ui.notices.filter(item => item.eventId !== event.eventId), notice].slice(-200) };
+      break;
+    }
+    case 'setStatus': {
+      const key = string(request.statusKey);
+      if (!key) break;
+      const statuses = typeof request.statusText === 'string'
+        ? { ...ui.statuses, [key]: { ...identity, key, text: request.statusText } } : { ...ui.statuses };
+      if (typeof request.statusText !== 'string') delete statuses[key];
+      state.extensionUi = { ...ui, statuses };
+      break;
+    }
+    case 'setWidget': {
+      const key = string(request.widgetKey);
+      if (!key) break;
+      const widget: ExtensionWidget | undefined = Array.isArray(request.widgetLines) ? { ...identity, key,
+        lines: request.widgetLines.filter((line): line is string => typeof line === 'string'),
+        placement: request.widgetPlacement === 'belowEditor' ? 'belowEditor' : 'aboveEditor' } : undefined;
+      const widgets = widget ? { ...ui.widgets, [key]: widget } : { ...ui.widgets };
+      if (!widget) delete widgets[key];
+      state.extensionUi = { ...ui, widgets };
+      break;
+    }
+    case 'setTitle':
+      state.extensionUi = { ...ui, title: typeof request.title === 'string' ? request.title : undefined };
+      break;
+    case 'set_editor_text':
+    case 'setEditorText':
+      if (typeof request.text === 'string') state.extensionUi = { ...ui, editorRequest: { ...identity, text: request.text } };
+      break;
+  }
+  return true;
+}
+
 function projectEvent(state: ConversationRuntime, event: ConversationEvent): void {
   const payload = object(event.payload);
   const type = canonicalConversationEventType(event);
+  if (projectExtensionEvent(state, event)) return;
+  const scopedRuntimeId = permissionRuntimeId(payload);
+  if (type === 'extension.message' && !acceptsRuntimeFrame(state, string(payload.runtimeId) || LEGACY_PI_RUNTIME)) return;
+  if ((type === 'permission.requested' || type === 'permission.resolved' || type === 'tool.awaitingApproval')
+    && scopedRuntimeId && !acceptsRuntimeFrame(state, scopedRuntimeId)) return;
   const block = object(payload.block);
   const explicitTurnId = string(payload.turnId ?? payload.turn_id ?? block.turnId);
-  const turnId = explicitTurnId || state.activeTurnId;
+  const sessionScoped = ['extension.message', 'permission.requested', 'permission.resolved', 'tool.awaitingApproval'].includes(type)
+    && permissionScope(payload) === 'session';
+  const turnId = sessionScoped ? '' : explicitTurnId || state.activeTurnId;
   if (type === 'turn.started') {
     state.activeTurnId = explicitTurnId;
     state.messageCategories = {};
@@ -150,16 +288,18 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent): voi
   }
   if (type === 'permission.requested' || type === 'tool.awaitingApproval') {
     const id = string(payload.permissionId ?? payload.requestId);
-    if (id) state.pendingPermissions = [...state.pendingPermissions.filter(item => item.id !== id), { id, turnId, event, payload }];
-    if (id && (!explicitTurnId || explicitTurnId === state.activeTurnId)) state.status = 'waitingPermission';
+    const scope = permissionScope(payload);
+    if (id) state.pendingPermissions = [...state.pendingPermissions.filter(item => item.id !== id),
+      { id, turnId, scope, ...(scopedRuntimeId ? { runtimeId: scopedRuntimeId } : {}), event, payload }];
+    if (id && scope !== 'session' && (!explicitTurnId || explicitTurnId === state.activeTurnId)) state.status = 'waitingPermission';
   }
   if (type === 'permission.resolved') {
     const id = string(payload.permissionId ?? payload.requestId);
     state.pendingPermissions = state.pendingPermissions.filter(item => item.id !== id);
-    if (!state.pendingPermissions.length && state.status === 'waitingPermission') state.status = state.activeTurnId ? 'running' : 'idle';
+    if (!state.pendingPermissions.some(item => item.scope !== 'session') && state.status === 'waitingPermission') state.status = state.activeTurnId ? 'running' : 'idle';
   }
   if (['turn.completed', 'turn.cancelled', 'turn.interrupted', 'turn.failed'].includes(type)) {
-    state.pendingPermissions = state.pendingPermissions.filter(item => explicitTurnId && item.turnId !== explicitTurnId);
+    state.pendingPermissions = state.pendingPermissions.filter(item => item.scope === 'session' || (explicitTurnId && item.turnId !== explicitTurnId));
     if (!explicitTurnId || !state.activeTurnId || explicitTurnId === state.activeTurnId) {
       state.activeTurnId = '';
       state.status = type === 'turn.failed' || (type === 'turn.completed' && payload.stopReason === 'error') ? 'failed' : type === 'turn.cancelled' ? 'cancelled' : type === 'turn.interrupted' ? 'interrupted' : 'completed';

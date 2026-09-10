@@ -14,6 +14,7 @@ import type {
   AgentEventEnvelope,
   ConversationEvent,
   ConversationManifest,
+  ExtensionCustomMessage,
   ProviderKind,
 } from './v2';
 import { canonicalConversationEventType, normalizeConversationEvent, toAgentEventEnvelope } from './v2';
@@ -671,7 +672,8 @@ export type ConversationBlockCategory =
   | 'approval'
   | 'status'
   | 'error'
-  | 'usage';
+  | 'usage'
+  | 'extension';
 
 export type ConversationBlockPhase = 'started' | 'delta' | 'completed' | 'failed';
 
@@ -691,6 +693,7 @@ export type TimelineEntry = {
   blockId?: string;
   contentIndex?: number;
   sequence?: number;
+  extensionMessage?: ExtensionCustomMessage & { runtimeId: string; messageId: string };
 };
 
 type NormalizedConversationBlock = {
@@ -928,7 +931,7 @@ export function classifyV2ConversationEvent(
   const conversationId = readString(eventRecord, ['conversationId', 'conversation_id']);
   const content = conversationContent(payload, message, delta);
   const role = (readString(payload, ['role']) || readString(message, ['role'])).toLowerCase();
-  const turnId = readString(payload, ['turnId', 'turn_id']) || activeTurnId;
+  const turnId = payload.scope === 'session' ? '' : readString(payload, ['turnId', 'turn_id']) || activeTurnId;
   const deltaType = readString(delta, ['type', 'deltaType', 'delta_type']);
   const contentIndex = readNumber(delta, ['contentIndex', 'content_index'], -1);
   const streamId = turnId || (contentIndex >= 0 ? `content-${contentIndex}` : 'current');
@@ -937,6 +940,28 @@ export function classifyV2ConversationEvent(
   const at = eventTime(event, now);
   const base = { raw: '', at, workspaceId, conversationId, turnId, sequence: event.sequence };
   const block = conversationBlock(payload, turnId);
+
+  if (type === 'extension.message') {
+    if (!message || message.role !== 'custom' || message.display === false) return null;
+    const runtimeId = readString(payload, ['runtimeId']);
+    const messageId = readString(payload, ['messageId']) || eventId;
+    const customType = readString(message, ['customType']) || 'custom';
+    const text = typeof message.content === 'string' ? message.content
+      : Array.isArray(message.content) ? message.content.flatMap(item => {
+        const part = asRecord(item);
+        return part?.type === 'text' && typeof part.text === 'string' ? [part.text] : [];
+      }).join('\n') : '';
+    return {
+      ...base,
+      id: `v2-extension-${conversationId}-${runtimeId}-${messageId}`,
+      kind: 'system', category: 'extension', phase: 'completed', title: customType,
+      subtitle: text || '此插件消息包含非文本内容。',
+      extensionMessage: { role: 'custom', customType, content: message.content,
+        display: true, runtimeId, messageId,
+        ...(message.details !== undefined ? { details: message.details } : {}),
+        ...(typeof message.timestamp === 'number' ? { timestamp: message.timestamp } : {}) },
+    };
+  }
 
   if (type === 'provider.event' && isProviderLifecycleMethod(providerMethod)) {
     return null;
