@@ -333,6 +333,7 @@ function providerLabel(provider: string): string {
   if (id === 'pi' || id.startsWith('pi-')) return 'Pi';
   if (id === 'acp') return 'ACP';
   if (id === 'grok-build' || id === 'grok') return 'Grok Build';
+  if (id === 'devin' || id === 'devin-cli' || id === 'devin_cli') return 'Devin';
   return provider.trim() || 'Agent';
 }
 
@@ -1390,6 +1391,15 @@ export const PROVIDER_ICON_METADATA: Readonly<Record<string, ProviderIconMetadat
     backgroundColor: '#e5f0f6',
     accessibilityLabel: 'Grok Build',
   },
+  devin: {
+    id: 'devin',
+    label: 'Devin',
+    icon: 'layers-outline',
+    iconName: 'layers-outline',
+    color: '#2f6b4f',
+    backgroundColor: '#e4f1ea',
+    accessibilityLabel: 'Devin',
+  },
 });
 
 function canonicalProviderId(value: string): string {
@@ -1399,6 +1409,7 @@ function canonicalProviderId(value: string): string {
   if (id === 'pi' || id.startsWith('pi-')) return 'pi';
   if (id === 'acp') return 'acp';
   if (id === 'grok-build' || id === 'grok' || id === 'grok_build') return 'grok-build';
+  if (id === 'devin' || id === 'devin-cli' || id === 'devin_cli') return 'devin';
   return id;
 }
 
