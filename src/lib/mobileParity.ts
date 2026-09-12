@@ -334,6 +334,7 @@ function providerLabel(provider: string): string {
   if (id === 'acp') return 'ACP';
   if (id === 'grok-build' || id === 'grok') return 'Grok Build';
   if (id === 'devin' || id === 'devin-cli' || id === 'devin_cli') return 'Devin';
+  if (id === 'opencode' || id === 'open-code' || id === 'open_code') return 'OpenCode';
   return provider.trim() || 'Agent';
 }
 
@@ -1400,6 +1401,15 @@ export const PROVIDER_ICON_METADATA: Readonly<Record<string, ProviderIconMetadat
     backgroundColor: '#e4f1ea',
     accessibilityLabel: 'Devin',
   },
+  opencode: {
+    id: 'opencode',
+    label: 'OpenCode',
+    icon: 'terminal-outline',
+    iconName: 'terminal-outline',
+    color: '#5b4a8a',
+    backgroundColor: '#ece7f6',
+    accessibilityLabel: 'OpenCode',
+  },
 });
 
 function canonicalProviderId(value: string): string {
@@ -1410,6 +1420,7 @@ function canonicalProviderId(value: string): string {
   if (id === 'acp') return 'acp';
   if (id === 'grok-build' || id === 'grok' || id === 'grok_build') return 'grok-build';
   if (id === 'devin' || id === 'devin-cli' || id === 'devin_cli') return 'devin';
+  if (id === 'opencode' || id === 'open-code' || id === 'open_code') return 'opencode';
   return id;
 }
 

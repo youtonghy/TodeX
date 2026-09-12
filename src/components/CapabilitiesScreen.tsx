@@ -32,6 +32,7 @@ const PROVIDER_LABELS: Record<ProviderKind, string> = {
   'claude-code': 'Claude Code',
   'grok-build': 'Grok Build',
   devin: 'Devin',
+  opencode: 'OpenCode',
 };
 
 function isCommonSource(source: string): boolean {
