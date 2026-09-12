@@ -1073,6 +1073,16 @@ export function classifyV2ConversationEvent(
   if (type === 'conversation.created' || type === 'turn.started' || type === 'turn.completed' || type === 'turn.cancelled') {
     return null;
   }
+  if (type === 'permission.requested') {
+    return {
+      id: eventId,
+      kind: 'system',
+      title: '请求权限批准',
+      subtitle: (content || readString(payload, ['title']) || shortJsonValue(payload)).slice(0, 220),
+      requestId: readString(payload, ['permissionId', 'requestId', 'providerRequestId']) || undefined,
+      ...base,
+    };
+  }
   if (type.startsWith('mcp.') || type === 'skill.injected' || type.startsWith('permission.') || type === 'turn.failed') {
     return {
       id: eventId,
