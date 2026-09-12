@@ -969,6 +969,14 @@ export function classifyV2ConversationEvent(
     return null;
   }
 
+  // Provider-internal chatter never renders: command catalog broadcasts are a
+  // data event, and ACP `_`-prefixed methods are implementation-private
+  // extensions (Devin streams MCP logs and thinking markers there).
+  if (type === 'provider.commands.updated'
+    || (type === 'provider.event' && providerMethod.startsWith('_'))) {
+    return null;
+  }
+
   if (type === 'message.created' && (role === 'user' || role === 'human')) {
     return { id: eventId, kind: 'outgoing', title: 'You', subtitle: content, ...base };
   }
