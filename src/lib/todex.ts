@@ -714,6 +714,7 @@ export function normalizeWorkspaceRecord(value: unknown): WorkspaceRecord | null
   const createdAt = numberField(value, ['createdAt', 'created_at']) || now;
   const updatedAt = numberField(value, ['updatedAt', 'updated_at']) || createdAt;
   const localAdapterState = normalizeLocalAdapterState(stringField(value, ['localAdapterState', 'local_adapter_state']));
+  const sortOrder = numberField(value, ['sortOrder', 'sort_order'], Number.NaN);
 
   return {
     id,
@@ -734,6 +735,7 @@ export function normalizeWorkspaceRecord(value: unknown): WorkspaceRecord | null
     localAdapterState,
     createdAt,
     updatedAt,
+    sortOrder: Number.isFinite(sortOrder) ? sortOrder : undefined,
   };
 }
 
@@ -789,6 +791,7 @@ export function mergeWorkspaceRecords(local: WorkspaceRecord[], remote: Workspac
         tenantId: normalized.tenantId,
         backendConnectionId: normalized.backendConnectionId ?? existing.backendConnectionId ?? null,
         localAdapterState: preserveRuntimeAdapterState(existing.localAdapterState, normalized.localAdapterState),
+        sortOrder: normalized.sortOrder ?? existing.sortOrder,
       };
     }
   };
@@ -801,6 +804,13 @@ export function mergeWorkspaceRecords(local: WorkspaceRecord[], remote: Workspac
       reasoningEffort: normalizeReasoningEffort(workspace.reasoningEffort) ?? null,
     }))
     .sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+export function nextWorkspaceSortOrder(workspaces: WorkspaceRecord[]): number {
+  return workspaces.reduce(
+    (max, workspace) => Math.max(max, (workspace.sortOrder ?? -1) + 1),
+    0,
+  );
 }
 
 export function remapWorkspaceScopedRecords<T extends { workspaceId?: string }>(

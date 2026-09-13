@@ -44,6 +44,7 @@ import {
   normalizeThreadId,
   normalizeServerUrl,
   mergeWorkspaceRecords,
+  nextWorkspaceSortOrder,
   parseCodexModelListResponse,
   parseCodexNativeThread,
   parseCodexNativeThreadListResponse,
@@ -3123,6 +3124,7 @@ export default function App() {
         localAdapterState: 'idle',
         createdAt: Date.now(),
         updatedAt: Date.now(),
+        sortOrder: nextWorkspaceSortOrder(workspacesRef.current),
       };
       const nextConversation = createDefaultConversation(nextWorkspace);
 
@@ -3251,6 +3253,7 @@ export default function App() {
       localAdapterState: 'idle',
       createdAt: now,
       updatedAt: now,
+      sortOrder: nextWorkspaceSortOrder(workspaces),
     };
     const sourceConversations = conversations.filter((conversation) => conversation.workspaceId === workspaceId);
     const nextConversations = sourceConversations.length > 0
