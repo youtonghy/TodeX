@@ -117,6 +117,7 @@ export const MessageBubble = memo(function MessageBubble({
   onFork,
   usage,
   streaming = false,
+  showActions = true,
   containerWidth = 0,
 }: {
   entry: TimelineEntry;
@@ -130,6 +131,7 @@ export const MessageBubble = memo(function MessageBubble({
   onFork?: () => void;
   usage?: MobileContextUsage | null;
   streaming?: boolean;
+  showActions?: boolean;
   containerWidth?: number;
 }) {
   const toast = useAppToast();
@@ -229,7 +231,7 @@ export const MessageBubble = memo(function MessageBubble({
           </Surface>
         )}
       </Pressable>
-      {!outgoing ? (
+      {!outgoing && showActions ? (
         <View className="mt-1 flex-row items-center gap-0.5 pl-1">
           <Button isIconOnly size="sm" variant="ghost" onPress={() => void copyText()} accessibilityLabel="复制回复" className="h-8 w-8 rounded-full">
             <StyledIonicons name="copy-outline" size={14} className="text-muted" />

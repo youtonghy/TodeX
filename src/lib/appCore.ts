@@ -62,6 +62,7 @@ import {
   shouldAppendV2ConversationEvent as sharedShouldAppendV2ConversationEvent,
   isCollapsibleProgressEntry as sharedIsCollapsibleProgressEntry,
   isStepProgressEntry as sharedIsStepProgressEntry,
+  latestIncomingEntryIds as sharedLatestIncomingEntryIds,
   isThinkingProgressEntry as sharedIsThinkingProgressEntry,
   isVisibleConversationEntry as sharedIsVisibleConversationEntry,
   progressGroupLabel as sharedProgressGroupLabel,
@@ -2470,6 +2471,10 @@ export function conversationPreviewText(latest: TimelineEntry | undefined): stri
 
 export function isStepProgressEntry(entry: TimelineEntry): boolean {
   return sharedIsStepProgressEntry(entry);
+}
+
+export function latestIncomingEntryIds(entries: readonly TimelineEntry[]): Set<string> {
+  return sharedLatestIncomingEntryIds(entries);
 }
 
 export function isThinkingProgressEntry(entry: TimelineEntry): boolean {

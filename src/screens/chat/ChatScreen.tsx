@@ -72,6 +72,7 @@ import {
   isCollapsibleProgressEntry,
   isImageMimeType,
   isVisibleConversationEntry,
+  latestIncomingEntryIds,
   mimeTypeFromDataUrl,
   readBase64DataUrl,
   readTextAttachmentContent,
@@ -372,6 +373,10 @@ export function ChatScreen({
     }
     return '';
   }, [conversationMessages]);
+  const actionableIncomingIds = useMemo(
+    () => latestIncomingEntryIds(conversationMessages),
+    [conversationMessages],
+  );
   const visibleConversationRenderItems = useMemo(
     () => conversationRenderItems.slice(-visibleRenderItemCount),
     [conversationRenderItems, visibleRenderItemCount],
@@ -990,12 +995,14 @@ export function ChatScreen({
         onApprovalResponse={handleApprovalResponse}
         onOpenLink={openMessageLink}
         onFork={entry.kind === 'incoming' && conversation ? forkCurrentConversation : undefined}
+        showActions={entry.kind === 'incoming' && actionableIncomingIds.has(entry.id)}
         usage={isLatestIncoming ? contextUsage : null}
         containerWidth={Math.min(chatColumnWidth, 1024)}
         streaming={isLatestIncoming && isThinking}
       />
     );
   }, [
+    actionableIncomingIds,
     chatColumnWidth,
     expandedProgressIds,
     handleApprovalResponse,

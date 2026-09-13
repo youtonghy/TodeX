@@ -58,6 +58,10 @@ export type ConversationRuntime = {
   pendingControl?: { requestId: string; turnId: string; status: 'pending' | 'unknown' };
   configurationError?: string;
   messageCategories: Record<string, string>;
+  /** Segment index of the shared assistant stream; activity between two chunks
+   * starts a new segment so narration interleaves with folded steps. */
+  assistantSegment: number;
+  assistantStreamInterrupted: boolean;
   queueItems: NativeQueueItem[];
   queuePaused: boolean;
   lastProgressAt: string | null;
@@ -67,7 +71,7 @@ export function createConversationRuntime(conversationId: string, workspaceId: s
     conversationId, workspaceId, appliedSequence: 0, highWaterSequence: 0, pendingEvents: {},
     timeline: [], activeTurnId: '', status: 'idle', usageRecords: [], contextUsage: null, cumulativeUsage: null,
     subagents: [], compaction: { status: 'idle', recommended: false, updatedAt: '' }, memoryEntries: [],
-    messageCategories: {}, queueItems: [], queuePaused: false,
+    messageCategories: {}, assistantSegment: 0, assistantStreamInterrupted: false, queueItems: [], queuePaused: false,
     extensionUi: createExtensionUi(), retiredRuntimeIds: [],
     pendingPermissions: [], requestedConfig: null, effectiveConfig: null, configurationStatus: 'unknown', lastProgressAt: null,
   };
@@ -261,6 +265,8 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent): voi
   if (type === 'turn.started') {
     state.activeTurnId = explicitTurnId;
     state.messageCategories = {};
+    state.assistantSegment = 0;
+    state.assistantStreamInterrupted = false;
     state.status = 'running';
     state.requestedConfig = payload.requestedPermissions ? object(payload.requestedPermissions) : null;
     state.effectiveConfig = payload.effectivePermissions
@@ -278,7 +284,22 @@ function projectEvent(state: ConversationRuntime, event: ConversationEvent): voi
       projectedEvent = { ...event, payload: { ...payload, block: { ...block, category: state.messageCategories[messageKey] } } };
     }
   }
-  const entry = classifyV2ConversationEvent(projectedEvent, state.workspaceId, turnId);
+  const classifiedEntry = classifyV2ConversationEvent(projectedEvent, state.workspaceId, turnId);
+  // The generic assistant stream shares one entry per turn. A step between
+  // two chunks means the agent moved on, so the next chunk opens a new
+  // segment instead of growing the previous text into one blob.
+  if (classifiedEntry && classifiedEntry.kind !== 'incoming') {
+    state.assistantStreamInterrupted = true;
+  }
+  let segmentedId: string | undefined;
+  if (classifiedEntry && classifiedEntry.kind === 'incoming' && classifiedEntry.id.startsWith('v2-assistant-')) {
+    if (state.assistantStreamInterrupted) {
+      state.assistantSegment = (state.assistantSegment || 0) + 1;
+      state.assistantStreamInterrupted = false;
+    }
+    segmentedId = `${classifiedEntry.id}#seg${state.assistantSegment || 0}`;
+  }
+  const entry = classifiedEntry && segmentedId ? { ...classifiedEntry, id: segmentedId } : classifiedEntry;
   if (entry) {
     const existing = state.timeline.find(item => item.id === entry.id);
     const next = existing && shouldAppendV2ConversationEvent(event)

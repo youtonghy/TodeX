@@ -886,6 +886,8 @@ export function reduceConversationEvents(
   let activeTurnId = '';
   let lastSequence = 0;
   const normalizedEvents = events.map(normalizeConversationEvent).filter((event): event is ConversationEvent => event !== null);
+  let assistantSegment = 0;
+  let assistantStreamInterrupted = false;
   for (const event of normalizedEvents.sort((a, b) => a.sequence - b.sequence)) {
     const key = event.eventId || `${event.conversationId}:${event.sequence}:${event.type}`;
     if (seen.has(key)) continue;
@@ -898,8 +900,26 @@ export function reduceConversationEvents(
     const payload = asRecord(event.payload) || {};
     const turnId = readString(payload, ['turnId', 'turn_id']);
     const type = canonicalConversationEventType(event);
-    if (type === 'turn.started' && turnId) activeTurnId = turnId;
-    const entry = classifyV2ConversationEvent(event, workspaceId, turnId || activeTurnId);
+    if (type === 'turn.started' && turnId) {
+      activeTurnId = turnId;
+      assistantSegment = 0;
+      assistantStreamInterrupted = false;
+    }
+    const classifiedEntry = classifyV2ConversationEvent(event, workspaceId, turnId || activeTurnId);
+    // Same segmentation as the live runtime: activity between two chunks of
+    // the shared assistant stream starts a new entry (see projectEvent).
+    if (classifiedEntry && classifiedEntry.kind !== 'incoming') {
+      assistantStreamInterrupted = true;
+    }
+    let segmentedId: string | undefined;
+    if (classifiedEntry && classifiedEntry.kind === 'incoming' && classifiedEntry.id.startsWith('v2-assistant-')) {
+      if (assistantStreamInterrupted) {
+        assistantSegment += 1;
+        assistantStreamInterrupted = false;
+      }
+      segmentedId = `${classifiedEntry.id}#seg${assistantSegment}`;
+    }
+    const entry = classifiedEntry && segmentedId ? { ...classifiedEntry, id: segmentedId } : classifiedEntry;
     if (entry) {
       const index = timeline.findIndex((item) => item.id === entry.id);
       if (index < 0) timeline.unshift(entry);
@@ -1176,6 +1196,22 @@ export function progressGroupLabel(
 
 export function isCollapsibleProgressEntry(entry: TimelineEntry): boolean {
   return isStepProgressEntry(entry) || isThinkingProgressEntry(entry);
+}
+
+/** Reply affordances attach to the last message of each turn, not to every
+ * narration segment that interleaved steps split out of the stream. */
+export function latestIncomingEntryIds(entries: readonly TimelineEntry[]): Set<string> {
+  const seen = new Set<string>();
+  const ids = new Set<string>();
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry.kind !== 'incoming') continue;
+    const key = entry.turnId || entry.id;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    ids.add(entry.id);
+  }
+  return ids;
 }
 
 export type ConversationRenderItem =

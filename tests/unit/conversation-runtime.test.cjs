@@ -29,6 +29,29 @@ test('live/replay interleaving buffers gaps and applies each delta exactly once'
   assert.equal(duplicate.state.status, 'completed');
 });
 
+test('assistant narration splits into segments around intervening steps', () => {
+  const state = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
+    event(2, 'message.delta', { text: 'First. ', turnId: 't' }),
+    event(3, 'tool.started', { turnId: 't', toolCallId: 'x', toolName: 'ls' }),
+    event(4, 'message.delta', { text: 'Second.', turnId: 't' }),
+    event(5, 'message.delta', { text: ' more', turnId: 't' }),
+    event(6, 'turn.completed', { turnId: 't' })).state;
+  const incoming = state.timeline.filter(e => e.kind === 'incoming');
+  assert.equal(incoming.length, 2);
+  assert.equal(incoming[0].subtitle, 'Second. more');
+  assert.equal(incoming[1].subtitle, 'First. ');
+  assert.equal(state.status, 'completed');
+});
+
+test('contiguous narration without intervening steps stays one entry', () => {
+  const state = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
+    event(2, 'message.delta', { text: 'Hello', turnId: 't' }),
+    event(3, 'message.delta', { text: ' world', turnId: 't' }),
+    event(4, 'turn.completed', { turnId: 't' })).state;
+  assert.equal(state.timeline.filter(e => e.kind === 'incoming').length, 1);
+  assert.equal(state.timeline[0].subtitle, 'Hello world');
+});
+
 test('historical mislabelled message completion cannot end a running turn', () => {
   const update = apply(empty(), event(1, 'turn.started', { turnId: 't' }),
     event(2, 'message.completed', { turnId: 't', role: 'assistant', text: 'Answer' }, { normalizedType: 'turn.completed' }));
