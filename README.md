@@ -1,5 +1,8 @@
 # TodeX Mobile App (`TodeX_app`)
 
+> [!WARNING]
+> **This project is archived and no longer maintained.** The mobile client has been rewritten as a native iOS/iPadOS app. Please use **[Todex_mobile](../Todex_mobile)** instead.
+
 <p align="center">
   <strong>Cross-platform mobile client for <code>todex-agentd</code> built with React Native, Expo SDK 57, and HeroUI Native.</strong>
 </p>
@@ -223,6 +226,7 @@ device packages require Apple signing credentials and a provisioning profile.
 
 ## Related Repositories
 
+- **[Todex Mobile](../Todex_mobile)**: Native Swift + UIKit mobile client — the successor to this archived app.
 - **[TodeX Backend](../TodeX_backend)**: Rust backend daemon (`todex-agentd`).
 - **[TodeX Desktop](../TodeX_desktop)**: Electron & React 19 desktop client.
 

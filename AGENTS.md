@@ -1,5 +1,7 @@
 # Agent Instructions
 
+> **Archived**: `TodeX_app` is no longer maintained. The mobile client has moved to [`../Todex_mobile`](../Todex_mobile). Do not start new work here unless explicitly asked.
+
 ## Frontend UI
 
 - All user-facing UI must use the official HeroUI Native components from `heroui-native`. Prefer the existing component APIs over raw React Native controls or ad-hoc replacements.

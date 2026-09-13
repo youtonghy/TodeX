@@ -1,5 +1,7 @@
 # Android emulator performance validation
 
+> **Archived**: `TodeX_app` is no longer maintained. Use [Todex_mobile](../../Todex_mobile) instead. This document is kept for historical reference only.
+
 Measured on 2026-09-08 in Android Studio's Pixel 10 Pro emulator (API 37,
 1280 × 2856, arm64, hardware graphics on Apple M5 Pro). Both builds use the
 same installed dependencies, including HeroUI Native 1.0.8, and Gradle Release

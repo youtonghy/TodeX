@@ -1,5 +1,7 @@
 # 移动端功能对齐与验收记录
 
+> **已归档**：`TodeX_app` 不再维护，请改用 [Todex_mobile](../../Todex_mobile)。本文档仅作历史记录保留。
+
 日期：2026-09-08。范围：TodeX_app；以现有 desktop 行为和后端协议为依据，不修改 desktop/backend 的独立工作。
 
 ## 功能与实现

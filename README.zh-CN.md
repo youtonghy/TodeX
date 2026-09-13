@@ -1,5 +1,8 @@
 # TodeX 移动端应用 (`TodeX_app`)
 
+> [!WARNING]
+> **本项目已归档，不再维护。** 移动端客户端已重写为原生 iOS/iPadOS 应用，请改用 **[Todex_mobile](../Todex_mobile)**。
+
 <p align="center">
   <strong>基于 React Native、Expo SDK 57 与 HeroUI Native 构建的跨平台 <code>todex-agentd</code> 移动客户端。</strong>
 </p>
@@ -199,6 +202,7 @@ Android keystore。EAS 仅负责项目认证和读取托管签名凭据，编译
 
 ## 相关仓库
 
+- **[Todex 移动端](../Todex_mobile)**：基于原生 Swift + UIKit 的移动客户端，本归档项目的继任者。
 - **[TodeX 后端服务](../TodeX_backend)**：基于 Rust 构建的后端守护进程 (`todex-agentd`)。
 - **[TodeX 桌面端](../TodeX_desktop)**：基于 Electron 和 React 19 的 macOS 桌面客户端。
 

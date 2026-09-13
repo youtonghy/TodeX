@@ -1,5 +1,7 @@
 # Tool panel redesign validation
 
+> **Archived**: `TodeX_app` is no longer maintained. Use [Todex_mobile](../../Todex_mobile) instead. This document is kept for historical reference only.
+
 Validated on 2026-09-08 with HeroUI Native 1.0.8, Android Studio's Pixel 10 Pro
 API 37 emulator, and Chromium at a 390 px viewport.
 
