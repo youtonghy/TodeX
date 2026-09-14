@@ -996,9 +996,11 @@ export function classifyV2ConversationEvent(
 
   // Provider-internal chatter never renders: command catalog broadcasts are a
   // data event, and ACP `_`-prefixed methods are implementation-private
-  // extensions (Devin streams MCP logs and thinking markers there).
+  // extensions (Devin streams MCP logs and thinking markers there). Tool-call
+  // notifications stay visible even when they arrive on a private channel.
   if (type === 'provider.commands.updated'
-    || (type === 'provider.event' && providerMethod.startsWith('_'))) {
+    || (type === 'provider.event' && providerMethod.startsWith('_')
+      && !/tool|command|function/i.test(providerMethod))) {
     return null;
   }
 
