@@ -831,6 +831,106 @@ export function remapWorkspaceScopedRecords<T extends { workspaceId?: string }>(
   });
 }
 
+export type KanbanTaskStatus = 'planned' | 'in-progress' | 'done';
+
+export const KANBAN_TASK_STATUSES: readonly KanbanTaskStatus[] = ['planned', 'in-progress', 'done'];
+
+export type KanbanTask = {
+  id: string;
+  workspaceId: string;
+  /** Local-only tag: which configured backend connection owns this record. */
+  backendConnectionId?: string | null;
+  title: string;
+  description?: string;
+  /** ISO date `YYYY-MM-DD`. */
+  dueDate?: string;
+  status: KanbanTaskStatus;
+  conversationId?: string;
+  createdAt: number;
+  updatedAt: number;
+  /** Tombstone timestamp: deletion propagates to other devices through sync. */
+  deletedAt?: number;
+};
+
+export function normalizeKanbanTask(value: unknown): KanbanTask | null {
+  if (!isObject(value)) {
+    return null;
+  }
+  const id = stringField(value, ['id']).trim();
+  const workspaceId = stringField(value, ['workspaceId', 'workspace_id']).trim();
+  const title = stringField(value, ['title']).trim();
+  if (!id || !workspaceId || !title) {
+    return null;
+  }
+  const status = stringField(value, ['status']);
+  const createdAt = numberField(value, ['createdAt', 'created_at']) || 0;
+  const updatedAt = numberField(value, ['updatedAt', 'updated_at']) || createdAt;
+  const deletedAt = numberField(value, ['deletedAt', 'deleted_at']);
+  const description = stringField(value, ['description']).trim();
+  const dueDate = stringField(value, ['dueDate', 'due_date']);
+  const conversationId = stringField(value, ['conversationId', 'conversation_id']).trim();
+  return {
+    id,
+    workspaceId,
+    backendConnectionId: stringField(value, ['backendConnectionId', 'backend_connection_id']) || null,
+    title,
+    description: description || undefined,
+    dueDate: /^\d{4}-\d{2}-\d{2}$/.test(dueDate) ? dueDate : undefined,
+    status: (KANBAN_TASK_STATUSES as readonly string[]).includes(status) ? status as KanbanTaskStatus : 'planned',
+    conversationId: conversationId || undefined,
+    createdAt,
+    updatedAt,
+    deletedAt: deletedAt > 0 ? deletedAt : undefined,
+  };
+}
+
+export function parseKanbanSyncResponse(value: unknown): KanbanTask[] {
+  const rawTasks = Array.isArray(value)
+    ? value
+    : isObject(value) && Array.isArray(value.tasks)
+      ? value.tasks
+      : [];
+  return rawTasks
+    .map(normalizeKanbanTask)
+    .filter((task): task is KanbanTask => Boolean(task));
+}
+
+export function prepareKanbanSyncPayload(tasks: KanbanTask[]): KanbanTask[] {
+  return tasks
+    .map(normalizeKanbanTask)
+    .filter((task): task is KanbanTask => Boolean(task))
+    .map((task) => ({
+      ...task,
+      backendConnectionId: undefined,
+    }))
+    .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+}
+
+export function mergeKanbanTasks(local: KanbanTask[], remote: KanbanTask[]): KanbanTask[] {
+  const merged = new Map<string, KanbanTask>();
+  for (const task of local) {
+    const normalized = normalizeKanbanTask(task);
+    if (normalized) {
+      merged.set(normalized.id, normalized);
+    }
+  }
+  for (const task of remote) {
+    const normalized = normalizeKanbanTask(task);
+    if (!normalized) {
+      continue;
+    }
+    const existing = merged.get(normalized.id);
+    if (!existing || normalized.updatedAt >= existing.updatedAt) {
+      merged.set(normalized.id, {
+        ...normalized,
+        backendConnectionId: normalized.backendConnectionId ?? existing?.backendConnectionId ?? null,
+      });
+    }
+  }
+  return [...merged.values()]
+    .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+}
+
 function responseDataArray(value: unknown): unknown[] {
   if (Array.isArray(value)) {
     return value;

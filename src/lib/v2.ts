@@ -1,5 +1,5 @@
 import { controlFrame } from './conversationCommands';
-import { buildHttpUrl, utf8ByteLength } from './todex';
+import { buildHttpUrl, utf8ByteLength, type KanbanTask } from './todex';
 import { ConnectionError } from './connectionError';
 import { MetricsCollector, type ConnectionMetrics } from './connectionMetrics';
 
@@ -745,6 +745,14 @@ export class V2ApiClient {
 
   async listConversations(): Promise<{ conversations: ConversationManifest[] }> {
     return this.request('/v2/conversations');
+  }
+
+  async listKanbanTasks(): Promise<{ tasks: KanbanTask[]; updatedAt: number }> {
+    return this.request('/v2/kanban/tasks');
+  }
+
+  async replaceKanbanTasks(tasks: KanbanTask[]): Promise<{ tasks: KanbanTask[]; updatedAt: number }> {
+    return this.request('/v2/kanban/tasks', { method: 'PUT', body: JSON.stringify({ tasks }) });
   }
 
   async updateConversation(id: string, input: { title?: string; archived?: boolean }): Promise<ConversationManifest> {
