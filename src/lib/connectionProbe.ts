@@ -50,11 +50,11 @@ export function inspectServerUrl(raw: string): { origin: string; error: Connecti
   }
 }
 
-export function tokenMatchesOrigin(tokenOrigin: string, serverUrl: string): boolean {
-  if (!tokenOrigin.trim()) {
+export function credentialMatchesOrigin(credentialOrigin: string, serverUrl: string): boolean {
+  if (!credentialOrigin.trim()) {
     return true;
   }
-  return normalizeServerUrl(tokenOrigin) === normalizeServerUrl(serverUrl);
+  return normalizeServerUrl(credentialOrigin) === normalizeServerUrl(serverUrl);
 }
 
 async function fetchText(
