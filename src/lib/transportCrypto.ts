@@ -17,7 +17,6 @@ type PairingLinkPayload = {
   kind: 'todex-pairing-link';
   version: number;
   serverUrl: string;
-  authToken?: string;
   preferredEncryption?: TransportEncryptionProtocol;
   protocol?: PairingProtocol;
 };
@@ -35,7 +34,6 @@ type PairingQrEnvelope = {
   kind?: unknown;
   version?: unknown;
   serverUrl?: unknown;
-  authToken?: unknown;
   preferredEncryption?: unknown;
   protocol?: unknown;
   checksum?: unknown;
@@ -46,7 +44,6 @@ type PairingQrEnvelope = {
 
 export type ParsedPairing = {
   serverUrl: string;
-  authToken: string;
   encryptionProtocol: TransportEncryptionProtocol;
   encryptionPublicKey: string;
   importWarning?: string;
@@ -144,7 +141,6 @@ function parsePairingLinkObject(parsed: Partial<PairingLinkPayload>): ParsedPair
   if (selectedProtocol === 'none') {
     return {
       serverUrl: parsed.serverUrl,
-      authToken: parsed.authToken ?? '',
       encryptionProtocol: 'none',
       encryptionPublicKey: '',
     };
@@ -155,7 +151,6 @@ function parsePairingLinkObject(parsed: Partial<PairingLinkPayload>): ParsedPair
     }
     return {
       serverUrl: parsed.serverUrl,
-      authToken: parsed.authToken ?? '',
       encryptionProtocol: selectedProtocol,
       encryptionPublicKey: protocol.publicKey,
     };
@@ -199,7 +194,6 @@ export function applyPairingToSettings(
   return {
     ...settings,
     serverUrl: pairing.serverUrl,
-    authToken: pairing.authToken,
     encryptionProtocol: pairing.encryptionProtocol,
     encryptionPublicKey: pairing.encryptionPublicKey,
   };

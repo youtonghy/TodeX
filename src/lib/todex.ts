@@ -2,7 +2,8 @@ export type AppTab = 'chat' | 'settings';
 
 export type ConnectionSettings = {
   serverUrl: string;
-  authToken: string;
+  /** Device Ed25519 seed (base64url); empty until this backend is paired. */
+  deviceSecret: string;
   tenantId: string;
   encryptionProtocol: 'none' | 'x25519' | 'ml-kem-768';
   encryptionPublicKey: string;
@@ -18,7 +19,8 @@ export type BackendConnectionProfile = {
   id: string;
   name: string;
   serverUrl: string;
-  authToken: string;
+  /** Device Ed25519 seed (base64url) enrolled on this backend. */
+  deviceSecret: string;
   tenantId: string;
   encryptionProtocol: ConnectionSettings['encryptionProtocol'];
   encryptionPublicKey: string;

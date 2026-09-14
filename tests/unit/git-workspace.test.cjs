@@ -2,7 +2,9 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { readGitWorkspace, runGitWorkspaceOperation, GitWorkspaceError } = require('../../dist/unit/lib/gitWorkspace.js');
 const { buildGitAgentPrompt } = require('../../dist/unit/lib/gitAgentActions.js');
-const settings = { serverUrl: 'http://localhost:3000', authToken: 'test-token' };
+const { generateDeviceIdentity } = require('../../dist/unit/lib/deviceAuth.js');
+const device = generateDeviceIdentity();
+const settings = { serverUrl: 'http://localhost:3000', deviceSecret: device.secretKey };
 
 test('Git workspace read and mutation preserve the backend wire contract', async () => {
   const original = global.fetch;
@@ -12,7 +14,8 @@ test('Git workspace read and mutation preserve the backend wire contract', async
     await readGitWorkspace(settings, '/repo with spaces');
     assert.equal(new URL(calls[0].url).pathname, '/v2/git/workspace');
     assert.equal(new URL(calls[0].url).searchParams.get('workspacePath'), '/repo with spaces');
-    assert.equal(calls[0].init.headers.Authorization, 'Bearer test-token');
+    assert.equal(calls[0].init.headers['x-todex-device-id'], device.deviceId);
+    assert.ok(calls[0].init.headers['x-todex-auth-sig']);
     await runGitWorkspaceOperation(settings, '/repo', { action: 'create-worktree', branchName: 'codex/task', path: '/new' });
     assert.equal(new URL(calls[1].url).pathname, '/v2/git/operation');
     assert.equal(calls[1].init.method, 'POST');

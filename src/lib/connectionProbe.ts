@@ -1,6 +1,7 @@
 import { buildHttpUrl, normalizeServerUrl } from './todex';
 import { ConnectionError, type ConnectionFailureCode } from './connectionError';
 import type { ProviderDescriptor } from './v2';
+import { deviceAuthHeaders, type DeviceIdentity } from './deviceAuth';
 
 export type ServerVersionInfo = {
   name: string;
@@ -91,7 +92,7 @@ function classifyHttp(response: Response, endpoint: string): ConnectionError {
 
 export async function probeBackendConnection(options: {
   serverUrl: string;
-  authToken?: string;
+  device?: DeviceIdentity | null;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
 }): Promise<BackendProbeResult> {
@@ -111,16 +112,17 @@ export async function probeBackendConnection(options: {
 
   const fetchImpl = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? PROBE_TIMEOUT_MS;
-  const headers = new Headers({ Accept: 'application/json' });
-  if (options.authToken) {
-    headers.set('Authorization', `Bearer ${options.authToken}`);
-  }
+  // /v2/version and /health stay public so pairing can discover the backend;
+  // only the providers call carries the device signature.
+  const signedProvidersHeaders = options.device
+    ? deviceAuthHeaders(options.device, 'GET', '/v2/providers')
+    : {};
 
   try {
     const versionResponse = await fetchText(
       fetchImpl,
       buildHttpUrl(origin, '/v2/version'),
-      { headers },
+      { headers: { Accept: 'application/json' } },
       timeoutMs,
     );
     if (!versionResponse.ok) {
@@ -142,7 +144,7 @@ export async function probeBackendConnection(options: {
     const healthResponse = await fetchText(
       fetchImpl,
       buildHttpUrl(origin, '/health'),
-      { headers },
+      { headers: { Accept: 'application/json' } },
       timeoutMs,
     );
     if (!healthResponse.ok) {
@@ -153,7 +155,7 @@ export async function probeBackendConnection(options: {
     const providersResponse = await fetchText(
       fetchImpl,
       buildHttpUrl(origin, '/v2/providers'),
-      { headers },
+      { headers: { Accept: 'application/json', ...signedProvidersHeaders } },
       timeoutMs,
     );
     if (!providersResponse.ok) {

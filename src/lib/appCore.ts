@@ -36,6 +36,7 @@ import {
   type CodexThreadHistoryEntry,
 } from './todex';
 import { type PairingQrChunk, type TransportCryptoSession } from './transportCrypto';
+import { deviceAuthHeaders, deviceIdentityFromSecret } from './deviceAuth';
 import {
   cursorFromEvent as transportCursorFromEvent,
   sessionIdFromEvent as transportSessionIdFromEvent,
@@ -1061,7 +1062,7 @@ export function textFromItem(item: Record<string, unknown>): string {
   return textFromContent(item.content);
 }
 
-export type PersistedSettings = Omit<ConnectionSettings, 'authToken'>;
+export type PersistedSettings = Omit<ConnectionSettings, 'deviceSecret'>;
 export type PersistedBackendConnectionProfile = Omit<BackendConnectionProfile, 'authToken'>;
 
 export function profileSettings(profile: BackendConnectionProfile, base: ConnectionSettings = defaultSettings): ConnectionSettings {
@@ -1352,7 +1353,7 @@ export const FEEDBACK_CATEGORIES: { id: string; title: string; description: stri
 
 export const defaultSettings: ConnectionSettings = {
   serverUrl: 'http://127.0.0.1:7345',
-  authToken: '',
+  deviceSecret: '',
   tenantId: 'local',
   encryptionProtocol: 'none',
   encryptionPublicKey: '',
@@ -1487,11 +1488,11 @@ export function parseModelCommandArgs(args: string[]): {
 }
 
 export function toPersistedSettings(settings: ConnectionSettings): PersistedSettings {
-  const { authToken: _authToken, ...rest } = settings;
+  const { deviceSecret: _deviceSecret, ...rest } = settings;
   return rest;
 }
 
-export function fromPersistedSettings(raw: Partial<PersistedSettings> | null | undefined, authToken: string): ConnectionSettings {
+export function fromPersistedSettings(raw: Partial<PersistedSettings> | null | undefined, deviceSecret: string): ConnectionSettings {
   const { defaultThreadId: _legacyDefaultThreadId, ...safeRaw } = (raw ?? {}) as Partial<PersistedSettings> & {
     defaultThreadId?: string;
   };
@@ -1499,14 +1500,21 @@ export function fromPersistedSettings(raw: Partial<PersistedSettings> | null | u
     ...defaultSettings,
     ...safeRaw,
     defaultReasoningEffort: normalizeReasoningEffort(safeRaw.defaultReasoningEffort) ?? defaultSettings.defaultReasoningEffort,
-    authToken,
+    deviceSecret,
   };
 }
 
-export function authHeaders(settings: ConnectionSettings, extra: Record<string, string> = {}): Record<string, string> {
+export function authHeaders(
+  settings: ConnectionSettings,
+  method = 'GET',
+  pathAndQuery = '/',
+  body: Uint8Array = new Uint8Array(),
+  extra: Record<string, string> = {},
+): Record<string, string> {
+  const device = deviceIdentityFromSecret(settings.deviceSecret);
   return {
     ...extra,
-    ...(settings.authToken ? { Authorization: `Bearer ${settings.authToken}` } : {}),
+    ...(device ? deviceAuthHeaders(device, method, pathAndQuery, body) : {}),
   };
 }
 
@@ -1514,11 +1522,11 @@ export const apiClientCache = new Map<string, V2ApiClient>();
 
 export function apiClientForConnection(settings: ConnectionSettings, profile?: BackendConnectionProfile | null): V2ApiClient {
   const serverUrl = profile ? profile.serverUrl : settings.serverUrl;
-  const authToken = profile ? profile.authToken : settings.authToken;
-  const key = `${serverUrl}\n${authToken}`;
+  const deviceSecret = profile ? profile.deviceSecret : settings.deviceSecret;
+  const key = `${serverUrl}\n${deviceSecret}`;
   const cached = apiClientCache.get(key);
   if (cached) return cached;
-  const client = new V2ApiClient({ serverUrl, authToken });
+  const client = new V2ApiClient({ serverUrl, device: deviceIdentityFromSecret(deviceSecret) });
   apiClientCache.set(key, client);
   if (apiClientCache.size > 12) {
     const oldest = apiClientCache.keys().next().value;
@@ -2176,7 +2184,7 @@ export async function fetchWorkspaceDirectorySnapshot(
     url.searchParams.set('path', path);
   }
   const response = await fetch(url.toString(), {
-    headers: authHeaders(settings),
+    headers: authHeaders(settings, 'GET', `${url.pathname}${url.search}`),
   });
   const body = await response.json().catch(() => null);
   if (!response.ok) {

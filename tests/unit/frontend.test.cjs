@@ -11,11 +11,14 @@ const transportCrypto = require(path.join(compiledDir, 'lib', 'transportCrypto.j
 const v2 = require(path.join(compiledDir, 'lib', 'v2.js'));
 const connectionError = require(path.join(compiledDir, 'lib', 'connectionError.js'));
 const connectionProbe = require(path.join(compiledDir, 'lib', 'connectionProbe.js'));
+const deviceAuth = require(path.join(compiledDir, 'lib', 'deviceAuth.js'));
+
+const testDevice = deviceAuth.generateDeviceIdentity();
 
 function baseSettings(overrides = {}) {
   return {
     serverUrl: '127.0.0.1:7345',
-    authToken: '',
+    deviceSecret: '',
     tenantId: 'local',
     encryptionProtocol: 'none',
     encryptionPublicKey: '',
@@ -55,7 +58,7 @@ test('builds v2 WebSocket URLs and parses protocol messages', () => {
   assert.equal(v2.parseV2Message('{bad json}'), null);
 });
 
-test('builds v2 WebSocket URLs with pairing query and encoded access token', () => {
+test('builds v2 WebSocket URLs with pairing query and device signature', () => {
   assert.equal(
     v2.buildV2WebSocketUrlWithOptions('https://agent.example.test', {
       cryptoQueryString: 'enc=x25519&client_key=abc',
@@ -68,24 +71,24 @@ test('builds v2 WebSocket URLs with pairing query and encoded access token', () 
     }),
     'ws://127.0.0.1:7345/v2/ws?enc=ml-kem-768',
   );
-  assert.equal(
-    v2.buildV2WebSocketUrlWithOptions('http://127.0.0.1:7345', {
-      cryptoQueryString: 'enc=none',
-      authToken: 'tok&x',
-    }),
-    'ws://127.0.0.1:7345/v2/ws?enc=none&access_token=tok%26x',
-  );
-  assert.equal(
-    v2.buildV2WebSocketUrlWithToken('http://127.0.0.1:7345', 'tok&x'),
-    'ws://127.0.0.1:7345/v2/ws?access_token=tok%26x',
-  );
+  const signed = new URL(v2.buildV2WebSocketUrlWithOptions('http://127.0.0.1:7345', {
+    cryptoQueryString: 'enc=none',
+    device: testDevice,
+  }));
+  assert.equal(signed.searchParams.get('enc'), 'none');
+  assert.equal(signed.searchParams.get('device_id'), testDevice.deviceId);
+  assert.ok(signed.searchParams.get('auth_ts'));
+  assert.ok(signed.searchParams.get('auth_nonce'));
+  assert.ok(signed.searchParams.get('auth_sig'));
+  const unsigned = new URL(v2.buildV2WebSocketUrlWithDevice('http://127.0.0.1:7345'));
+  assert.equal(unsigned.search, '');
 });
 
-test('v2 API client sends bearer auth and JSON requests', async () => {
+test('v2 API client signs requests with the device credential', async () => {
   const requests = [];
   const client = new v2.V2ApiClient({
     serverUrl: 'http://127.0.0.1:7345',
-    authToken: 'secret',
+    device: testDevice,
     fetchImpl: async (url, init) => {
       requests.push({ url, init });
       return new Response(JSON.stringify({ conversationId: 'c1', turnId: 't1' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -93,8 +96,23 @@ test('v2 API client sends bearer auth and JSON requests', async () => {
   });
   await client.prompt('c1', 'hello');
   assert.equal(requests[0].url, 'http://127.0.0.1:7345/v2/conversations/c1/prompt');
-  assert.equal(requests[0].init.headers.get('Authorization'), 'Bearer secret');
+  assert.equal(requests[0].init.headers.get('x-todex-device-id'), testDevice.deviceId);
+  assert.ok(requests[0].init.headers.get('x-todex-auth-sig'));
   assert.equal(requests[0].init.headers.get('Content-Type'), 'application/json');
+  // The signature verifies against the signed payload for this request.
+  const canonical = deviceAuth.canonicalQuery('');
+  const payload = deviceAuth.signedPayload(
+    testDevice.deviceId, 'POST', '/v2/conversations/c1/prompt', canonical,
+    requests[0].init.headers.get('x-todex-auth-ts'),
+    requests[0].init.headers.get('x-todex-auth-nonce'),
+    Buffer.from(JSON.stringify({ text: 'hello' })),
+  );
+  const { ed25519 } = require('@noble/curves/ed25519.js');
+  assert.ok(ed25519.verify(
+    Buffer.from(requests[0].init.headers.get('x-todex-auth-sig'), 'base64url'),
+    payload,
+    Buffer.from(testDevice.publicKey, 'base64url'),
+  ));
 });
 
 test('v2 API client requests profile-scoped image capability', async () => {
@@ -738,16 +756,15 @@ test('parses embedded pairing links and applies encrypted settings', async () =>
     protocol: { id: 'x25519', publicKey: 'x-key' },
   }));
 
+  // Legacy `authToken` fields in old QR codes are ignored, never imported.
   assert.deepEqual(pairing, {
     serverUrl: 'http://127.0.0.1:7345',
-    authToken: 'token',
     encryptionProtocol: 'x25519',
     encryptionPublicKey: 'x-key',
   });
   assert.deepEqual(transportCrypto.applyPairingToSettings(baseSettings(), pairing), {
     ...baseSettings(),
     serverUrl: 'http://127.0.0.1:7345',
-    authToken: 'token',
     encryptionProtocol: 'x25519',
     encryptionPublicKey: 'x-key',
   });
@@ -774,7 +791,6 @@ test('imports pairing links with embedded selected public keys', async () => {
     assert.deepEqual(requests, []);
     assert.deepEqual(pairing, {
       serverUrl: 'http://phone-visible:7345',
-      authToken: 'secret',
       encryptionProtocol: 'ml-kem-768',
       encryptionPublicKey: 'kem-key',
     });
@@ -823,7 +839,6 @@ test('reassembles segmented pairing qr frames into an importable payload', async
   const pairing = await transportCrypto.resolvePairingPayload(assembled);
   assert.deepEqual(pairing, {
     serverUrl: 'http://phone-visible:7345',
-    authToken: 'secret',
     encryptionProtocol: 'ml-kem-768',
     encryptionPublicKey: 'kem-key-'.repeat(180),
   });
@@ -1128,13 +1143,13 @@ test('provider display names keep Cloud Code out of conversation agents', () => 
   assert.equal(Object.values(v2.PROVIDER_DISPLAY_NAMES).includes('Cloud Code'), false);
 });
 
-test('CLI manager client uses fixed provider routes and bearer authentication', async () => {
+test('CLI manager client uses fixed provider routes and device authentication', async () => {
   const requests = [];
   const client = new v2.V2ApiClient({
     serverUrl: 'https://agent.example.test',
-    authToken: 'secret-token',
+    device: testDevice,
     fetchImpl: async (url, init) => {
-      requests.push({ url: String(url), method: init?.method || 'GET', authorization: init?.headers?.get('Authorization') });
+      requests.push({ url: String(url), method: init?.method || 'GET', deviceId: init?.headers?.get('x-todex-device-id'), signature: init?.headers?.get('x-todex-auth-sig') });
       return new Response(JSON.stringify({ id: 'cliup_1', provider: 'codex', status: 'running', startedAt: '2026-09-03T00:00:00Z' }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -1151,7 +1166,7 @@ test('CLI manager client uses fixed provider routes and bearer authentication', 
     { url: 'https://agent.example.test/v2/providers/codex/upgrade', method: 'POST' },
     { url: 'https://agent.example.test/v2/providers/upgrades/cliup_1', method: 'GET' },
   ]);
-  assert.ok(requests.every((request) => request.authorization === 'Bearer secret-token'));
+  assert.ok(requests.every((request) => request.deviceId === testDevice.deviceId && request.signature));
 });
 
 test('ACP permission options preserve order and exact option ids', () => {

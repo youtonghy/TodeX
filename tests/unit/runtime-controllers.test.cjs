@@ -9,7 +9,7 @@ const { ConnectionError } = require(path.join(compiledDir, 'lib', 'connectionErr
 
 const settings = {
   serverUrl: 'http://127.0.0.1:7345',
-  authToken: 'secret',
+  deviceSecret: 'FRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRU',
   tenantId: 'local',
   encryptionProtocol: 'none',
   encryptionPublicKey: '',
