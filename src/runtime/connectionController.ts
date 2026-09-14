@@ -9,6 +9,7 @@ import {
 import { MAX_LEGACY_MESSAGE_BYTES } from '../lib/transport';
 import { createTransportCryptoSession, type TransportCryptoSession } from '../lib/transportCrypto';
 import { buildV2WebSocketUrlWithOptions } from '../lib/v2';
+import { deviceIdentityFromSecret } from '../lib/deviceAuth';
 import {
   CONNECTION_HEALTH_INTERVAL_MS,
   CONNECTION_HEALTH_TIMEOUT_MS,
@@ -72,6 +73,7 @@ const SOCKET_OPEN = 1;
 function sameSettings(left: ConnectionSettings, right: ConnectionSettings): boolean {
   return left.serverUrl === right.serverUrl
     && left.authToken === right.authToken
+    && left.deviceSecret === right.deviceSecret
     && left.tenantId === right.tenantId
     && left.encryptionProtocol === right.encryptionProtocol
     && left.encryptionPublicKey === right.encryptionPublicKey;
@@ -294,7 +296,11 @@ export class ConnectionController {
       return;
     }
 
-    const probe = await this.probeConnection({ serverUrl: inspected.origin, authToken: settings.authToken });
+    const probe = await this.probeConnection({
+      serverUrl: inspected.origin,
+      authToken: settings.authToken,
+      device: deviceIdentityFromSecret(settings.deviceSecret),
+    });
     if (!this.isCurrentGeneration(generation)) return;
     handlers.onProbe(probe);
     if (!probe.ok || probe.error) {
@@ -320,6 +326,7 @@ export class ConnectionController {
     const wsUrl = buildV2WebSocketUrlWithOptions(inspected.origin, {
       cryptoQueryString: crypto?.queryString,
       authToken: settings.authToken,
+      device: deviceIdentityFromSecret(settings.deviceSecret),
     });
     try {
       const socket = this.createSocket(wsUrl);

@@ -1,5 +1,6 @@
 import { buildHttpUrl, normalizeServerUrl } from './todex';
 import { ConnectionError, type ConnectionFailureCode } from './connectionError';
+import { deviceAuthHeaders, type DeviceIdentity } from './deviceAuth';
 import type { ProviderDescriptor } from './v2';
 
 export type ServerVersionInfo = {
@@ -56,6 +57,12 @@ export function tokenMatchesOrigin(tokenOrigin: string, serverUrl: string): bool
   return normalizeServerUrl(tokenOrigin) === normalizeServerUrl(serverUrl);
 }
 
+/** Whether a stored credential (token or device secret) was issued for this
+ * server origin. Empty stored origins are accepted for legacy imports. */
+export function credentialMatchesOrigin(credentialOrigin: string, serverUrl: string): boolean {
+  return tokenMatchesOrigin(credentialOrigin, serverUrl);
+}
+
 async function fetchText(
   fetchImpl: typeof fetch,
   url: string,
@@ -92,6 +99,7 @@ function classifyHttp(response: Response, endpoint: string): ConnectionError {
 export async function probeBackendConnection(options: {
   serverUrl: string;
   authToken?: string;
+  device?: DeviceIdentity | null;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
 }): Promise<BackendProbeResult> {
@@ -115,12 +123,23 @@ export async function probeBackendConnection(options: {
   if (options.authToken) {
     headers.set('Authorization', `Bearer ${options.authToken}`);
   }
+  // Device credentials sign each request: the signature binds the path.
+  const device = options.device ?? null;
+  const headersFor = (path: string): Headers => {
+    const signed = new Headers(headers);
+    if (device) {
+      for (const [name, value] of Object.entries(deviceAuthHeaders(device, 'GET', path))) {
+        signed.set(name, value);
+      }
+    }
+    return signed;
+  };
 
   try {
     const versionResponse = await fetchText(
       fetchImpl,
       buildHttpUrl(origin, '/v2/version'),
-      { headers },
+      { headers: headersFor('/v2/version') },
       timeoutMs,
     );
     if (!versionResponse.ok) {
@@ -142,7 +161,7 @@ export async function probeBackendConnection(options: {
     const healthResponse = await fetchText(
       fetchImpl,
       buildHttpUrl(origin, '/health'),
-      { headers },
+      { headers: headersFor('/health') },
       timeoutMs,
     );
     if (!healthResponse.ok) {
@@ -153,7 +172,7 @@ export async function probeBackendConnection(options: {
     const providersResponse = await fetchText(
       fetchImpl,
       buildHttpUrl(origin, '/v2/providers'),
-      { headers },
+      { headers: headersFor('/v2/providers') },
       timeoutMs,
     );
     if (!providersResponse.ok) {

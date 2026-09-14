@@ -2,7 +2,10 @@ export type AppTab = 'chat' | 'settings';
 
 export type ConnectionSettings = {
   serverUrl: string;
-  authToken: string;
+  /** Legacy bearer token; device-identity signing supersedes it. */
+  authToken?: string;
+  /** Base64url Ed25519 seed issued during device pairing; '' when unpaired. */
+  deviceSecret: string;
   tenantId: string;
   encryptionProtocol: 'none' | 'x25519' | 'ml-kem-768';
   encryptionPublicKey: string;
@@ -18,7 +21,10 @@ export type BackendConnectionProfile = {
   id: string;
   name: string;
   serverUrl: string;
-  authToken: string;
+  /** Legacy bearer token; device-identity signing supersedes it. */
+  authToken?: string;
+  /** Base64url Ed25519 seed issued during device pairing; '' when unpaired. */
+  deviceSecret: string;
   tenantId: string;
   encryptionProtocol: ConnectionSettings['encryptionProtocol'];
   encryptionPublicKey: string;
@@ -804,6 +810,109 @@ export function mergeWorkspaceRecords(local: WorkspaceRecord[], remote: Workspac
       reasoningEffort: normalizeReasoningEffort(workspace.reasoningEffort) ?? null,
     }))
     .sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+export type KanbanTaskStatus = 'planned' | 'in-progress' | 'done';
+export const KANBAN_TASK_STATUSES: readonly KanbanTaskStatus[] = ['planned', 'in-progress', 'done'];
+
+export type KanbanTask = {
+  id: string;
+  workspaceId: string;
+  /** Local-only tag scoping the task to a backend connection; never synced. */
+  backendConnectionId?: string | null;
+  title: string;
+  description?: string;
+  dueDate?: string;
+  status: KanbanTaskStatus;
+  conversationId?: string;
+  createdAt: number;
+  updatedAt: number;
+  /** Tombstone timestamp; deletions sync through it instead of disappearing. */
+  deletedAt?: number;
+};
+
+const KANBAN_DUE_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+function normalizeKanbanTaskStatus(value: string): KanbanTaskStatus {
+  return (KANBAN_TASK_STATUSES as readonly string[]).includes(value)
+    ? (value as KanbanTaskStatus)
+    : 'planned';
+}
+
+export function normalizeKanbanTask(value: unknown): KanbanTask | null {
+  if (!isObject(value)) {
+    return null;
+  }
+  const id = stringField(value, ['id']).trim();
+  const workspaceId = stringField(value, ['workspaceId', 'workspace_id']).trim();
+  const title = stringField(value, ['title']).trim();
+  if (!id || !workspaceId || !title) {
+    return null;
+  }
+  const now = Date.now();
+  const createdAt = numberField(value, ['createdAt', 'created_at']) || now;
+  const updatedAt = numberField(value, ['updatedAt', 'updated_at']) || createdAt;
+  const deletedAt = numberField(value, ['deletedAt', 'deleted_at']);
+  const description = stringField(value, ['description']).trim();
+  const dueDate = stringField(value, ['dueDate', 'due_date']).trim();
+  const conversationId = stringField(value, ['conversationId', 'conversation_id']).trim();
+  return {
+    id,
+    workspaceId,
+    backendConnectionId: stringField(value, ['backendConnectionId', 'backend_connection_id']) || null,
+    title,
+    ...(description ? { description } : {}),
+    ...(dueDate && KANBAN_DUE_DATE_PATTERN.test(dueDate) ? { dueDate } : {}),
+    status: normalizeKanbanTaskStatus(stringField(value, ['status'])),
+    ...(conversationId ? { conversationId } : {}),
+    createdAt,
+    updatedAt,
+    ...(deletedAt ? { deletedAt } : {}),
+  };
+}
+
+export function parseKanbanSyncResponse(value: unknown): KanbanTask[] {
+  const rawTasks = Array.isArray(value)
+    ? value
+    : isObject(value) && Array.isArray(value.tasks)
+      ? value.tasks
+      : [];
+  return rawTasks
+    .map(normalizeKanbanTask)
+    .filter((task): task is KanbanTask => Boolean(task));
+}
+
+export function prepareKanbanSyncPayload(tasks: KanbanTask[]): KanbanTask[] {
+  return tasks
+    .map(normalizeKanbanTask)
+    .filter((task): task is KanbanTask => Boolean(task))
+    .map((task) => ({ ...task, backendConnectionId: undefined }))
+    .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+}
+
+/** Last-writer-wins merge by task id; remote wins `updatedAt` ties so
+ * concurrent editors converge. Tombstones survive so deletions propagate. */
+export function mergeKanbanTasks(local: KanbanTask[], remote: KanbanTask[]): KanbanTask[] {
+  const byId = new Map<string, KanbanTask>();
+  const upsert = (candidate: unknown, preferCandidateOnTie: boolean) => {
+    const task = normalizeKanbanTask(candidate);
+    if (!task) {
+      return;
+    }
+    const existing = byId.get(task.id);
+    if (
+      !existing
+      || task.updatedAt > existing.updatedAt
+      || (preferCandidateOnTie && task.updatedAt === existing.updatedAt)
+    ) {
+      byId.set(task.id, task);
+    }
+  };
+  local.forEach((task) => upsert(task, false));
+  remote.forEach((task) => upsert(task, true));
+  return [...byId.values()].sort(
+    (left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id),
+  );
 }
 
 export function nextWorkspaceSortOrder(workspaces: WorkspaceRecord[]): number {

@@ -5,7 +5,7 @@ const {
   extractThreadIdFromEvent,
   inferApprovalResponseType,
   normalizeThreadId,
-} = require('/tmp/todex-protocol-check/todex.js');
+} = require('../dist/protocol-check/todex.js');
 
 const cases = [
   [

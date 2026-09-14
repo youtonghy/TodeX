@@ -39,6 +39,7 @@ test('normalizes backend profiles and legacy field aliases', () => {
     name: 'Team backend',
     serverUrl: 'http://127.0.0.1:7345',
     authToken: 'secret',
+    deviceSecret: '',
     tenantId: 'team',
     encryptionProtocol: 'ml-kem-768',
     encryptionPublicKey: 'pk',

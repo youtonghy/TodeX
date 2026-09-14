@@ -2,6 +2,7 @@ import { controlFrame } from './conversationCommands';
 import { buildHttpUrl, utf8ByteLength } from './todex';
 import { ConnectionError } from './connectionError';
 import { MetricsCollector, type ConnectionMetrics } from './connectionMetrics';
+import { deviceAuthHeaders, deviceAuthQuery, type DeviceIdentity } from './deviceAuth';
 
 /**
  * Client-side guard for `conversation.*` commands sent over /v2/ws. The
@@ -537,6 +538,8 @@ export type V2Message = {
 export type V2ApiOptions = {
   serverUrl: string;
   authToken?: string;
+  /** Paired device identity; every request is signed `todex.device-auth.v1`. */
+  device?: DeviceIdentity | null;
   fetchImpl?: typeof fetch;
   timeout?: number;
 };
@@ -621,6 +624,9 @@ export type V2WebSocketUrlOptions = {
   cryptoQueryString?: string;
   /** Bearer token; browsers cannot set WebSocket headers, so it rides as `access_token`. */
   authToken?: string;
+  /** Paired device identity; browsers cannot set WebSocket headers, so the
+   * credential rides as a signed query covering the crypto parameters. */
+  device?: DeviceIdentity | null;
 };
 
 export function buildV2WebSocketUrlWithOptions(
@@ -637,6 +643,17 @@ export function buildV2WebSocketUrlWithOptions(
   if (options.authToken) {
     url.searchParams.set('access_token', options.authToken);
   }
+  if (options.device) {
+    const signed = deviceAuthQuery(
+      options.device,
+      'GET',
+      url.pathname,
+      url.search.replace(/^\?/, ''),
+    );
+    for (const [key, value] of Object.entries(signed)) {
+      url.searchParams.set(key, value);
+    }
+  }
   return url.toString();
 }
 
@@ -647,12 +664,14 @@ export function buildV2WebSocketUrlWithToken(serverUrl: string, authToken?: stri
 export class V2ApiClient {
   private readonly serverUrl: string;
   private readonly authToken: string;
+  private readonly device: DeviceIdentity | null;
   private readonly fetchImpl: typeof fetch;
   private readonly timeout: number;
 
   constructor(options: V2ApiOptions) {
     this.serverUrl = options.serverUrl;
     this.authToken = options.authToken ?? '';
+    this.device = options.device ?? null;
     // Browser fetch requires its Window receiver when called outside `window`.
     this.fetchImpl = options.fetchImpl ?? (typeof window !== 'undefined' ? fetch.bind(window) : fetch);
     this.timeout = options.timeout ?? 30000;
@@ -817,6 +836,14 @@ export class V2ApiClient {
       headers.set('Accept', 'application/json');
       if (init.body) headers.set('Content-Type', 'application/json');
       if (this.authToken) headers.set('Authorization', `Bearer ${this.authToken}`);
+      if (this.device) {
+        const body = typeof init.body === 'string' ? new TextEncoder().encode(init.body) : new Uint8Array();
+        for (const [name, value] of Object.entries(
+          deviceAuthHeaders(this.device, init.method ?? 'GET', pathname, body),
+        )) {
+          headers.set(name, value);
+        }
+      }
 
       const response = await this.fetchImpl(buildHttpUrl(this.serverUrl, pathname), {
         ...init,
@@ -870,6 +897,8 @@ export class V2ApiClient {
 export type V2SocketOptions = {
   serverUrl: string;
   authToken?: string;
+  /** Paired device identity; credentials ride the signed WS query. */
+  device?: DeviceIdentity | null;
   WebSocketImpl?: typeof WebSocket;
   /** Return a promise for asynchronous projection; cursor advances only after success. */
   onEvent?: (event: ConversationEvent) => unknown;
@@ -919,13 +948,17 @@ export class V2ConversationSocket {
     this.closedExplicitly = false;
     this.options.onStatus?.('connecting');
     const WebSocketImpl = this.options.WebSocketImpl ?? WebSocket;
+    const url = buildV2WebSocketUrlWithOptions(this.options.serverUrl, {
+      authToken: this.options.authToken,
+      device: this.options.device,
+    });
     let socket: WebSocket;
     try {
-      socket = new WebSocketImpl(buildV2WebSocketUrlWithToken(this.options.serverUrl, this.options.authToken), this.options.authToken
+      socket = new WebSocketImpl(url, this.options.authToken
         ? { headers: { Authorization: `Bearer ${this.options.authToken}` } } as never : undefined);
     } catch {
       // Browser WebSocket implementations reject React Native's header options.
-      socket = new WebSocketImpl(buildV2WebSocketUrlWithToken(this.options.serverUrl, this.options.authToken));
+      socket = new WebSocketImpl(url);
     }
     this.socket = socket;
     this.eventApplications.clear();

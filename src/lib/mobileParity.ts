@@ -212,6 +212,9 @@ export function normalizeBackendConnectionProfile(
     authToken: typeof raw.authToken === 'string'
       ? raw.authToken
       : typeof raw.auth_token === 'string' ? raw.auth_token : '',
+    deviceSecret: typeof raw.deviceSecret === 'string'
+      ? raw.deviceSecret
+      : typeof raw.device_secret === 'string' ? raw.device_secret : '',
     tenantId: readString(raw, ['tenantId', 'tenant_id']) || 'local',
     encryptionProtocol: normalizeEncryptionProtocol(raw.encryptionProtocol ?? raw.encryption_protocol),
     encryptionPublicKey: typeof raw.encryptionPublicKey === 'string'
@@ -255,6 +258,7 @@ export function profileFromSettings(
     name: name.trim() || '默认后端',
     serverUrl: normalizeProfileServerUrl(settings.serverUrl),
     authToken: settings.authToken,
+    deviceSecret: settings.deviceSecret,
     tenantId: settings.tenantId,
     encryptionProtocol: normalizeEncryptionProtocol(settings.encryptionProtocol),
     encryptionPublicKey: settings.encryptionPublicKey,
@@ -275,6 +279,7 @@ export function settingsFromProfile(
     ...current,
     serverUrl: normalized.serverUrl,
     authToken: normalized.authToken,
+    deviceSecret: normalized.deviceSecret,
     tenantId: normalized.tenantId,
     encryptionProtocol: normalized.encryptionProtocol,
     encryptionPublicKey: normalized.encryptionPublicKey,

@@ -281,7 +281,7 @@ export function SettingsScreen({
         />
         <FormField
           label="Auth token"
-          value={settings.authToken}
+          value={settings.authToken ?? ''}
           onChangeText={(value) => setSettings((current) => ({ ...current, authToken: value }))}
           placeholder="Bearer token"
           secureTextEntry

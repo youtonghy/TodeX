@@ -1163,7 +1163,7 @@ export default function App() {
       return;
     }
     void saveJson(SETTINGS_STORAGE_KEY, toPersistedSettings(settings));
-    void saveSecret(TOKEN_STORAGE_KEY, settings.authToken);
+    void saveSecret(TOKEN_STORAGE_KEY, settings.authToken ?? '');
     void saveSecret(TOKEN_ORIGIN_STORAGE_KEY, settings.authToken ? normalizeServerUrl(settings.serverUrl) : '');
   }, [hydrated, settings]);
 
@@ -1304,10 +1304,11 @@ export default function App() {
         const activeSnapshot = snapshot.filter((workspace) =>
           !workspace.backendConnectionId || workspace.backendConnectionId === activeBackendConnectionIdRef.current,
         );
+        const body = JSON.stringify({ workspaces: prepareWorkspaceSyncPayload(activeSnapshot) });
         const response = await fetch(buildHttpUrl(settings.serverUrl, '/v2/workspaces'), {
           method: 'PUT',
-          headers: authHeaders(settings, { 'Content-Type': 'application/json' }),
-          body: JSON.stringify({ workspaces: prepareWorkspaceSyncPayload(activeSnapshot) }),
+          headers: authHeaders(settings, 'PUT', '/v2/workspaces', new TextEncoder().encode(body), { 'Content-Type': 'application/json' }),
+          body,
         });
         if (!response.ok) {
           throw new Error(`workspace sync returned ${response.status}`);
